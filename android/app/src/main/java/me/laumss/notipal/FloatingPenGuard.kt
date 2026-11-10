@@ -15,7 +15,6 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
-
 internal object FloatingPenGuard {
     const val NOTE_APP_NAME = "note_notipal"
     const val DOC_APP_NAME = "doc_notipal"
@@ -26,10 +25,11 @@ internal object FloatingPenGuard {
     private val worker = Executors.newSingleThreadScheduledExecutor()
     private val pendingAppClears = ConcurrentLinkedQueue<String>()
     private val rects = linkedMapOf<String, Rect>()
-    
-    
+
     private val logicalRects = linkedMapOf<String, Rect>()
     private val views = linkedMapOf<String, WeakReference<View>>()
+
+    private val externalLogical = linkedMapOf<String, Rect>()
     private val viewRotationEpochs = linkedMapOf<String, Long>()
     private val generation = AtomicLong()
 
@@ -38,7 +38,9 @@ internal object FloatingPenGuard {
         val payload: List<Rect>,
         val appName: String,
         val logLine: String,
-        val attempt: Int = 1
+        val attempt: Int = 1,
+
+        val replaceTable: Boolean = false
     )
     private val pendingSend = AtomicReference<PendingSend?>(null)
 
@@ -47,23 +49,20 @@ internal object FloatingPenGuard {
     private var parkActive = false
     private val parkedKeys = linkedSetOf<String>()
     private var followerRunning = false
-    
+
     private val fullScreenOwners = CopyOnWriteArraySet<String>()
-    
+
     private val ownerMaxHoldTimers = HashMap<String, Runnable>()
     private var screenWidth = 1920
     private var screenHeight = 2560
 
-    
     private val lastGeometry = HashMap<String, IntArray>()
     private var geometryEpoch = 0
 
-    
-    
     private val ownershipToken = "${android.os.Process.myPid()}-${System.nanoTime()}"
     @Volatile private var ownershipFile: java.io.File? = null
     @Volatile private var ownershipLost = false
-    
+
     @Volatile private var ownershipCheckedModified = 0L
 
     fun claimOwnership(dir: java.io.File) {
@@ -87,13 +86,12 @@ internal object FloatingPenGuard {
         if (next == appName) return
         val previous = appName
         if (document) {
-            
-            
+
             resetHostBaseline("enter document")
             pendingSend.set(null)
         }
         appName = next
-        
+
         queueAppContextClear(previous)
         markHostTableDirty()
         Log.i(TAG, "pen-area app context changed: $previous -> $next")
@@ -106,7 +104,7 @@ internal object FloatingPenGuard {
     private fun queueAppContextClear(name: String) {
         pendingAppClears.add(name)
         worker.execute {
-            if (isOwner()) clearQueuedAppContexts()
+            if (isOwner() && !writesYielded) clearQueuedAppContexts()
         }
     }
 
@@ -148,7 +146,7 @@ internal object FloatingPenGuard {
             if (hostBaselineReady) {
                 false
             } else {
-                
+
                 hostBaselineReady = true
                 true
             }
@@ -165,7 +163,6 @@ internal object FloatingPenGuard {
         main.postDelayed(hostBootstrapFallback, PenGuardTiming.HOST_BOOTSTRAP_FALLBACK_MS)
     }
 
-    
     fun onDisplayChanged(
         logicalWidth: Int,
         logicalHeight: Int,
@@ -198,19 +195,19 @@ internal object FloatingPenGuard {
         screenHeight = naturalHeight
         displayStateReady = true
         if (changed) {
-            
+
             geometryEpoch++
             generation.incrementAndGet()
             pendingSend.set(null)
             synchronized(rects) {
                 hostSnapshot.clear()
-                
+
                 hostChromeLogical.clear()
                 hostBaselineReady = false
                 lastSentSnapshot.clear()
                 hostTableDirty = true
             }
-            
+
             if (parkedKeys.isNotEmpty()) {
                 if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "display change: drop parked=$parkedKeys")
                 synchronized(rects) { parkedKeys.forEach { rects.remove(it); logicalRects.remove(it) } }
@@ -228,30 +225,56 @@ internal object FloatingPenGuard {
             "natural=${naturalWidth}x${naturalHeight} baselineReset=$changed " +
             "rotationPending=$rotationPending tracked=${views.keys}")
 
-        
         views.toMap().forEach { (key, reference) ->
             reference.get()?.let { refresh(key, it) } ?: removeIfCurrent(key, reference)
         }
-        if (views.isEmpty() && fullScreenOwners.isNotEmpty() && changed) submitSnapshot()
+        if (changed && externalLogical.isNotEmpty()) {
+            externalLogical.forEach { (key, logical) -> putExternalLocked(key, logical) }
+            submitSnapshot()
+        } else if (views.isEmpty() && fullScreenOwners.isNotEmpty() && changed) submitSnapshot()
     }
 
-    
+    fun setExternalArea(key: String, logical: Rect?) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            val copy = logical?.let(::Rect)
+            main.post { setExternalArea(key, copy) }
+            return
+        }
+        if (logical == null) {
+            if (externalLogical.remove(key) == null) return
+            synchronized(rects) {
+                rects.remove(key)
+                logicalRects.remove(key)
+            }
+        } else {
+            if (externalLogical[key] == logical) return
+            externalLogical[key] = Rect(logical)
+            putExternalLocked(key, logical)
+        }
+        Log.i(TAG, "external area key=$key logical=$logical")
+        submitSnapshot()
+    }
+
+    private fun putExternalLocked(key: String, logical: Rect) {
+        val padded = Rect(logical.left - PAD_PX, logical.top - PAD_PX, logical.right + PAD_PX, logical.bottom + PAD_PX)
+        val natural = PenAreaGeometry.toNaturalDisplayRect(padded, displayRotation, screenWidth, screenHeight)
+        synchronized(rects) {
+            logicalRects[key] = padded
+            if (natural.isEmpty) rects.remove(key) else rects[key] = natural
+        }
+    }
+
     private val lastSnapshot = mutableListOf<Rect>()
 
-    
     private val hostSnapshot = mutableListOf<Rect>()
 
-    
     private val hostChromeLogical = mutableListOf<Rect>()
 
-    
     private val lastSentSnapshot = mutableListOf<Rect>()
 
-    
     private val lastQueuedSnapshot = mutableListOf<Rect>()
     private var lastQueuedAppName: String? = null
 
-    
     private var hostTableDirty = true
 
     private var hostBaselineReady = false
@@ -260,30 +283,103 @@ internal object FloatingPenGuard {
         synchronized(rects) { hostTableDirty = true }
     }
 
-    
+    @Volatile private var keyboardShown = false
+    @Volatile private var keyboardExpected = false
+
+    @Volatile private var quickSwitchOpen = false
+    private val tableYielded get() = keyboardShown || keyboardExpected || quickSwitchOpen
+
+    private val writesYielded get() = tableYielded || MosaicLink.isBoardVisible()
+
+    private var ownKeyboard = false
+
+    private val keyboardExpectTimeout = Runnable { endKeyboardExpect("no broadcast came") }
+
+    fun expectKeyboard() {
+        main.removeCallbacks(keyboardExpectTimeout)
+        main.postDelayed(keyboardExpectTimeout, PenGuardTiming.KEYBOARD_EXPECT_MAX_MS)
+        if (keyboardExpected) return
+        keyboardExpected = true
+        pendingSend.set(null)
+        Log.i(TAG, "keyboard expected: table writes hold")
+    }
+
+    fun endKeyboardExpect(reason: String) {
+        main.removeCallbacks(keyboardExpectTimeout)
+        if (!keyboardExpected) return
+        keyboardExpected = false
+        Log.i(TAG, "keyboard expect over: $reason")
+        if (!keyboardShown) resumeTable(reason)
+    }
+
+    fun onSystemKeyboard(shown: Boolean) {
+        keyboardShown = shown
+        main.removeCallbacks(keyboardExpectTimeout)
+        keyboardExpected = false
+        if (shown) {
+            ownKeyboard = ToolRegistry.anyPanelShowing()
+
+            pendingSend.set(null)
+            Log.i(TAG, "keyboard shown: table left to it own=$ownKeyboard ${debugState()}")
+            return
+        }
+
+        synchronized(rects) {
+            lastSentSnapshot.clear()
+            lastSentSnapshot.add(Rect(0, 0, screenWidth, screenHeight))
+        }
+        val own = ownKeyboard
+        ownKeyboard = false
+
+        if (own && !hasActiveRects() && !MosaicLink.isBoardVisible()) {
+            markHostTableDirty()
+            Log.i(TAG, "keyboard hidden, nothing of ours left: table handed back")
+            submitSnapshot(keyboardLeft = true)
+            return
+        }
+        resumeTable("keyboard hidden")
+    }
+
+    fun setQuickSwitchOpen(open: Boolean) {
+        if (quickSwitchOpen == open) return
+        quickSwitchOpen = open
+        if (open) {
+
+            pendingSend.set(null)
+            Log.i(TAG, "quick switch open: table left to it ${debugState()}")
+        } else resumeTable("quick switch closed")
+    }
+
+    private fun resumeTable(reason: String) {
+        markHostTableDirty()
+        if (!hasActiveRects()) {
+            dropIdleGuardState(reason)
+            return
+        }
+        Log.i(TAG, "table back from the keyboard: $reason")
+        submitSnapshot()
+        HostPenSignals.scheduleReassert(reason)
+    }
+
     fun noteHostTableRewritten(): Unit = markHostTableDirty()
 
     fun hasActiveRects(): Boolean = synchronized(rects) {
         fullScreenOwners.isNotEmpty() || rects.isNotEmpty()
     }
 
-    
     fun dropIdleGuardState(reason: String) {
         if (Looper.myLooper() != Looper.getMainLooper()) {
             main.post { dropIdleGuardState(reason) }
             return
         }
         synchronized(rects) {
-            
+
             if (rects.isNotEmpty() || fullScreenOwners.isNotEmpty()) return
             if (lastSnapshot.isEmpty()) return
             lastSnapshot.clear()
             Log.i(TAG, "idle guard dropped reason=$reason ${debugStateLocked()}")
         }
     }
-
-    fun hasBlockingOwnerForRotation(): Boolean =
-        fullScreenOwners.any { it != PenGuardOwner.ROTATION_SYNC }
 
     fun beginHostBootstrap(reason: String) {
         val reused = synchronized(rects) {
@@ -310,7 +406,6 @@ internal object FloatingPenGuard {
         }
     }
 
-    
     fun resetHostBaseline(reason: String) {
         synchronized(rects) {
             hostSnapshot.clear()
@@ -321,7 +416,6 @@ internal object FloatingPenGuard {
         if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "host baseline reset reason=$reason")
     }
 
-    
     fun setHostChromeAreas(logical: List<Rect>, reason: String) {
         if (Looper.myLooper() != Looper.getMainLooper()) {
             val copy = logical.map(::Rect)
@@ -341,8 +435,12 @@ internal object FloatingPenGuard {
         if (hasActiveRects()) submitSnapshot()
     }
 
-    
     fun updateHostPenAreas(incoming: List<Rect>, commitBaseline: Boolean = true): Boolean {
+
+        if (tableYielded) {
+            markHostTableDirty()
+            return false
+        }
         val raw = PenAreaGeometry.normalize(incoming, keepClearSentinel = true)
         var transientFullScreen = false
         var writableReset = false
@@ -354,9 +452,7 @@ internal object FloatingPenGuard {
             hostTableDirty = true
             writableReset = PenAreaGeometry.isWritableReset(raw)
             if (writableReset) {
-                
-                
-                
+
                 hostSnapshot.clear()
                 hostBaselineReady = false
                 baselineInvalidated = true
@@ -364,10 +460,8 @@ internal object FloatingPenGuard {
             val normalized = raw.filterNot(PenAreaGeometry::isClearSentinel)
             transientFullScreen = normalized.size == 1 && isScreenCovering(normalized[0])
             if (commitBaseline && !writableReset && !transientFullScreen && normalized.isNotEmpty()) {
-                
-                
-                if (appName != DOC_APP_NAME && displayRotation == Surface.ROTATION_0 &&
-                    normalized.size == 1 &&
+
+                if (appName != DOC_APP_NAME && normalized.size == 1 &&
                     hostSnapshot.contains(normalized[0]) && hostChromeLogical.isEmpty()) {
                     val bottom = hostSnapshot.filter {
                         it.top >= logicalScreenHeight * 4 / 5 &&
@@ -384,9 +478,7 @@ internal object FloatingPenGuard {
             true
         }
         if (baselineInvalidated) {
-            
-            
-            
+
             pendingSend.set(null)
             if (BuildConfig.ENABLE_DEBUG) {
                 Log.i(TAG, "host baseline invalidated by writable reset")
@@ -405,7 +497,7 @@ internal object FloatingPenGuard {
         }
         if (becameReady) {
             main.post {
-                
+
                 main.removeCallbacks(hostBootstrapFallback)
                 cancelMaxHold(PenGuardOwner.HOST_BOOTSTRAP)
                 fullScreenOwners.remove(PenGuardOwner.HOST_BOOTSTRAP)
@@ -425,7 +517,6 @@ internal object FloatingPenGuard {
             "chrome=${hostChromeLogical.map(::Rect)} " +
             "lastSent=${lastSentSnapshot.map(::Rect)}"
 
-    
     fun reassertDocumentAreas(reason: String) {
         if (appName == DOC_APP_NAME && hasActiveRects()) reassert(reason)
     }
@@ -434,6 +525,10 @@ internal object FloatingPenGuard {
         appName == DOC_APP_NAME && inkling.isNotEmpty()
 
     fun reassert(reason: String) {
+        if (writesYielded) {
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "reassert skipped: table yielded reason=$reason")
+            return
+        }
         if (!hasActiveRects()) {
             dropIdleGuardState("reassert:$reason")
             if (BuildConfig.ENABLE_DEBUG) {
@@ -479,7 +574,6 @@ internal object FloatingPenGuard {
         worker.execute { drainPendingSend() }
     }
 
-    
     private fun drainPendingSend() {
         val current = pendingSend.getAndSet(null)
         if (current == null) {
@@ -487,6 +581,10 @@ internal object FloatingPenGuard {
             return
         }
         if (!isOwner()) return
+        if (writesYielded) {
+            markHostTableDirty()
+            return
+        }
         clearQueuedAppContexts()
         synchronized(rects) {
             lastSentSnapshot.clear()
@@ -495,8 +593,11 @@ internal object FloatingPenGuard {
         Log.i(TAG, if (current.attempt == 1) current.logLine
             else "retry attempt=${current.attempt} ${current.logLine}")
         val result = try {
-            if (current.clear) PenDisableClient.clearDisableAreas(current.appName)
-            else PenDisableClient.sendDisableAreas(current.appName, current.payload)
+            when {
+                current.replaceTable -> PenDisableClient.releaseDisableAreas(current.appName)
+                current.clear -> PenDisableClient.clearDisableAreas(current.appName)
+                else -> PenDisableClient.sendDisableAreas(current.appName, current.payload)
+            }
         } catch (e: Exception) {
             Log.e(TAG, "send failed: ${e.message}")
             PenDisableClient.Result.FAILED
@@ -505,7 +606,7 @@ internal object FloatingPenGuard {
             PenDisableClient.Result.OK -> Unit
             PenDisableClient.Result.NO_SERVICE -> {
                 markHostTableDirty()
-                
+
                 val retry = current.copy(attempt = current.attempt + 1)
                 if (current.attempt < PenGuardTiming.BINDER_RETRY_ATTEMPTS &&
                     pendingSend.compareAndSet(null, retry)) {
@@ -557,7 +658,7 @@ internal object FloatingPenGuard {
         val epoch = activeRotationEpoch
         activeRotationEpoch = 0L
         viewRotationEpochs.clear()
-        Log.i(TAG, "rotation cancelled epoch=$epoch reason=$reason")
+        Log.i(TAG, "rotation sync end epoch=$epoch reason=$reason")
         setFullScreenActive(false, PenGuardOwner.ROTATION_SYNC)
     }
 
@@ -571,7 +672,6 @@ internal object FloatingPenGuard {
             keepClearSentinel = false
         )
 
-    
     private fun hostRectToNatural(r: Rect): Rect {
         if (displayRotation == Surface.ROTATION_0) return Rect(r)
         val fitsNatural = r.right <= screenWidth && r.bottom <= screenHeight
@@ -602,7 +702,7 @@ internal object FloatingPenGuard {
     fun track(key: String, view: View) {
         views[key] = WeakReference(view)
         viewRotationEpochs.remove(key)
-        
+
         if (Looper.myLooper() == Looper.getMainLooper()) {
             pendingRemovals.remove(key)?.let(main::removeCallbacks)
             parkedKeys.remove(key)
@@ -633,23 +733,26 @@ internal object FloatingPenGuard {
             return
         }
         if (views[key]?.get() !== view) return
-        
-        if (!view.isAttachedToWindow) return
-        
+
+        if (!view.isAttachedToWindow) {
+            markRotationEpoch(key, rotationEpoch)
+            return
+        }
         if (!view.isShown) {
             releaseRect(key)
+            markRotationEpoch(key, rotationEpoch)
             return
         }
         pendingRemovals.remove(key)?.let(main::removeCallbacks)
         parkedKeys.remove(key)
         val screen = IntArray(2).also(view::getLocationOnScreen)
 
-        
         if (rotationEpoch == null && displayStateReady) {
             val cached = lastGeometry[key]
             if (cached != null && cached[0] == screen[0] && cached[1] == screen[1] &&
                 cached[2] == view.width && cached[3] == view.height &&
                 cached[4] == geometryEpoch && synchronized(rects) { rects.containsKey(key) }) {
+                if (key == "toolbar") publishParkedToolbar()
                 return
             }
         }
@@ -668,21 +771,26 @@ internal object FloatingPenGuard {
         }
         if (view.width <= 0 || view.height <= 0) return
 
-        
         val logicalRect = Rect(
             (screen[0] - PAD_PX).coerceAtLeast(0),
             (screen[1] - PAD_PX).coerceAtLeast(0),
             (screen[0] + view.width + PAD_PX).coerceAtMost(effectiveLogicalWidth),
             (screen[1] + view.height + PAD_PX).coerceAtMost(effectiveLogicalHeight)
         )
-        if (logicalRect.isEmpty) return
+        if (logicalRect.isEmpty) {
+            markRotationEpoch(key, rotationEpoch)
+            return
+        }
         val drawPathRect = PenAreaGeometry.toNaturalDisplayRect(
             logicalRect,
             rotation,
             effectiveNaturalWidth,
             effectiveNaturalHeight
         )
-        if (drawPathRect.isEmpty) return
+        if (drawPathRect.isEmpty) {
+            markRotationEpoch(key, rotationEpoch)
+            return
+        }
         if (views[key]?.get() !== view) return
         val changed = synchronized(rects) {
             logicalRects[key] = Rect(logicalRect)
@@ -692,11 +800,10 @@ internal object FloatingPenGuard {
             }
         }
         lastGeometry[key] = intArrayOf(screen[0], screen[1], view.width, view.height, geometryEpoch)
-        if (rotationEpoch != null && activeRotationEpoch == rotationEpoch) {
-            viewRotationEpochs[key] = rotationEpoch
-        }
-        if (!changed) return
+        markRotationEpoch(key, rotationEpoch)
+
         if (key == "toolbar") MosaicLink.publishToolbarRect(view.context, logicalRect)
+        if (!changed) return
         if (BuildConfig.ENABLE_DEBUG) {
             val window = IntArray(2).also(view::getLocationInWindow)
             Log.i(TAG, "refresh key=$key screen=${screen[0]},${screen[1]} " +
@@ -709,7 +816,10 @@ internal object FloatingPenGuard {
         submitSnapshot()
     }
 
-    
+    private fun markRotationEpoch(key: String, rotationEpoch: Long?) {
+        if (rotationEpoch != null && activeRotationEpoch == rotationEpoch) viewRotationEpochs[key] = rotationEpoch
+    }
+
     private fun readUserRotation(view: View): Int = try {
         Settings.System.getInt(
             view.context.contentResolver,
@@ -718,6 +828,11 @@ internal object FloatingPenGuard {
         )
     } catch (_: Exception) {
         Surface.ROTATION_0
+    }
+
+    private fun publishParkedToolbar() {
+        val rect = synchronized(rects) { logicalRects["toolbar"]?.let(::Rect) } ?: return
+        MosaicLink.publishToolbarRect(null, rect)
     }
 
     fun remove(key: String) {
@@ -731,7 +846,6 @@ internal object FloatingPenGuard {
         releaseRect(key)
     }
 
-    
     private fun releaseRect(key: String) {
         if (key == "toolbar") MosaicLink.publishToolbarRect(null, null)
         if (!synchronized(rects) { rects.containsKey(key) }) return
@@ -759,7 +873,6 @@ internal object FloatingPenGuard {
         }
     }
 
-    
     fun beginPark(reason: String) {
         if (Looper.myLooper() != Looper.getMainLooper()) {
             main.post { beginPark(reason) }
@@ -767,12 +880,11 @@ internal object FloatingPenGuard {
         }
         if (!parkActive && BuildConfig.ENABLE_DEBUG) Log.i(TAG, "park begin reason=$reason")
         parkActive = true
-        
+
         for ((key, r) in pendingRemovals) { main.removeCallbacks(r); parkedKeys.add(key) }
         pendingRemovals.clear()
     }
 
-    
     fun endPark(reason: String, flush: Boolean = false) {
         if (Looper.myLooper() != Looper.getMainLooper()) {
             main.post { endPark(reason, flush) }
@@ -808,7 +920,6 @@ internal object FloatingPenGuard {
         remove(key)
     }
 
-    
     fun setFullScreenActive(active: Boolean, owner: String) {
         if (Looper.myLooper() != Looper.getMainLooper()) {
             main.post { setFullScreenActive(active, owner) }
@@ -818,10 +929,11 @@ internal object FloatingPenGuard {
         val changed = if (active) fullScreenOwners.add(owner) else fullScreenOwners.remove(owner)
         if (!changed) return
         Log.i(TAG, "fullScreen=${fullScreenOwners.isNotEmpty()} owner=$owner active=$active owners=$fullScreenOwners")
-        submitSnapshot(restoringHost = !active && owner == PenGuardOwner.PLUGIN_HOST)
+
+        submitSnapshot(restoringHost = !active &&
+            (owner == PenGuardOwner.PLUGIN_HOST || owner == PenGuardOwner.MOSAIC_PAD || owner == PenGuardOwner.LEXI))
     }
 
-    
     fun releaseScopes(reason: String, vararg scopes: PenGuardScope) {
         if (Looper.myLooper() != Looper.getMainLooper()) {
             val copy = scopes.copyOf()
@@ -856,7 +968,6 @@ internal object FloatingPenGuard {
         ownerMaxHoldTimers.remove(owner)?.let(main::removeCallbacks)
     }
 
-    
     private fun publishOverlayRectsToMosaic(force: Boolean = false) {
         val out = synchronized(rects) {
             val hasFullScreen = fullScreenOwners.any { it != PenGuardOwner.ROTATION_SYNC }
@@ -872,7 +983,27 @@ internal object FloatingPenGuard {
         MosaicLink.publishOverlayRects(null, out, force = force)
     }
 
-    
+    internal fun onMosaicHidden(reason: String) {
+        markHostTableDirty()
+        if (hasActiveRects()) reassert("mosaic hidden:$reason")
+    }
+
+    internal fun publishToLexi() {
+        if (!LexiLink.isSmallOpen()) return
+        val out = synchronized(rects) {
+            val hasFullScreen = fullScreenOwners.any { it != PenGuardOwner.ROTATION_SYNC && it != PenGuardOwner.LEXI }
+            if (hasFullScreen) {
+                listOf(Rect(0, 0, logicalScreenWidth, logicalScreenHeight))
+            } else {
+                logicalRects.entries
+                    .filter { !it.key.startsWith("ext:") }
+                    .map { Rect(it.value) }
+                    .distinctBy { listOf(it.left, it.top, it.right, it.bottom) }
+            }
+        }
+        LexiLink.publishAreas(out)
+    }
+
     internal fun republishMosaicSnapshot(reason: String) {
         if (Looper.myLooper() != Looper.getMainLooper()) {
             main.post { republishMosaicSnapshot(reason) }
@@ -893,10 +1024,9 @@ internal object FloatingPenGuard {
         Log.i(TAG, "Mosaic snapshot republished reason=$reason toolbar=$toolbarRect")
     }
 
-    private fun submitSnapshot(restoringHost: Boolean = false) {
+    private fun submitSnapshot(restoringHost: Boolean = false, keyboardLeft: Boolean = false) {
         val state = synchronized(rects) {
-            
-            
+
             val hadFullScreen = isFullScreenSnapshot(lastSnapshot) ||
                 lastSentSnapshot.any(::isScreenCovering)
             val inkling = if (fullScreenOwners.isNotEmpty()) {
@@ -911,10 +1041,15 @@ internal object FloatingPenGuard {
                 hadFullScreen
             )
         }
-        
-        
-        
+
         if (MosaicLink.isBoardVisible()) publishOverlayRectsToMosaic()
+        publishToLexi()
+
+        if (writesYielded) {
+            markHostTableDirty()
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "snapshot held: table yielded inkling=${state.first.first}")
+            return
+        }
 
         val inklingSnapshot = state.first.first
         val outgoing = state.first.second
@@ -922,8 +1057,7 @@ internal object FloatingPenGuard {
         val leavingFullScreen = !isFullScreenSnapshot(inklingSnapshot) && state.second
         if (restoringHost && !isFullScreenSnapshot(inklingSnapshot) &&
             (inklingSnapshot.isEmpty() || !baselineReady)) {
-            
-            
+
             pendingSend.set(null)
             synchronized(rects) {
                 lastQueuedSnapshot.clear()
@@ -941,13 +1075,13 @@ internal object FloatingPenGuard {
             }
             return
         }
-        
-        
+
         val clear = outgoing.isEmpty()
+
+        val replaceTable = clear && (baselineReady || keyboardLeft)
         val payload = if (clear) listOf(PenAreaGeometry.clearSentinel()) else outgoing
         val sendAppName = appName
-        
-        
+
         val duplicate = synchronized(rects) {
             !hostTableDirty && lastQueuedAppName == sendAppName &&
                 PenAreaGeometry.sameRects(payload, lastQueuedSnapshot)
@@ -971,7 +1105,8 @@ internal object FloatingPenGuard {
             else -> "merged"
         }
         enqueueSend(PendingSend(clear = clear, payload = payload, appName = sendAppName,
-            logLine = "snapshot sending version=$version mode=$mode " +
-                "inkling=$inklingSnapshot outgoing=$outgoing payload=$payload"))
+            logLine = "snapshot sending version=$version mode=$mode replaceTable=$replaceTable " +
+                "inkling=$inklingSnapshot outgoing=$outgoing payload=$payload",
+            replaceTable = replaceTable))
     }
 }

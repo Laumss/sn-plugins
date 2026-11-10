@@ -17,7 +17,6 @@ import android.widget.PopupWindow
 import android.widget.ScrollView
 import android.widget.TextView
 
-
 object SelectField {
 
     class Refs(
@@ -39,7 +38,6 @@ object SelectField {
         copy.forEach { try { it.dismiss() } catch (_: Exception) {} }
     }
 
-    
     private class DashedHLine(ctx: Context) : View(ctx) {
         private val paint = Paint().apply {
             color = Color.BLACK
@@ -89,7 +87,7 @@ object SelectField {
             layoutParams = LinearLayout.LayoutParams(
                 0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
-        
+
         val list = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.WHITE)

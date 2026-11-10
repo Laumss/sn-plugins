@@ -8,36 +8,48 @@ import me.laumss.notipal.relay.model.RelayMessage
 import org.json.JSONArray
 import java.io.File
 
-
 class RelayInboxStore(private val context: Context) {
 
     companion object {
         private const val TAG = "RelayInbox"
         private const val FILE_NAME = "relay_inbox.json"
         private const val MAX_MESSAGES = 200
-        private const val MERGE_GAP_MS = 20_000L
         private const val SAVE_DEBOUNCE_MS = 800L
-        
-        
-        private val UUID_REGEX = Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1,12}", RegexOption.IGNORE_CASE)
     }
 
     private val messages = mutableListOf<RelayMessage>()
     private val handler = Handler(Looper.getMainLooper())
-    private val saveRunnable = Runnable { saveNow() }
 
-    
+    private val saveRunnable = Runnable {
+        val copy = synchronized(messages) { messages.map { it.copy() } }
+        saver.execute { write(copy) }
+    }
+    private val saver = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "RelayInboxSave").apply { isDaemon = true }
+    }
+
     var onChanged: (() -> Unit)? = null
 
+    private var loaded = false
+
     fun load() {
+        val again = synchronized(messages) {
+            if (loaded) messages.forEach { it.closed = true }
+            loaded
+        }
+        if (again) return
         val f = File(context.filesDir, FILE_NAME)
-        if (!f.exists()) return
+        if (!f.exists()) {
+            synchronized(messages) { loaded = true }
+            return
+        }
         try {
             val list = RelayMessage.listFromJson(JSONArray(f.readText()))
             synchronized(messages) {
                 messages.clear()
-                
+
                 messages.addAll(list.onEach { it.closed = true })
+                loaded = true
             }
             Log.i(TAG, "loaded ${list.size} messages")
         } catch (e: Exception) {
@@ -45,79 +57,88 @@ class RelayInboxStore(private val context: Context) {
         }
     }
 
-    
     fun snapshot(): List<RelayMessage> =
         synchronized(messages) { messages.map { it.copy() } }
 
     fun get(id: String): RelayMessage? =
         synchronized(messages) { messages.firstOrNull { it.id == id }?.copy() }
 
-    
-    fun append(chunk: String, source: String, kind: String = "") {
-        
-        
-        
-        if (chunk.isBlank()) return
+    fun contains(id: String): Boolean =
+        synchronized(messages) { messages.any { it.id == id } }
+
+    fun upsert(
+        id: String, conversationId: String, text: String, kind: String, closed: Boolean,
+        lead: String = "", source: String = "llm", backend: String = "",
+    ): Boolean {
         val now = System.currentTimeMillis()
-        synchronized(messages) {
-            val head = messages.firstOrNull()
-            if (head != null && !head.closed && head.source == source &&
-                now - head.updatedAt <= MERGE_GAP_MS
-            ) {
-                head.text = head.text + chunk
-                head.updatedAt = now
-                if (kind.isNotEmpty() && head.kind.isEmpty()) head.kind = kind
+        val created = synchronized(messages) {
+            val existing = messages.firstOrNull { it.id == id }
+            if (existing != null) {
+
+                val kindChanged = kind.isNotEmpty() && existing.kind != kind
+                if (existing.text == text && existing.closed == closed && existing.lead == lead && !kindChanged) return false
+
+                if (!kindChanged && text.length < existing.text.length && existing.text.startsWith(text)) {
+
+                    if (!closed || existing.closed) return false
+                    existing.closed = true
+                    existing.updatedAt = now
+                    return@synchronized false
+                }
+                if (!kindChanged && existing.closed && !closed && text == existing.text) return false
+                if (kindChanged) existing.kind = kind
+                existing.text = text
+                existing.closed = closed
+                existing.lead = lead
+                existing.updatedAt = now
+                false
             } else {
-                head?.closed = true
-                messages.add(0, RelayMessage(text = chunk.trimStart(), source = source, createdAt = now, updatedAt = now, kind = kind))
-                while (messages.size > MAX_MESSAGES) messages.removeAt(messages.size - 1)
+                if (text.isBlank()) return false
+                messages.add(0, RelayMessage(
+                    id = id, text = text, source = source, createdAt = now, updatedAt = now,
+                    closed = closed, kind = kind, conversationId = conversationId, lead = lead, seen = false,
+                    backend = backend,
+                ))
+
+                while (messages.size > MAX_MESSAGES) {
+                    val oldest = messages.indexOfLast { !it.starred }
+                    if (oldest < 0) break
+                    messages.removeAt(oldest)
+                }
+                true
             }
         }
         notifyChanged()
+        return created
     }
 
-    
-    fun closeHead(source: String? = null) {
-        var changed = false
-        synchronized(messages) {
-            val head = messages.firstOrNull() ?: return
-            if (!head.closed && (source == null || head.source == source)) {
-                head.closed = true
-                head.text = head.text.replace(UUID_REGEX, "")
-                changed = true
-            }
-        }
-        if (changed) notifyChanged()
-    }
-
-    
-    fun readd(ids: Collection<String>) {
-        if (ids.isEmpty()) return
-        val set = ids.toSet()
-        var changed = false
-        synchronized(messages) {
-            messages.filter { it.id in set }.forEach {
-                if (!it.pinned || it.inserted) {
-                    it.pinned = true; it.inserted = false; changed = true
-                }
-            }
-        }
-        if (changed) notifyChanged()
-    }
-
-    
     fun markInserted(id: String) {
         var changed = false
         synchronized(messages) {
             messages.firstOrNull { it.id == id }?.let {
-                if (!it.inserted) { it.inserted = true; it.pinned = false; changed = true }
+                if (!it.inserted) { it.inserted = true; changed = true }
             }
         }
         if (changed) notifyChanged()
     }
 
-    fun delete(id: String) {
-        val changed = synchronized(messages) { messages.removeAll { it.id == id } }
+    fun setStarred(ids: Collection<String>, starred: Boolean) {
+        if (ids.isEmpty()) return
+        val set = ids.toSet()
+        var changed = false
+        synchronized(messages) {
+            messages.filter { it.id in set && it.starred != starred }.forEach { it.starred = starred; changed = true }
+        }
+        if (changed) notifyChanged()
+    }
+
+    fun markSeen(ids: Collection<String>) {
+        if (ids.isEmpty()) return
+        val set = ids.toSet()
+        var changed = false
+        synchronized(messages) {
+            messages.filter { it.id in set && !it.seen }.forEach { it.seen = true; changed = true }
+        }
         if (changed) notifyChanged()
     }
 
@@ -134,10 +155,9 @@ class RelayInboxStore(private val context: Context) {
         handler.post { onChanged?.invoke() }
     }
 
-    private fun saveNow() {
+    private fun write(list: List<RelayMessage>) {
         try {
-            val json = synchronized(messages) { RelayMessage.listToJson(messages).toString() }
-            File(context.filesDir, FILE_NAME).writeText(json)
+            File(context.filesDir, FILE_NAME).writeText(RelayMessage.listToJson(list).toString())
         } catch (e: Exception) {
             Log.e(TAG, "save failed: ${e.message}")
         }
@@ -145,6 +165,7 @@ class RelayInboxStore(private val context: Context) {
 
     fun flush() {
         handler.removeCallbacks(saveRunnable)
-        saveNow()
+
+        saveRunnable.run()
     }
 }

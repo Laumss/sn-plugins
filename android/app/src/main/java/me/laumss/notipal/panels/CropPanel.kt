@@ -15,9 +15,7 @@ import me.laumss.notipal.ui_common.PanelBar
 import me.laumss.notipal.ui_common.PanelBase
 import me.laumss.notipal.ui_common.ScreenScale
 import me.laumss.notipal.ui_common.SelectField
-import me.laumss.notipal.ui_common.UiUtils
-import java.io.File
-import java.io.FileOutputStream
+import me.laumss.notipal.ui_common.snux.LineIcon
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -46,8 +44,6 @@ class CropPanel(
             return inst
         }
 
-        
-
         private const val IMAGE_PAD_DP = 48
         private const val EDGE_HIT_ZONE_DP = 40
         private const val MIN_CROP_DP = 50
@@ -63,7 +59,6 @@ class CropPanel(
         private const val DASH_OFF_DP = 10
         private const val FULL_AUTO_RELEASE_DELAY_MS = 300L
 
-        
         private val DENSITY_STEPS = listOf(100, 80, 60, 40, 20)
     }
 
@@ -78,24 +73,67 @@ class CropPanel(
     private var onAddToHistory: ((CropResult) -> Unit)? = null
     private var onFooterCancel: (() -> Unit)? = null
 
-    
     private var handingOff = false
+    private var handoffGeneration = 0
 
-    fun beginHandoff() { handingOff = true }
+    fun beginHandoff() {
+        handoffGeneration++
+        handingOff = true
+    }
 
-    
+    fun handoffToken(): Int? = if (handingOff) handoffGeneration else null
+
+    fun isHandoffActive(token: Int): Boolean = handingOff && handoffGeneration == token
+
+    fun finishHandoff(token: Int, close: Boolean): Boolean {
+        if (!isHandoffActive(token)) return false
+        handoffGeneration++
+        setBusy(null)
+        if (close) hide() else handingOff = false
+        return true
+    }
+
+    private fun resetHandoff() {
+        handoffGeneration++
+        handingOff = false
+        setBusy(null)
+    }
+
+    private var busyLabel: TextView? = null
+
+    private fun setBusy(text: String?) {
+        val root = rootView as? FrameLayout
+        if (text == null || root == null) {
+            busyLabel?.let { (it.parent as? ViewGroup)?.removeView(it) }
+            busyLabel = null
+            return
+        }
+        val label = busyLabel ?: TextView(reactContext).apply {
+            setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, ScreenScale.textPx(reactContext, 32))
+            setTextColor(Color.BLACK)
+            gravity = Gravity.CENTER
+            setPadding(dp(24), dp(14), dp(24), dp(14))
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(Color.WHITE)
+                setStroke(dp(2), Color.BLACK)
+                cornerRadius = dp(8).toFloat()
+            }
+            root.addView(this, FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER))
+            busyLabel = this
+        }
+        label.text = text
+    }
+
     private var initialCropScreen: Rect? = null
 
     private var actionBar: PanelBar.Handle? = null
 
-    
-    
     private var filterMode: Int = ImageFilter.FILTER_NONE
     private var inkDensity: Int = 100
     private var filterField: LinearLayout? = null
     private var densityField: LinearLayout? = null
 
-    
     private var origW = 0
     private var origH = 0
     private var filteredBitmap: Bitmap? = null
@@ -109,31 +147,13 @@ class CropPanel(
     private fun setFullUiAuto(enable: Boolean, reason: String) {
         fullAutoHandler.removeCallbacks(releaseFullAutoRunnable)
         if (fullAutoEnabled == enable) return
-        try {
-            val eink = reactContext.getSystemService("eink") ?: return
-            val methods = eink.javaClass.methods
-            val twoArg = methods.firstOrNull {
-                it.name == "enableFullUiAuto" && it.parameterTypes.contentEquals(
-                    arrayOf(Boolean::class.javaPrimitiveType, Boolean::class.javaPrimitiveType)
-                )
-            }
-            if (twoArg != null) {
-                twoArg.invoke(eink, enable, true)
-            } else {
-                val oneArg = methods.firstOrNull {
-                    it.name == "enableFullUiAuto" && it.parameterTypes.contentEquals(
-                        arrayOf(Boolean::class.javaPrimitiveType)
-                    )
-                } ?: return
-                oneArg.invoke(eink, enable)
-            }
-            fullAutoEnabled = enable
-            if (BuildConfig.ENABLE_DEBUG) Log.i(tag, "fullUiAuto=$enable reason=$reason")
-        } catch (e: Exception) {
-            if (BuildConfig.ENABLE_DEBUG) {
-                Log.w(tag, "fullUiAuto call exception reason=$reason: ${e.message}")
-            }
+        if (enable) {
+            if (!EinkAuto.acquire(reactContext, "crop", true)) return
+        } else {
+            EinkAuto.release(reactContext, "crop")
         }
+        fullAutoEnabled = enable
+        if (BuildConfig.ENABLE_DEBUG) Log.i(tag, "fullUiAuto=$enable reason=$reason")
     }
 
     private fun scheduleFullUiAutoRelease(reason: String) {
@@ -155,6 +175,7 @@ class CropPanel(
         reactContext.getSharedPreferences("inkling_crop_filter", Context.MODE_PRIVATE)
 
     fun show(path: String, onConfirm: (CropResult) -> Unit) {
+        resetHandoff()
         if (BuildConfig.ENABLE_DEBUG) Log.i(tag, "show() path=$path")
         currentInstance = this
         imagePath = path
@@ -180,6 +201,7 @@ class CropPanel(
         initialCropScreen: Rect? = null
     ) {
         if (BuildConfig.ENABLE_DEBUG) Log.i(tag, "showWithFooter() path=$path stitch=$hasStitchSession initialCrop=$initialCropScreen")
+        resetHandoff()
         currentInstance = this
         imagePath = path
         this.hasStitchSession = hasStitchSession
@@ -215,7 +237,7 @@ class CropPanel(
         showFooter = false
         multiMode = false
         hasStitchSession = false
-        handingOff = false
+        resetHandoff()
         onLongScreenshot = null
         onSendToOtherDevices = null
         onAddToHistory = null
@@ -229,17 +251,25 @@ class CropPanel(
     }
 
     override fun buildFullScreenContent(): View {
-        
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeFile(imagePath, bounds)
-        origW = bounds.outWidth
-        origH = bounds.outHeight
+
         val dm = reactContext.resources.displayMetrics
-        val bmp = if (origW > 0 && origH > 0) {
-            BitmapFactory.decodeFile(imagePath, BitmapFactory.Options().apply {
-                inSampleSize = calcPreviewSampleSize(origW, origH, dm.widthPixels, dm.heightPixels)
-            })
-        } else null
+
+        val pending = imagePath?.let { StitchLayout.pendingPreview(it, dm.widthPixels, dm.heightPixels) }
+        val bmp = if (pending != null) {
+            origW = pending.origW
+            origH = pending.origH
+            pending.bitmap
+        } else {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(imagePath, bounds)
+            origW = bounds.outWidth
+            origH = bounds.outHeight
+            if (origW > 0 && origH > 0) {
+                BitmapFactory.decodeFile(imagePath, BitmapFactory.Options().apply {
+                    inSampleSize = fitSampleSize(origW, origH, dm.widthPixels, dm.heightPixels)
+                })
+            } else null
+        }
         bitmap = bmp
 
         val root = FrameLayout(reactContext).apply {
@@ -268,9 +298,12 @@ class CropPanel(
                     if (handingOff) return@Action
                     val cv = cropView ?: return@Action
                     if (origW <= 0 || origH <= 0) return@Action
-                    
-                    handingOff = true
-                    onSendToOtherDevices?.invoke(cv.getCropResult(origW, origH))
+
+                    val send = onSendToOtherDevices ?: return@Action
+                    beginHandoff()
+
+                    setBusy(NativeLocale.t("sending"))
+                    send(cv.getCropResult(origW, origH))
                 },
                 PanelBar.Action("icons/ic_edit_to_note.xml", NativeLocale.t("insert_next")) {
                     doConfirm()
@@ -291,7 +324,7 @@ class CropPanel(
         }
 
         val left: List<PanelBar.Cell> =
-            listOf(PanelBar.TextBtn(NativeLocale.t("cancel")) { closeAndRestore() })
+            listOf(PanelBar.GlyphBtn(LineIcon.Glyph.BACK, NativeLocale.t("picker_back")) { closeAndRestore() })
 
         val centerCells: List<PanelBar.Cell> = if (showFooter) center else {
             listOf(PanelBar.Title(NativeLocale.t("cropper_title")))
@@ -328,12 +361,10 @@ class CropPanel(
         return root
     }
 
-    private fun calcPreviewSampleSize(outW: Int, outH: Int, reqW: Int, reqH: Int): Int {
+    private fun fitSampleSize(w: Int, h: Int, reqW: Int, reqH: Int): Int {
+        val fit = minOf(1f, reqW.toFloat() / w, reqH.toFloat() / h)
         var sample = 1
-        if (outH > reqH || outW > reqW) {
-            val halfH = outH / 2; val halfW = outW / 2
-            while (halfH / sample >= reqH && halfW / sample >= reqW) sample *= 2
-        }
+        while (sample * 2 * fit <= 1f) sample *= 2
         return sample
     }
 
@@ -367,7 +398,6 @@ class CropPanel(
         if (!hasFooter) toolbarModule.restoreToolbar()
     }
 
-    
     private fun buildFilterBar(root: FrameLayout): Int {
         fun px(v: Int) = ScreenScale.px(reactContext, v)
 
@@ -438,7 +468,6 @@ class CropPanel(
         return wrapper.measuredHeight
     }
 
-    
     private fun applyPreviewFilter() {
         val base = bitmap ?: return
         val gen = ++previewGen
@@ -489,7 +518,6 @@ class CropPanel(
         private val initialCropScreen: Rect? = null
     ) : View(ctx) {
 
-        
         private var bmp: Bitmap = initialBmp
 
         fun setBitmap(b: Bitmap) {
@@ -544,7 +572,7 @@ class CropPanel(
             computeImageRect(w, h)
             val ic = initialCropScreen
             if (ic != null && origW > 0 && origH > 0) {
-                
+
                 val sx = imgRect.width() / origW.toFloat()
                 val sy = imgRect.height() / origH.toFloat()
                 cropBox.set(
@@ -710,11 +738,6 @@ class CropPanel(
                 nb = min(nb, imgRect.bottom)
                 cropBox.set(nl, nt, nr, nb)
             }
-        }
-
-        fun resetCropBox() {
-            cropBox.set(imgRect)
-            invalidate()
         }
 
         fun getCropResult(origW: Int, origH: Int): CropResult {

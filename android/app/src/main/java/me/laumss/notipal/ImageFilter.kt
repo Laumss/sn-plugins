@@ -7,7 +7,6 @@ import android.graphics.ColorMatrixColorFilter
 import android.graphics.Paint
 import android.util.Log
 
-
 object ImageFilter {
 
     const val FILTER_NONE = 0
@@ -29,7 +28,6 @@ object ImageFilter {
     @JvmStatic
     private external fun nativeProcess(bitmap: Bitmap, filter: Int, density: Int): Int
 
-    
     fun process(bitmap: Bitmap, filter: Int, density: Int): Boolean {
         val d = density.coerceIn(20, 100)
         if (filter == FILTER_NONE && d >= 100) return true
@@ -47,7 +45,6 @@ object ImageFilter {
         return filter == FILTER_NONE
     }
 
-    
     private fun fallbackDensity(bitmap: Bitmap, density: Int) {
         if (density >= 100) return
         val a = density / 100f

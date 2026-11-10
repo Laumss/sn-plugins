@@ -13,21 +13,22 @@ data class SourceRange(
 enum class MarkdownAlignment { LEFT, CENTER, RIGHT }
 
 sealed class MarkdownBlock(open val sourceRange: SourceRange) {
+
+    open val synthetic: Boolean get() = false
+
     data class Heading(val level: Int, val text: String, override val sourceRange: SourceRange) : MarkdownBlock(sourceRange)
-    
-    data class Paragraph(val text: String, override val sourceRange: SourceRange, val synthetic: Boolean = false) : MarkdownBlock(sourceRange)
+    data class Paragraph(val text: String, override val sourceRange: SourceRange, override val synthetic: Boolean = false) : MarkdownBlock(sourceRange)
     data class Quote(val text: String, override val sourceRange: SourceRange) : MarkdownBlock(sourceRange)
     data class CodeFence(val code: String, override val sourceRange: SourceRange) : MarkdownBlock(sourceRange)
     data class ListItem(
         val text: String,
-        val ordered: Boolean,
         val marker: String,
         val indent: Int,
         override val sourceRange: SourceRange,
-        val synthetic: Boolean = false,
+        override val synthetic: Boolean = false,
     ) : MarkdownBlock(sourceRange)
     data class Rule(override val sourceRange: SourceRange) : MarkdownBlock(sourceRange)
-    data class Math(val tex: String, override val sourceRange: SourceRange, val synthetic: Boolean = false) : MarkdownBlock(sourceRange)
+    data class Math(val tex: String, override val sourceRange: SourceRange) : MarkdownBlock(sourceRange)
     data class Table(
         val headers: List<String>,
         val alignments: List<MarkdownAlignment>,
@@ -72,6 +73,7 @@ object MarkdownDocumentParser {
             }
 
             val tableStart = parseTableStart(lines, i)
+            val listItem = LIST_ITEM.matchEntire(trimmed)
             when {
                 trimmed.startsWith("```") -> {
                     val start = i
@@ -83,18 +85,18 @@ object MarkdownDocumentParser {
                         i++
                     }
                     if (i < lines.size) i++
-                    val last = (i - 1).coerceAtLeast(start)
-                    blocks += MarkdownBlock.CodeFence(code.toString(), range(start, last))
+                    blocks += MarkdownBlock.CodeFence(code.toString(), range(start, i - 1))
                 }
 
                 trimmed.startsWith("$$") -> {
                     val start = i
                     val inline = trimmed.removePrefix("$$")
-                    if (inline.endsWith("$$") && inline.length > 2) {
-                        blocks += MarkdownBlock.Math(
-                            inline.removeSuffix("$$").trim(),
-                            range(start, start),
-                        )
+                    val close = inline.indexOf("$$")
+                    if (close > 0) {
+
+                        blocks += MarkdownBlock.Math(inline.substring(0, close).trim(), range(i, i))
+                        val rest = inline.substring(close + 2).trim()
+                        if (rest.isNotEmpty()) blocks += splitEmbeddedMath(MarkdownBlock.Paragraph(rest, range(i, i), synthetic = true))
                         i++
                     } else {
                         val tex = StringBuilder(inline)
@@ -109,10 +111,7 @@ object MarkdownDocumentParser {
                             tex.append(lines[i].content.trim().removeSuffix("$$"))
                             i++
                         }
-                        blocks += MarkdownBlock.Math(
-                            tex.toString().trim(),
-                            range(start, (i - 1).coerceAtLeast(start)),
-                        )
+                        blocks += MarkdownBlock.Math(tex.toString().trim(), range(start, i - 1))
                     }
                 }
 
@@ -137,22 +136,12 @@ object MarkdownDocumentParser {
 
                 HEADING.matches(trimmed) -> {
                     val level = trimmed.takeWhile { it == '#' }.length
-                    var headText = trimmed.drop(level).trim()
-                    
-                    
-                    
-                    
-                    
-                    val role = roleHeading(headText)
-                    if (role != null) {
-                        val rest = role.second.replace(UUID_PATTERN, "").trim()
-                        headText = if (rest.isEmpty()) role.first + ":" else role.first + ": " + rest
-                    }
-                    blocks += MarkdownBlock.Heading(
-                        level = level,
-                        text = headText,
-                        sourceRange = range(i, i),
-                    )
+                    val headText = trimmed.drop(level).trim()
+                    val text = roleHeading(headText)?.let { (role, rest) ->
+                        val cleaned = rest.replace(UUID_PATTERN, "").trim()
+                        if (cleaned.isEmpty()) "$role:" else "$role: $cleaned"
+                    } ?: headText
+                    blocks += MarkdownBlock.Heading(level, text, range(i, i))
                     i++
                 }
 
@@ -172,29 +161,13 @@ object MarkdownDocumentParser {
                     blocks += MarkdownBlock.Quote(quote.toString(), range(start, i - 1))
                 }
 
-                UNORDERED_LIST.matches(trimmed) -> {
-                    val indent = (raw.length - raw.trimStart().length) / 2
+                listItem != null -> {
+                    val (bullet, text) = listItem.destructured
                     blocks += splitEmbeddedMath(
                         MarkdownBlock.ListItem(
-                            text = trimmed.drop(1).trim(),
-                            ordered = false,
-                            marker = "•",
-                            indent = indent,
-                            sourceRange = range(i, i),
-                        )
-                    )
-                    i++
-                }
-
-                ORDERED_LIST.matches(trimmed) -> {
-                    val indent = (raw.length - raw.trimStart().length) / 2
-                    val number = trimmed.takeWhile { it.isDigit() }
-                    blocks += splitEmbeddedMath(
-                        MarkdownBlock.ListItem(
-                            text = trimmed.drop(number.length + 1).trim(),
-                            ordered = true,
-                            marker = "$number.",
-                            indent = indent,
+                            text = text.trim(),
+                            marker = if (bullet[0].isDigit()) bullet.dropLast(1) + "." else "•",
+                            indent = (raw.length - raw.trimStart().length) / 2,
                             sourceRange = range(i, i),
                         )
                     )
@@ -223,16 +196,9 @@ object MarkdownDocumentParser {
         return MarkdownDocument(source, blocks)
     }
 
-    
-    
-    
-    
-    
-    
-    
-    
+    fun isInlineTex(content: String): Boolean =
+        '\n' !in content && content.any { it == '\\' || it == '^' || it == '_' }
 
-    
     private val EMBEDDED_MATH = Regex("\\$\\$(.+?)\\$\\$|\\$([^$\\n]+?)\\$", RegexOption.DOT_MATCHES_ALL)
 
     private fun splitEmbeddedMath(block: MarkdownBlock): List<MarkdownBlock> {
@@ -245,32 +211,23 @@ object MarkdownDocumentParser {
 
         val out = mutableListOf<MarkdownBlock>()
         var cursor = 0
-        var firstText = true
 
         fun addText(segment: String) {
             val s = segment.trim()
-            if (s.isEmpty()) return
-            out += if (block is MarkdownBlock.ListItem && firstText) {
-                
-                block.copy(text = s, synthetic = true)
-            } else {
-                MarkdownBlock.Paragraph(s, block.sourceRange, synthetic = true)
-            }
-            firstText = false
+
+            if (out.isEmpty() && block is MarkdownBlock.ListItem) out += block.copy(text = s, synthetic = true)
+            else if (s.isNotEmpty()) out += MarkdownBlock.Paragraph(s, block.sourceRange, synthetic = true)
         }
 
         for (m in EMBEDDED_MATH.findAll(text)) {
-            val display = m.groupValues[1]
-            val inline = m.groupValues[2]
-            val tex = (display.ifEmpty { inline }).trim()
-            
-            if (display.isEmpty() && !inline.any { it == '\\' || it == '^' || it == '_' }) continue
-            if (tex.isEmpty()) continue
+            val (display, inline) = m.destructured
+            val tex = display.ifEmpty { inline }.trim()
+            if (tex.isEmpty() || (display.isEmpty() && !isInlineTex(inline))) continue
             addText(text.substring(cursor, m.range.first))
-            out += MarkdownBlock.Math(tex, block.sourceRange, synthetic = true)
+            out += MarkdownBlock.Math(tex, block.sourceRange)
             cursor = m.range.last + 1
         }
-        if (out.isEmpty()) return listOf(block)
+        if (cursor == 0) return listOf(block)
         addText(text.substring(cursor))
         return out
     }
@@ -282,8 +239,7 @@ object MarkdownDocumentParser {
             HEADING.matches(trimmed) ||
             RULE.matches(trimmed) ||
             trimmed.startsWith(">") ||
-            UNORDERED_LIST.matches(trimmed) ||
-            ORDERED_LIST.matches(trimmed) ||
+            LIST_ITEM.matches(trimmed) ||
             parseTableStart(lines, index) != null
     }
 
@@ -387,21 +343,17 @@ object MarkdownDocumentParser {
     }
 
     private val HEADING = Regex("^#{1,6}\\s+.*")
-    
     private val ROLE_HEADING = Regex("^(H|A|Human|Assistant)\\s*[:：]\\s*(.*)$", RegexOption.IGNORE_CASE)
-    
     private val UUID_PATTERN = Regex(
         "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1,12}",
         RegexOption.IGNORE_CASE,
     )
 
-    
     fun roleHeading(headText: String): Pair<String, String>? {
         val m = ROLE_HEADING.matchEntire(headText) ?: return null
         return m.groupValues[1] to m.groupValues[2]
     }
     private val RULE = Regex("^([-*_])\\1{2,}$")
-    private val UNORDERED_LIST = Regex("^[-*+]\\s+.*")
-    private val ORDERED_LIST = Regex("^\\d+[.)]\\s+.*")
+    private val LIST_ITEM = Regex("^([-*+]|\\d+[.)])\\s+(.*)")
     private val TABLE_DELIMITER = Regex("^:?-{3,}:?$")
 }

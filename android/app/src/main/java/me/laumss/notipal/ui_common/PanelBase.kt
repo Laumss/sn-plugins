@@ -11,13 +11,11 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.*
-import android.widget.FrameLayout
 import android.widget.LinearLayout
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.WritableMap
 import me.laumss.notipal.overlays.TouchSinkLayout
-import kotlin.math.roundToInt
 
 private const val FIRST_DRAW_SETTLE_MS = 80L
 private const val FIRST_DRAW_TIMEOUT_MS = 1500L
@@ -41,9 +39,18 @@ abstract class PanelBase(
 
     open val windowFlags: Int = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
 
+    @Suppress("DEPRECATION")
+    open val windowType: Int = WindowManager.LayoutParams.TYPE_PHONE
+
+    open val softInputMode: Int? = null
+
     open val forcedOrientation: Int? = null
 
     open val closeOnRotation: Boolean get() = !fullScreen
+
+    open val ownsScreen: Boolean get() = true
+
+    open val keptThroughPanels: Boolean get() = false
 
     open fun onRotation(): Boolean {
         if (isShowing && closeOnRotation) { hide(); return true }
@@ -52,8 +59,7 @@ abstract class PanelBase(
 
     protected val handler = Handler(Looper.getMainLooper())
     protected var windowManager: WindowManager? = null
-    
-    
+
     protected var rootView: View? = null
         set(value) {
             field = value
@@ -77,11 +83,14 @@ abstract class PanelBase(
     protected fun showPanel(onResult: ((Boolean) -> Unit)? = null) {
         handler.post {
             if (rootView != null) {
+
+                if (yieldsLexi && me.laumss.notipal.LexiLink.isOpen()) me.laumss.notipal.LexiLink.hold(lexiHold)
                 onResult?.invoke(true)
                 return@post
             }
             fun failShow(error: Throwable? = null) {
                 if (BuildConfig.ENABLE_DEBUG) Log.e(tag, "show panel failed: ${error?.message}", error)
+                if (yieldsLexi) me.laumss.notipal.LexiLink.release(lexiHold)
                 FloatingPenGuard.setFullScreenActive(false, PenGuardOwner.panel(panelName))
                 rootView = null
                 windowManager = null
@@ -95,28 +104,27 @@ abstract class PanelBase(
                 FloatingPenGuard.setFullScreenActive(true, PenGuardOwner.panel(panelName))
                 windowManager = reactContext.getSystemService(android.content.Context.WINDOW_SERVICE) as WindowManager
 
-                @Suppress("DEPRECATION")
-                val wmType = WindowManager.LayoutParams.TYPE_PHONE
+                val lp = WindowManager.LayoutParams(
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    windowType,
+                    windowFlags or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                    PixelFormat.TRANSLUCENT
+                ).apply { gravity = Gravity.TOP or Gravity.START }
+
+                forcedOrientation?.let { lp.screenOrientation = it }
+                softInputMode?.let { lp.softInputMode = it }
 
                 if (fullScreen) {
                     val root = buildFullScreenContent() ?: run {
                         failShow()
                         return@post
                     }
-                    val lp = WindowManager.LayoutParams(
-                        WindowManager.LayoutParams.MATCH_PARENT,
-                        WindowManager.LayoutParams.MATCH_PARENT,
-                        wmType,
-                        windowFlags or
-                            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-                        PixelFormat.TRANSLUCENT
-                    ).apply { gravity = Gravity.TOP or Gravity.START }
-
-                    forcedOrientation?.let { lp.screenOrientation = it }
                     layoutParams = lp
                     rootView = root
-                    windowManager?.addView(root, lp)
+                    addWindow(root, lp)
                     FloatingPenGuard.track(PenGuardOwner.panel(panelName), root)
                     if (BuildConfig.ENABLE_DEBUG) Log.i(tag, "full-screen panel shown")
                 } else {
@@ -140,30 +148,14 @@ abstract class PanelBase(
 
                     buildContent(card)
 
-                    
-                    
-                    
-                    
-                    
                     val scrim = TouchSinkLayout(reactContext).apply {
                         gravity = Gravity.CENTER
                     }
                     scrim.addView(card, LinearLayout.LayoutParams(winW, winH))
 
-                    val lp = WindowManager.LayoutParams(
-                        WindowManager.LayoutParams.MATCH_PARENT,
-                        WindowManager.LayoutParams.MATCH_PARENT,
-                        wmType,
-                        windowFlags or
-                            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-                        PixelFormat.TRANSLUCENT
-                    ).apply { gravity = Gravity.TOP or Gravity.START }
-
-                    forcedOrientation?.let { lp.screenOrientation = it }
                     layoutParams = lp
                     rootView = scrim
-                    windowManager?.addView(scrim, lp)
+                    addWindow(scrim, lp)
                     if (BuildConfig.ENABLE_DEBUG) Log.i(tag, "panel shown (full-screen scrim) card=${winW}x$winH screen=${screenW}x${screenH} landscape=$isLandscape")
                 }
                 onResult?.invoke(true)
@@ -175,7 +167,23 @@ abstract class PanelBase(
         }
     }
 
-    
+    protected open val yieldsLexi = false
+    private val lexiHold get() = "panel:$panelName"
+
+    @Suppress("DEPRECATION")
+    private fun addWindow(view: View, lp: WindowManager.LayoutParams) {
+        val wm = windowManager ?: return
+        if (yieldsLexi) me.laumss.notipal.LexiLink.hold(lexiHold)
+        try {
+            wm.addView(view, lp)
+        } catch (e: Exception) {
+            if (lp.type == WindowManager.LayoutParams.TYPE_PHONE) throw e
+            Log.w(tag, "window type ${lp.type} refused (${e.message}), using TYPE_PHONE")
+            lp.type = WindowManager.LayoutParams.TYPE_PHONE
+            wm.addView(view, lp)
+        }
+    }
+
     fun runAfterFirstDraw(block: () -> Unit) {
         handler.post {
             val root = rootView
@@ -191,7 +199,7 @@ abstract class PanelBase(
                 try { root.viewTreeObserver.removeOnDrawListener(listener) } catch (_: Exception) {}
                 block()
             }
-            
+
             listener = ViewTreeObserver.OnDrawListener { handler.postDelayed(fire, FIRST_DRAW_SETTLE_MS) }
             root.viewTreeObserver.addOnDrawListener(listener)
             root.invalidate()
@@ -199,36 +207,36 @@ abstract class PanelBase(
         }
     }
 
-    open fun hide() = teardown(releasePen = true)
+    protected fun afterNextDraw(block: () -> Unit) {
+        val root = rootView ?: return
+        var done = false
+        lateinit var listener: ViewTreeObserver.OnDrawListener
+        listener = ViewTreeObserver.OnDrawListener {
+            if (done) return@OnDrawListener
+            done = true
 
-    
-    protected fun dismissWithoutPenRelease() = teardown(releasePen = false)
+            handler.post {
+                try { root.viewTreeObserver.removeOnDrawListener(listener) } catch (_: Exception) {}
+                block()
+            }
+        }
+        root.viewTreeObserver.addOnDrawListener(listener)
+    }
 
-    
-    protected fun releasePenGuardOwner() =
-        FloatingPenGuard.setFullScreenActive(false, PenGuardOwner.panel(panelName))
+    open fun hide() = teardown()
 
-    private fun teardown(releasePen: Boolean) {
+    private fun teardown() {
         handler.post {
             try { windowManager?.removeView(rootView) } catch (_: Exception) {}
-            
-            
-            if (releasePen) FloatingPenGuard.setFullScreenActive(false, PenGuardOwner.panel(panelName))
+
+            FloatingPenGuard.setFullScreenActive(false, PenGuardOwner.panel(panelName))
             rootView = null
             windowManager = null
             layoutParams = null
+            if (yieldsLexi) me.laumss.notipal.LexiLink.release(lexiHold)
             onHide()
             runDslDisposers()
             emitCloseEvent()
-        }
-    }
-
-    protected fun applyOrientation(orientation: Int) {
-        handler.post {
-            val lp = layoutParams ?: return@post
-            if (lp.screenOrientation == orientation) return@post
-            lp.screenOrientation = orientation
-            try { windowManager?.updateViewLayout(rootView, lp) } catch (_: Exception) {}
         }
     }
 
@@ -242,12 +250,7 @@ abstract class PanelBase(
     open fun suspendVisibility() {
         handler.post {
             rootView?.visibility = View.GONE
-            
-            
-            
-            
-            
-            
+
             FloatingPenGuard.setFullScreenActive(false, PenGuardOwner.panel(panelName))
         }
     }
@@ -255,13 +258,13 @@ abstract class PanelBase(
     open fun resumeVisibility() {
         handler.post {
             if (me.laumss.notipal.FloatingToolbarModule.areFloatingOverlaysSuspendedForPalette()) return@post
-            rootView?.visibility = View.VISIBLE
+
+            val root = rootView ?: return@post
+            root.visibility = View.VISIBLE
             FloatingPenGuard.setFullScreenActive(true, PenGuardOwner.panel(panelName))
-            rootView?.let { FloatingPenGuard.refresh(PenGuardOwner.panel(panelName), it) }
+            FloatingPenGuard.refresh(PenGuardOwner.panel(panelName), root)
         }
     }
-
-    protected fun makeDivider(dark: Boolean = true): View = PanelWidgets.divider(dslHost, dark)
 
     protected fun makeEmptyView(text: String): LinearLayout = PanelWidgets.emptyView(dslHost, text)
 
@@ -283,7 +286,6 @@ abstract class PanelBase(
         override fun dp(v: Int): Int = this@PanelBase.dp(v)
         override fun dp(v: Float): Int = this@PanelBase.dp(v)
         override fun sp(v: Float): Float = this@PanelBase.sp(v)
-        override fun gridSp(v: Float): Float = ScreenScale.gridSp(reactContext, v)
         override fun close() { hide(); toolbarModule.restoreToolbar() }
         override fun onDispose(block: () -> Unit) { dslDisposers.add(block) }
         override val panelW: Int get() = winW

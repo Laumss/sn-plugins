@@ -1,6 +1,5 @@
 package me.laumss.notipal.ui_common
 
-
 object BrowseDirs {
     val KEYS = listOf("Document", "Export", "MyStyle", "Note", "SCREENSHOT", "INBOX")
 

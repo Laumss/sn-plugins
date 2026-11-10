@@ -2,7 +2,10 @@ package me.laumss.notipal.ui_common.filepicker
 
 import me.laumss.notipal.NativeLocale
 import me.laumss.notipal.BuildConfig
+import me.laumss.notipal.net.PluginIdentity
 import me.laumss.notipal.ui_common.MultiSelectState
+import me.laumss.notipal.ui_common.snux.InkScrollView
+import me.laumss.notipal.ui_common.snux.Snux
 import android.content.Context
 import android.content.res.Configuration
 import android.graphics.BitmapFactory
@@ -12,12 +15,11 @@ import android.view.View
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
-import android.widget.ScrollView
 import android.widget.TextView
 import android.os.SystemClock
 import java.io.File
 import java.util.ArrayDeque
-
+import java.util.concurrent.atomic.AtomicBoolean
 
 class FilePicker(
     private val ctx: Context,
@@ -25,7 +27,7 @@ class FilePicker(
 ) {
     companion object {
         const val ROOT = "/storage/emulated/0"
-        
+
         val HOME_FOLDERS = listOf("Document", "Export", "MyStyle", "Note", "SCREENSHOT", "INBOX")
 
         fun pathForChip(key: String): String = when (key) {
@@ -33,9 +35,213 @@ class FilePicker(
             else -> "$ROOT/$key"
         }
 
-        fun chipForPath(path: String): String? =
-            HOME_FOLDERS.firstOrNull { pathForChip(it) == path }
+        private val thumbnailExecutor = java.util.concurrent.Executors.newFixedThreadPool(2) { r ->
+            Thread(r, "InklingPickerThumb").apply { isDaemon = true }
+        }
+
+        private val noteCoverExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "InklingPickerNote").apply { isDaemon = true }
+        }
+
+        private const val LATER_ROWS_PER_BATCH = 4
+
+        private class CachedListing(val items: List<Item>, val signature: Int)
+
+        private val listingCache = object : LinkedHashMap<String, CachedListing>(8, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CachedListing>?) = size > 8
+        }
+        private val inflight = HashMap<String, MutableList<(List<Item>, Boolean, Boolean) -> Unit>>()
+
+        private fun cacheKey(path: String, filter: ListingFilter) =
+            "$path|${filter.allowedTypes.sorted()}|${filter.imageTypes.sorted()}|${filter.rootFolders}"
+
+        private fun signatureOf(items: List<Item>): Int =
+            items.fold(17) { h, it -> 31 * h + (it.path.hashCode() xor it.modifiedAt.hashCode() xor it.size.hashCode() xor it.childCount) }
+
+        private fun cachedListing(key: String): CachedListing? = synchronized(listingCache) { listingCache[key] }
+
+        private fun scanNow(path: String, filter: ListingFilter, blocked: AtomicBoolean): List<Item> =
+            if (path == ROOT) homeFolders(blocked) + collectHomeFiles(filter, blocked) else loadTraditional(path, filter, blocked)
+
+        private fun scan(path: String, filter: ListingFilter, done: (List<Item>, Boolean, Boolean) -> Unit) {
+            val key = cacheKey(path, filter)
+            synchronized(inflight) {
+                inflight[key]?.let { waiters ->
+                    waiters += done
+                    return
+                }
+                inflight[key] = arrayListOf(done)
+            }
+            Thread({
+                PluginIdentity.claim()
+                val started = SystemClock.elapsedRealtime()
+                val blocked = AtomicBoolean(false)
+                val result = try {
+                    scanNow(path, filter, blocked)
+                } catch (_: SecurityException) {
+                    blocked.set(true)
+                    emptyList()
+                } catch (error: Throwable) {
+                    android.util.Log.w("InklingFilePicker", "scan failed $path: $error")
+                    emptyList()
+                }
+                val sig = signatureOf(result)
+                val changed = synchronized(listingCache) {
+                    val old = listingCache[key]
+                    if (!blocked.get()) listingCache[key] = CachedListing(result, sig)
+                    old?.signature != sig
+                }
+                android.util.Log.i("InklingFilePicker", "scan $path items=${result.size} " +
+                    "ms=${SystemClock.elapsedRealtime() - started} changed=$changed blocked=${blocked.get()}")
+                val waiters = synchronized(inflight) { inflight.remove(key) }.orEmpty()
+                waiters.forEach { it(result, changed, blocked.get()) }
+            }, "InklingPickerDirectory").apply { isDaemon = true }.start()
+        }
+
+        private fun homeFolders(blocked: AtomicBoolean?): List<Item> =
+            HOME_FOLDERS.mapNotNull { key ->
+                val folder = File(pathForChip(key))
+                if (!isDirectory(folder, blocked)) return@mapNotNull null
+                Item(
+                    name = key,
+                    path = folder.absolutePath,
+                    isDir = true,
+                    isImage = false,
+                    size = 0L,
+                    childCount = 0,
+                )
+            }
+
+        private fun collectHomeFiles(filter: ListingFilter, blocked: AtomicBoolean): List<Item> {
+            val roots = filter.rootFolders.map { File(pathForChip(it)) }.filter { isDirectory(it, blocked) }
+            val parts = arrayOfNulls<List<File>>(roots.size)
+            val workers = roots.mapIndexed { index, root ->
+                Thread({
+                    PluginIdentity.claim()
+                    val files = ArrayList<File>()
+                    try {
+                        val pending = ArrayDeque<File>()
+                        val visited = HashSet<String>()
+                        pending.add(root)
+                        while (pending.isNotEmpty()) {
+                            val folder = pending.removeFirst()
+                            if (!visited.add(folder.absolutePath)) continue
+                            visibleChildren(folder, blocked).forEach { child ->
+                                if (isDirectory(child, blocked)) {
+                                    pending.addLast(child)
+                                } else if (matchesExtension(child.name, filter)) {
+                                    files.add(child)
+                                }
+                            }
+                        }
+                    } catch (error: Throwable) {
+                        android.util.Log.w("InklingFilePicker", "scan failed ${root.path}: $error")
+                    }
+                    parts[index] = files
+                }, "InklingPickerScan").apply { isDaemon = true; start() }
+            }
+            workers.forEach { it.join() }
+            val seen = HashSet<String>()
+
+            return parts.asSequence().filterNotNull().flatten()
+                .filter { seen.add(it.absolutePath) }
+                .map { fileItem(it, filter) }
+                .sortedWith(
+                    compareByDescending<Item> { it.modifiedAt }
+                        .thenBy(String.CASE_INSENSITIVE_ORDER) { it.name },
+                )
+                .toList()
+        }
+
+        private fun loadTraditional(path: String, filter: ListingFilter, blocked: AtomicBoolean): List<Item> {
+            val dir = File(path)
+            val children = try {
+                dir.listFiles() ?: emptyArray()
+            } catch (_: SecurityException) {
+                blocked.set(true)
+                return emptyList()
+            }
+            return children.asSequence()
+                .filter { !it.name.startsWith(".") }
+                .mapNotNull { f ->
+                    if (isDirectory(f, blocked)) {
+                        val kids = visibleChildren(f, blocked)
+                        val previews = kids.asSequence()
+                            .filter { it.isFile && FilePickerCells.isPreviewImage(it.name) }
+                            .take(4)
+                            .map { it.absolutePath }
+                            .toList()
+                        Item(
+                            f.name, f.absolutePath, isDir = true, isImage = false, 0L, kids.size,
+                            previews, try { f.lastModified() } catch (_: SecurityException) { 0L },
+                        )
+                    } else {
+                        if (!matchesExtension(f.name, filter)) return@mapNotNull null
+                        fileItem(f, filter)
+                    }
+                }
+                .sortedWith(
+                    compareByDescending<Item> { it.isDir }
+                        .thenByDescending { it.modifiedAt }
+                        .thenBy { it.name.lowercase() },
+                )
+                .toList()
+        }
+
+        private fun isDirectory(file: File, blocked: AtomicBoolean?): Boolean = try {
+            file.isDirectory
+        } catch (_: SecurityException) {
+            blocked?.set(true)
+            false
+        }
+
+        private fun visibleChildren(directory: File, blocked: AtomicBoolean): List<File> = try {
+            directory.listFiles()?.filter { it.name.isNotBlank() && !it.name.startsWith('.') }.orEmpty()
+        } catch (_: SecurityException) {
+            blocked.set(true)
+            emptyList()
+        }
+
+        private fun fileItem(file: File, filter: ListingFilter) = Item(
+            name = file.name,
+            path = file.absolutePath,
+            isDir = false,
+            isImage = extensionOf(file.name) in filter.imageTypes,
+            size = try { file.length() } catch (_: SecurityException) { 0L },
+            childCount = 0,
+            modifiedAt = try { file.lastModified() } catch (_: SecurityException) { 0L },
+        )
+
+        private fun extensionOf(name: String): String = name.substringAfterLast('.', "").lowercase()
+
+        private fun orderedFormatKeys(extensions: Set<String>): List<String> {
+            val aliases = linkedMapOf(
+                "epub" to setOf("epub"),
+                "pdf" to setOf("pdf"),
+                "txt" to setOf("txt"),
+                "md" to setOf("md", "markdown"),
+                "cbz" to setOf("cbz"),
+                "zip" to setOf("zip"),
+                "jpg" to setOf("jpg", "jpeg"),
+                "png" to setOf("png"),
+                "webp" to setOf("webp"),
+            )
+            val ordered = aliases.filterValues { it.any(extensions::contains) }.keys.toMutableList()
+            extensions.filter { ext -> aliases.values.none { ext in it } }.sorted().forEach(ordered::add)
+            return ordered
+        }
+
+        private fun matchesFilterKey(ext: String, key: String): Boolean = when (key) {
+            "md" -> ext == "md" || ext == "markdown"
+            "jpg" -> ext == "jpg" || ext == "jpeg"
+            else -> ext == key
+        }
+
+        private fun matchesExtension(name: String, filter: ListingFilter): Boolean =
+            extensionOf(name) in filter.allowedTypes
     }
+
+    private class CellMetrics(val colW: Int, val coverW: Int, val coverH: Int, val gap: Int)
 
     private data class Item(
         val name: String,
@@ -48,14 +254,10 @@ class FilePicker(
         val modifiedAt: Long = 0L,
     )
 
-    
     private data class ListingFilter(
         val imageTypes: Set<String>,
         val allowedTypes: Set<String>,
-        val selectedTypes: Set<String>,
-        val excludedPaths: Set<String>,
         val rootFolders: List<String>,
-        val generation: Int,
     )
 
     private var overlay: View? = null
@@ -63,7 +265,7 @@ class FilePicker(
     private var chips: FilePickerWidgets.FormatChips? = null
     private var topHost: FrameLayout? = null
     private var gridContainer: LinearLayout? = null
-    private var gridScroll: ScrollView? = null
+    private var gridScroll: InkScrollView? = null
     private var bottomTray: FilePickerChrome.BottomTrayHandle? = null
 
     private var imageExtensions: Set<String> = emptySet()
@@ -96,29 +298,24 @@ class FilePicker(
     private var gridRevision = 0
     private var listingPending = false
     private var active = false
-    private var nestedSuspended = false
     private var traceSequence = 0
+
+    private var homeFilesPending = false
+
+    private class PendingThumb(val view: View, val task: Runnable)
+    private val pendingThumbs = ArrayList<PendingThumb>()
+    private var thumbFlushScheduled = false
+
+    private val gridRows = ArrayList<View>()
+
+    private class Listing(val path: String, val filter: ListingFilter, val items: List<Item>)
+    private var listing: Listing? = null
 
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
 
     private fun dp(v: Int) = FilePickerScale.dp(ctx, v)
 
     val isShowing: Boolean get() = active && overlay?.visibility == View.VISIBLE
-
-    fun suspendForNested() {
-        nestedSuspended = true
-        overlay?.visibility = View.INVISIBLE
-    }
-
-    fun resumeAfterNested() {
-        if (!active) return
-        nestedSuspended = false
-        if (listingPending) return
-        overlay?.apply {
-            visibility = View.VISIBLE
-            bringToFront()
-        }
-    }
 
     fun show(
         title: String,
@@ -140,11 +337,8 @@ class FilePicker(
         onCancel: (() -> Unit)? = null,
         onPicked: (List<String>) -> Unit,
     ) {
-        
-        
-        
+
         if (overlay != null) destroy()
-        nestedSuspended = false
         this.keepOpenAfterPick = keepOpenAfterPick
         this.pickOnTap = pickOnTap
         attach()
@@ -189,7 +383,8 @@ class FilePicker(
         generation++
         active = false
         listingPending = false
-        nestedSuspended = false
+        homeFilesPending = false
+        pendingThumbs.clear()
         overlay?.visibility = View.INVISIBLE
         fileCards.clear()
         gridContainer?.removeAllViews()
@@ -260,8 +455,7 @@ class FilePicker(
         chips = FilePickerWidgets.FormatChips(ctx, emptyList()) { formats ->
             selectedFilters.clear()
             selectedFilters.addAll(formats)
-            
-            
+
             val hasImageFilter = formats.any { key ->
                 imageExtensions.any { ext -> matchesFilterKey(ext, key) }
             }
@@ -269,7 +463,7 @@ class FilePicker(
                 selectedImages.clear()
                 selectedDoc = null
             }
-            navigateTo(currentPath)
+            applyFilterChange()
             refreshSelectionChrome()
         }
         body.addView(chips!!.createView())
@@ -282,28 +476,35 @@ class FilePicker(
         }
         body.addView(topHost)
 
-        gridScroll = ScrollView(ctx).apply {
-            isVerticalScrollBarEnabled = false
-            
-            setPadding(0, 0, 0, dp(84))
-            clipToPadding = false
+        val scroll = InkScrollView(ctx).apply {
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
+            pageItems = { gridRows }
+            onScrolled = { scheduleThumbFlush() }
         }
-        gridContainer = LinearLayout(ctx).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(10), dp(16), dp(14))
+        gridScroll = scroll
+        gridContainer = scroll.content.apply {
+            setPadding(dp(16), dp(10), maxOf(dp(16), Snux.px(ctx, InkScrollView.LANE)), dp(14))
         }
-        gridScroll?.addView(gridContainer)
-        body.addView(gridScroll)
+        body.addView(scroll)
 
         page.addView(body)
         bottomTray = FilePickerChrome.buildBottomBackTray(ctx, { handleBack() }, { confirm() }, { toggleDocumentMulti() })
+        val trayMargin = dp(24)
         page.addView(bottomTray!!.view, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.WRAP_CONTENT,
             FrameLayout.LayoutParams.WRAP_CONTENT,
             Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL,
-        ).apply { bottomMargin = dp(24) })
+        ).apply { bottomMargin = trayMargin })
+
+        bottomTray!!.view.addOnLayoutChangeListener { v, _, top, _, bottom, _, oldTop, _, oldBottom ->
+            if (bottom - top == oldBottom - oldTop) return@addOnLayoutChangeListener
+            val content = scroll.content
+            val want = v.height + trayMargin * 2
+            if (content.paddingBottom != want) scroll.post {
+                content.setPadding(content.paddingLeft, content.paddingTop, content.paddingRight, want)
+            }
+        }
 
         bottomTray?.setAction(NativeLocale.t("picker_select"), visible = false)
 
@@ -311,7 +512,6 @@ class FilePicker(
         parent.addView(page)
     }
 
-    
     fun setTopContent(content: View?) {
         val host = topHost ?: return
         host.removeAllViews()
@@ -332,29 +532,83 @@ class FilePicker(
         if (!active) return
         val gen = ++generation
         listingPending = true
+        val fromPath = currentPath
+        val wasShowing = overlay?.visibility == View.VISIBLE
         currentPath = path
         refreshSelectionChrome()
-        val filter = ListingFilter(imageExtensions.toSet(), filterExtensions.toSet(), selectedFilters.toSet(),
-            excludedPaths, rootFolders.toList(), gen)
-        
-        
-        Thread({
-            val nextItems = try {
-                if (path == ROOT) {
-                    loadHomeFolders(filter) + collectHomeFiles(filter, gen)
-                } else {
-                    loadTraditional(path, filter)
+
+        val filter = ListingFilter(imageExtensions.toSet(), filterExtensions.toSet(), rootFolders.toList())
+        val cached = cachedListing(cacheKey(path, filter))
+        if (cached != null) {
+
+            homeFilesPending = false
+            showListing(path, filter, cached.items, resetScroll = true)
+            trace("cache path=$path items=${cached.items.size}")
+            scan(path, filter) { result, changed, blocked ->
+                handler.post {
+                    if (gen != generation) return@post
+                    if (blocked) reportReadBlocked(gen)
+                    if (changed && !blocked) {
+                        trace("rescan changed path=$path items=${result.size}")
+                        showListing(path, filter, result, resetScroll = false)
+                    }
                 }
-            } catch (_: SecurityException) {
-                reportReadBlocked(gen)
-                emptyList()
             }
+            return
+        }
+
+        val shellFirst = path == ROOT && (!wasShowing || fromPath != ROOT)
+        homeFilesPending = shellFirst
+        if (shellFirst) {
+            items = homeFolders(null)
+            rebuildGrid(resetScroll = true)
+        }
+        scan(path, filter) { result, _, blocked ->
             handler.post {
                 if (gen != generation) return@post
-                items = nextItems
+                trace("scan path=$path items=${result.size} blocked=$blocked")
+                if (blocked) reportReadBlocked(gen)
+                homeFilesPending = false
+                showListing(path, filter, result, resetScroll = !shellFirst)
+            }
+        }
+    }
+
+    private fun showListing(path: String, filter: ListingFilter, all: List<Item>, resetScroll: Boolean) {
+        listing = Listing(path, filter, all)
+        items = filteredItems(path, all)
+        rebuildGrid(resetScroll)
+    }
+
+    private fun filteredItems(path: String, all: List<Item>): List<Item> {
+        val keys = selectedFilters.toSet()
+        val imageChosen = keys.any { key -> imageExtensions.any { matchesFilterKey(it, key) } }
+        val hideImages = path == ROOT && !imageChosen
+        return all.filter { item ->
+            item.isDir || (item.path !in excludedPaths && (!hideImages || !item.isImage) &&
+                (keys.isEmpty() || keys.any { matchesFilterKey(extensionOf(item.name), it) }))
+        }
+    }
+
+    private fun applyFilterChange() {
+        val cached = listing?.takeIf {
+            it.path == currentPath && !listingPending && !homeFilesPending &&
+                it.filter.imageTypes == imageExtensions && it.filter.allowedTypes == filterExtensions
+        }
+        if (cached == null) {
+            navigateTo(currentPath)
+            return
+        }
+        val gen = ++generation
+        pendingThumbs.clear()
+        android.view.Choreographer.getInstance().postFrameCallback {
+            handler.post {
+                if (gen != generation) return@post
+                items = filteredItems(cached.path, cached.items)
+                trace("filter path=$currentPath formats=$selectedFilters items=${items.size}")
                 rebuildGrid(resetScroll = true)
             }
-        }, "InklingPickerDirectory").apply { isDaemon = true }.start()
+        }
     }
 
     private fun refreshBreadcrumb() {
@@ -369,150 +623,10 @@ class FilePicker(
         )
     }
 
-    
-    private fun loadHomeFolders(filter: ListingFilter): List<Item> =
-        HOME_FOLDERS.mapNotNull { key ->
-            val folder = File(pathForChip(key))
-            if (!isDirectory(folder, filter.generation)) return@mapNotNull null
-            val kids = visibleChildren(folder, filter.generation)
-            Item(
-                name = key,
-                path = folder.absolutePath,
-                isDir = true,
-                isImage = false,
-                size = 0L,
-                childCount = kids.size,
-                modifiedAt = try { folder.lastModified() } catch (_: SecurityException) { 0L },
-            )
-        }
-
-    private fun collectHomeFiles(filter: ListingFilter, expectedGeneration: Int): List<Item> {
-        val seen = HashSet<String>()
-        val files = ArrayList<File>()
-        filter.rootFolders.forEach { key ->
-            val root = File(pathForChip(key))
-            if (!isDirectory(root, expectedGeneration)) return@forEach
-            val pending = ArrayDeque<File>()
-            val visited = HashSet<String>()
-            pending.add(root)
-            while (pending.isNotEmpty()) {
-                if (expectedGeneration != generation) return emptyList()
-                val folder = pending.removeFirst()
-                val folderPath = normalizePath(folder.absolutePath)
-                if (!visited.add(folderPath)) continue
-                visibleChildren(folder, expectedGeneration).forEach { child ->
-                    when {
-                        child.isDirectory -> pending.addLast(child)
-                        child.isFile && matchesExtension(child.name, filter) &&
-                            normalizePath(child.absolutePath) !in filter.excludedPaths && seen.add(child.absolutePath) ->
-                            files.add(child)
-                    }
-                }
-            }
-        }
-        return files.sortedWith(
-            compareByDescending<File> { it.lastModified() }
-                .thenBy(String.CASE_INSENSITIVE_ORDER) { it.name },
-        ).map { fileItem(it, filter) }
-    }
-
-    private fun loadTraditional(path: String, filter: ListingFilter): List<Item> {
-        val dir = File(path)
-        val children = try {
-            dir.listFiles() ?: emptyArray()
-        } catch (_: SecurityException) {
-            reportReadBlocked(filter.generation)
-            return emptyList()
-        }
-        return children.asSequence()
-            .filter { !it.name.startsWith(".") }
-            .mapNotNull { f ->
-                val isDir = try { f.isDirectory } catch (_: SecurityException) { false }
-                if (isDir) {
-                    val kids = visibleChildren(f, filter.generation)
-                    val previews = kids.asSequence()
-                        .filter { it.isFile && FilePickerCells.isPreviewImage(it.name) }
-                        .take(4)
-                        .map { it.absolutePath }
-                        .toList()
-                    Item(
-                        f.name, f.absolutePath, isDir = true, isImage = false, 0L, kids.size,
-                        previews, try { f.lastModified() } catch (_: SecurityException) { 0L },
-                    )
-                } else {
-                    if (!matchesExtension(f.name, filter) || normalizePath(f.absolutePath) in filter.excludedPaths) return@mapNotNull null
-                    fileItem(f, filter)
-                }
-            }
-            .sortedWith(
-                compareByDescending<Item> { it.isDir }
-                    .thenByDescending { it.modifiedAt }
-                    .thenBy { it.name.lowercase() },
-            )
-            .toList()
-    }
-
     private fun reportReadBlocked(expectedGeneration: Int) {
-        handler.post {
-            if (generation != expectedGeneration || readBlockedGeneration == expectedGeneration) return@post
-            readBlockedGeneration = expectedGeneration
-            onReadBlocked?.invoke()
-        }
-    }
-
-    private fun isDirectory(file: File, expectedGeneration: Int): Boolean = try {
-        file.isDirectory
-    } catch (_: SecurityException) {
-        reportReadBlocked(expectedGeneration)
-        false
-    }
-
-    private fun visibleChildren(directory: File, expectedGeneration: Int): List<File> = try {
-        directory.listFiles()?.filter { it.name.isNotBlank() && !it.name.startsWith('.') }.orEmpty()
-    } catch (_: SecurityException) {
-        reportReadBlocked(expectedGeneration)
-        emptyList()
-    }
-
-    private fun fileItem(file: File, filter: ListingFilter) = Item(
-        name = file.name,
-        path = file.absolutePath,
-        isDir = false,
-        isImage = extensionOf(file.name) in filter.imageTypes,
-        size = try { file.length() } catch (_: SecurityException) { 0L },
-        childCount = 0,
-        modifiedAt = try { file.lastModified() } catch (_: SecurityException) { 0L },
-    )
-
-    private fun extensionOf(name: String): String = name.substringAfterLast('.', "").lowercase()
-
-    
-    private fun orderedFormatKeys(extensions: Set<String>): List<String> {
-        val aliases = linkedMapOf(
-            "epub" to setOf("epub"),
-            "pdf" to setOf("pdf"),
-            "txt" to setOf("txt"),
-            "md" to setOf("md", "markdown"),
-            "cbz" to setOf("cbz"),
-            "jpg" to setOf("jpg", "jpeg"),
-            "png" to setOf("png"),
-            "webp" to setOf("webp"),
-        )
-        val ordered = aliases.filterValues { it.any(extensions::contains) }.keys.toMutableList()
-        extensions.filter { ext -> aliases.values.none { ext in it } }.sorted().forEach(ordered::add)
-        return ordered
-    }
-
-    private fun matchesFilterKey(ext: String, key: String): Boolean = when (key) {
-        "md" -> ext == "md" || ext == "markdown"
-        "jpg" -> ext == "jpg" || ext == "jpeg"
-        else -> ext == key
-    }
-
-    private fun matchesExtension(name: String, filter: ListingFilter): Boolean {
-        val ext = extensionOf(name)
-        if (ext !in filter.allowedTypes) return false
-        return filter.selectedTypes.isEmpty() || filter.selectedTypes.any { matchesFilterKey(ext, it) }
+        if (generation != expectedGeneration || readBlockedGeneration == expectedGeneration) return
+        readBlockedGeneration = expectedGeneration
+        onReadBlocked?.invoke()
     }
 
     private fun pickerColumns(): Int {
@@ -541,37 +655,45 @@ class FilePicker(
             })
             return
         }
+
+        pendingThumbs.clear()
         val columns = pickerColumns()
         val nextCards = mutableMapOf<String, FilePickerCells.FileCardView>()
         val nextGrid = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
-        if (items.isEmpty()) {
-            nextGrid.addView(TextView(ctx).apply {
-                text = emptyHint.ifBlank { NativeLocale.t("picker_empty_folder") }
-                textSize = FilePickerScale.sp(ctx, 13.5f)
-                setTextColor(Color.BLACK)
-                gravity = Gravity.CENTER
-                setPadding(0, dp(60), 0, dp(60))
-            })
-        } else {
-            val atRoot = currentPath == ROOT
-            val dirs = items.filter { it.isDir }
-            val files = items.filter { !it.isDir }
-            if (atRoot && dirs.isNotEmpty()) {
-                nextGrid.addView(buildHomeFolderRow(dirs, columns))
+        val atRoot = currentPath == ROOT
+        val dirs = if (atRoot) items.filter { it.isDir } else emptyList()
+        val gridItems = if (atRoot) items.filter { !it.isDir } else items
+        val nextRows = ArrayList<View>()
+        if (dirs.isNotEmpty()) nextGrid.addView(buildHomeFolderRow(dirs, columns, nextRows))
+        var metrics: CellMetrics? = null
+        var laterRows: List<List<Item>> = emptyList()
+        var firstRows = 0
+        when {
+            gridItems.isNotEmpty() -> {
+                val m = cellMetrics(container, columns)
+                val rows = gridItems.chunked(columns)
+
+                firstRows = firstScreenRows(m).coerceAtMost(rows.size)
+                rows.take(firstRows).forEach {
+                    val row = buildGridRow(it, m, nextCards)
+                    nextRows += row
+                    nextGrid.addView(row)
+                }
+                laterRows = rows.drop(firstRows)
+                metrics = m
             }
-            val gridItems = if (atRoot) files else items
-            if (gridItems.isNotEmpty()) {
-                nextGrid.addView(buildStandardGrid(gridItems, gen, columns, nextCards))
-            }
+            homeFilesPending -> nextGrid.addView(hintView(NativeLocale.t("picker_loading_files")))
+            items.isEmpty() -> nextGrid.addView(hintView(emptyHint.ifBlank { NativeLocale.t("picker_empty_folder") }))
         }
         if (gen != generation || revision != gridRevision) return
-        
-        
+
         container.removeAllViews()
         container.addView(nextGrid, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
         fileCards.clear()
         fileCards.putAll(nextCards)
+        gridRows.clear()
+        gridRows.addAll(nextRows)
         listingPending = false
         refreshBreadcrumb()
         refreshSelectionChrome()
@@ -583,15 +705,49 @@ class FilePicker(
             )
             page.layout(0, 0, parent.width, parent.height)
         }
-        if (resetScroll) gridScroll?.scrollTo(0, 0)
-        if (!nestedSuspended) {
-            page.visibility = View.VISIBLE
-            page.bringToFront()
-        }
-        trace("grid_commit path=$currentPath columns=$columns items=${items.size} generation=$gen")
+        if (resetScroll) gridScroll?.scrollToOffset(0)
+        scheduleThumbFlush()
+        page.visibility = View.VISIBLE
+        page.bringToFront()
+        trace("grid_commit path=$currentPath columns=$columns items=${items.size} " +
+            "rows=$firstRows later=${laterRows.size} pendingHome=$homeFilesPending generation=$gen")
+        val m = metrics
+        if (m != null && laterRows.isNotEmpty()) appendRowsLater(nextGrid, laterRows, m, gen, revision)
     }
 
-    private fun buildHomeFolderRow(dirs: List<Item>, columns: Int): View {
+    private fun appendRowsLater(grid: LinearLayout, rows: List<List<Item>>, m: CellMetrics,
+                                gen: Int, revision: Int) {
+        val tail = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
+        var next = 0
+        handler.post(object : Runnable {
+            override fun run() {
+                if (gen != generation || revision != gridRevision) return
+                val end = minOf(rows.size, next + LATER_ROWS_PER_BATCH)
+                while (next < end) {
+                    val row = buildGridRow(rows[next++], m, fileCards)
+                    gridRows += row
+                    tail.addView(row)
+                }
+                if (next < rows.size) {
+                    handler.post(this)
+                    return
+                }
+                grid.addView(tail, LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+                trace("grid_tail path=$currentPath rows=${rows.size} generation=$gen")
+            }
+        })
+    }
+
+    private fun hintView(message: String) = TextView(ctx).apply {
+        text = message
+        textSize = FilePickerScale.sp(ctx, 13.5f)
+        setTextColor(Color.BLACK)
+        gravity = Gravity.CENTER
+        setPadding(0, dp(60), 0, dp(60))
+    }
+
+    private fun buildHomeFolderRow(dirs: List<Item>, columns: Int, rowsOut: MutableList<View>): View {
         val row = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(0, 0, 0, dp(8))
@@ -608,47 +764,50 @@ class FilePicker(
                 line.addView(View(ctx), LinearLayout.LayoutParams(0, 1, 1f))
             }
             row.addView(line)
+            rowsOut += line
         }
         return row
     }
 
-    private fun buildStandardGrid(gridItems: List<Item>, gen: Int, columns: Int,
-                                  cards: MutableMap<String, FilePickerCells.FileCardView>): View {
-        val container = gridContainer ?: return View(ctx)
+    private fun cellMetrics(container: View, columns: Int): CellMetrics {
         val gap = dp(12)
         val colW = ((container.width - container.paddingLeft - container.paddingRight -
             gap * (columns - 1)) / columns).coerceAtLeast(dp(80))
         val coverW = (colW * 0.92f).toInt()
         val coverH = (coverW * FilePickerCells.COVER_ASPECT).toInt()
-        val grid = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
-        var line: LinearLayout? = null
-        gridItems.forEachIndexed { index, item ->
-            if (index % columns == 0) {
-                line = LinearLayout(ctx).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    setPadding(0, 0, 0, gap)
-                }
-                grid.addView(line)
-            }
+        return CellMetrics(colW, coverW, coverH, gap)
+    }
+
+    private fun firstScreenRows(m: CellMetrics): Int {
+        val viewport = gridScroll?.viewportHeight?.takeIf { it > 0 } ?: parent.height
+        return (viewport / (m.coverH + m.gap) + 2).coerceAtLeast(3)
+    }
+
+    private fun buildGridRow(rowItems: List<Item>, m: CellMetrics,
+                             cards: MutableMap<String, FilePickerCells.FileCardView>): View {
+        val line = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 0, 0, m.gap)
+        }
+        rowItems.forEachIndexed { index, item ->
             val cell = if (item.isDir) {
                 FilePickerCells.folderCell(
-                    ctx, item.name, item.childCount, coverW, coverH, item.previewPaths,
+                    ctx, item.name, item.childCount, m.coverW, m.coverH, item.previewPaths,
                     ::loadThumbnail,
                 ) { navigateTo(item.path) }
             } else {
                 val (view, card) = FilePickerCells.fileCell(
-                    ctx, item.name, fileDetail(item), item.path, coverW, coverH,
+                    ctx, item.name, fileDetail(item), item.path, m.coverW, m.coverH,
                     isSelectedPath(item.path), ::loadThumbnail,
                 ) { onCellTap(item) }
                 cards[item.path] = card
                 view
             }
-            line?.addView(cell, LinearLayout.LayoutParams(colW, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-                if (index % columns != 0) marginStart = gap
+            line.addView(cell, LinearLayout.LayoutParams(m.colW, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                if (index != 0) marginStart = m.gap
             })
         }
-        if (gen != generation) return View(ctx)
-        return grid
+        return line
     }
 
     private fun fileDetail(item: Item): String {
@@ -658,21 +817,83 @@ class FilePicker(
 
     private fun loadThumbnail(path: String, view: ImageView, reqW: Int, reqH: Int) {
         val gen = generation
-        Thread({
-            try {
-                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                BitmapFactory.decodeFile(path, bounds)
-                var sample = 1
-                while (bounds.outWidth / (sample * 2) >= reqW &&
-                    bounds.outHeight / (sample * 2) >= reqH) sample *= 2
-                val bmp = BitmapFactory.decodeFile(
-                    path, BitmapFactory.Options().apply { inSampleSize = sample },
-                ) ?: return@Thread
-                handler.post {
-                    if (gen == generation) view.setImageBitmap(bmp) else bmp.recycle()
-                }
-            } catch (_: Throwable) {}
-        }, "InklingPickerThumb").apply { isDaemon = true }.start()
+        pendingThumbs.add(PendingThumb(view, Runnable { decodeThumbnail(path, view, reqW, reqH, gen) }))
+        scheduleThumbFlush()
+    }
+
+    private fun scheduleThumbFlush() {
+        if (thumbFlushScheduled || pendingThumbs.isEmpty()) return
+        thumbFlushScheduled = true
+        android.view.Choreographer.getInstance().postFrameCallback {
+
+            handler.post {
+                thumbFlushScheduled = false
+                flushVisibleThumbs()
+            }
+        }
+    }
+
+    private fun flushVisibleThumbs() {
+        val scroll = gridScroll ?: return
+        val viewport = scroll.viewportHeight
+        if (viewport <= 0) return
+        val top = scroll.scrollOffset
+        val bottom = top + 2 * viewport
+        val it = pendingThumbs.iterator()
+        while (it.hasNext()) {
+            val p = it.next()
+            val y = scroll.topInContent(p.view) ?: continue
+            if (p.view.height == 0 && !p.view.isLaidOut) continue
+            if (y + p.view.height >= top && y <= bottom) {
+                thumbnailExecutor.execute(p.task)
+                it.remove()
+            }
+        }
+    }
+
+    private fun decodeThumbnail(path: String, view: ImageView, reqW: Int, reqH: Int, gen: Int) {
+
+        if (gen != generation) return
+        if (path.endsWith(".note", ignoreCase = true)) {
+            noteCoverExecutor.execute {
+                if (gen == generation) decodeDocumentCover(path, view, reqW, reqH, gen)
+            }
+            return
+        }
+        if (FilePickerCells.hasDocumentCover(path)) {
+            decodeDocumentCover(path, view, reqW, reqH, gen)
+            return
+        }
+        try {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(path, bounds)
+            var sample = 1
+            while (bounds.outWidth / (sample * 2) >= reqW &&
+                bounds.outHeight / (sample * 2) >= reqH) sample *= 2
+            if (gen != generation) return
+            val bmp = BitmapFactory.decodeFile(
+                path, BitmapFactory.Options().apply { inSampleSize = sample },
+            ) ?: return
+            handler.post {
+                if (gen == generation) view.setImageBitmap(bmp) else bmp.recycle()
+            }
+        } catch (_: Throwable) {}
+    }
+
+    private fun decodeDocumentCover(path: String, view: ImageView, reqW: Int, reqH: Int, gen: Int) {
+
+        PluginIdentity.claim()
+        val bmp = try {
+            PickerCovers.load(ctx, path, reqW, reqH)
+        } catch (_: Throwable) {
+            null
+        } ?: return
+        handler.post {
+            if (gen != generation) return@post
+            view.setBackgroundColor(Color.WHITE)
+            view.setImageBitmap(bmp)
+            (view.parent as? FilePickerCells.FileCardView)?.setShowingCover(true)
+        }
     }
 
     private fun isSelectedPath(path: String): Boolean =
@@ -685,8 +906,7 @@ class FilePicker(
             return
         }
         if (confirmDocuments && !item.isImage) {
-            
-            
+
             if (documentSelection.isActive) {
                 updateCell(item.path, documentSelection.toggle(item.path))
                 refreshSelectionChrome()
@@ -759,8 +979,7 @@ class FilePicker(
         val hasImageSelection = imageCount > 0 || selectedDoc?.let { extensionOf(it) in imageExtensions } == true
         val multiActive = documentSelection.isActive
         val count = if (multiActive) documentSelection.count else imageCount
-        
-        
+
         val actionVisible = hasImageSelection || (confirmDocuments && multiActive)
         val actionEnabled = (hasImageSelection || (multiActive && count > 0)) && !listingPending
         bottomTray?.setMultiSelection(
@@ -778,7 +997,7 @@ class FilePicker(
 
     private fun confirm() {
         if (!active || listingPending) return
-        
+
         val result = when {
             documentSelection.isActive -> documentSelection.selectedPaths.ifEmpty { return }
             selectedDoc != null -> listOf(selectedDoc!!)

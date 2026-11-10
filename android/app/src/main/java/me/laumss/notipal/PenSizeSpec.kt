@@ -9,13 +9,15 @@ object PenSizeSpec {
     const val CALLIGRAPHY = 15
     const val MARKER = 11
 
+    const val PENCIL = 21
+    val PENCIL_LABELS = arrayOf("HB", "2B", "3B", "4B", "5B", "6B", "7B", "8B")
+
     private val ALL_LABELS = floatArrayOf(0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f, 0.8f, 0.9f, 1.0f, 1.5f, 2.0f)
     private const val BALL_START = 2
     private const val CALLI_START = 4
 
     private class DeviceTable(val needle: IntArray, val marker: Int)
 
-    
     private val MANTA = DeviceTable(
         needle = intArrayOf(200, 300, 400, 500, 600, 700, 900, 1000, 1100, 1200, 1800, 2400),
         marker = 3800,
@@ -26,7 +28,6 @@ object PenSizeSpec {
         marker = 3000,
     )
 
-    
     private val NOMAD = DeviceTable(
         needle = intArrayOf(200, 300, 400, 500, 700, 800, 1000, 1100, 1200, 1300, 1800, 2400),
         marker = 3800,
@@ -43,7 +44,7 @@ object PenSizeSpec {
 
     fun configureRuntime(deviceType: Int?, pageWidth: Int?, pageHeight: Int?) {
         runtimeTable = when (deviceType) {
-            
+
             5 -> MANTA
             4 -> NOMAD
             3 -> A5X
@@ -60,16 +61,14 @@ object PenSizeSpec {
 
     private fun startIndex(penType: Int?): Int = when (penType) {
         BALL -> BALL_START
-        CALLIGRAPHY -> CALLI_START
+        CALLIGRAPHY, PENCIL -> CALLI_START
         else -> 0
     }
 
-    
     fun stepsFor(penType: Int?): IntArray =
         if (penType == MARKER) intArrayOf(table().marker)
         else table().needle.copyOfRange(startIndex(penType), table().needle.size)
 
-    
     fun labelsFor(penType: Int?): FloatArray =
         if (penType == MARKER) FloatArray(0)
         else ALL_LABELS.copyOfRange(startIndex(penType), ALL_LABELS.size)
@@ -83,12 +82,11 @@ object PenSizeSpec {
         return best
     }
 
-    
     fun snap(penType: Int?, raw: Int): Int = stepsFor(penType)[stepIndex(penType, raw)]
 
-    
     fun label(penType: Int?, raw: Int): String {
         if (penType == MARKER) return "3.0"
+        if (penType == PENCIL) return PENCIL_LABELS[stepIndex(penType, raw)]
         val labels = labelsFor(penType)
         if (labels.isEmpty()) return ""
         return formatLabel(labels[stepIndex(penType, raw)])
@@ -96,7 +94,6 @@ object PenSizeSpec {
 
     fun formatLabel(value: Float): String = "%.1f".format(value)
 
-    
     fun rawForLabel(penType: Int?, labelValue: Float): Int {
         val labels = labelsFor(penType)
         if (labels.isEmpty()) return table().marker
@@ -107,7 +104,6 @@ object PenSizeSpec {
         return stepsFor(penType)[best]
     }
 
-    
     fun convert(fromPen: Int?, toPen: Int?, raw: Int): Int {
         if (fromPen == toPen) return snap(toPen, raw)
         val fromLabels = labelsFor(fromPen)
@@ -116,7 +112,6 @@ object PenSizeSpec {
         return rawForLabel(toPen, fromLabels[stepIndex(fromPen, raw)])
     }
 
-    
     fun penIconAsset(penType: Int, colorKey: String = "black"): String {
         val color = when (colorKey) {
             "ghost" -> "white"

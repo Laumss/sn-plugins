@@ -10,7 +10,6 @@ import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.TextView
 
-
 object FilePickerWidgets {
     class FormatChips(
         private val ctx: Context,
@@ -28,7 +27,7 @@ object FilePickerWidgets {
             container = LinearLayout(ctx).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                
+
                 setPadding(d(26), d(12), d(26), d(16))
             }
             rebuild()

@@ -19,14 +19,13 @@ import android.text.TextPaint
 import android.util.Log
 import androidx.core.graphics.PathParser
 import com.ratta.supernote.plugincommon.data.common.trail.Element
+import me.laumss.notipal.PenSizeSpec
 import java.io.File
-
 
 object VectorPageRenderer {
 
-    private const val PEN_TYPE_MARKER = 11
     private const val MARKER_WASH_ALPHA = 0.45f
-    
+
     private const val GEOMETRY_PEN_WIDTH_SCALE = 100f
     private const val FIVE_STAR_THICKNESS_SCALE = 100f
     private const val TITLE_DARK_GRAY = 0x9D
@@ -43,7 +42,6 @@ object VectorPageRenderer {
 
     private const val TAG = "VectorPageRenderer"
 
-    
     fun render(
         elements: List<Element>,
         pageW: Int,
@@ -78,7 +76,7 @@ object VectorPageRenderer {
                     "${layerPreview?.width}x${layerPreview?.height} from $layerPreviewPath")
             }
             try {
-                
+
                 canvas.save()
                 canvas.scale(scaleX, scaleY)
                 drawElementLayers(
@@ -92,7 +90,7 @@ object VectorPageRenderer {
                 )
                 canvas.restore()
             } finally {
-                try { layerPreview?.recycle() } catch (_: Throwable) {}
+                layerPreview?.recycle()
             }
             return bitmap
         } catch (error: Throwable) {
@@ -101,7 +99,34 @@ object VectorPageRenderer {
         }
     }
 
-    
+    fun drawElements(
+        canvas: Canvas,
+        elements: List<Element>,
+        pageW: Int,
+        pageH: Int,
+        layerPreview: Bitmap? = null,
+    ) = drawElementLayers(canvas, elements, pageW, pageH, 1f, colorMode = false, layerPreview = layerPreview)
+
+    fun renderCard(element: Element, rect: Rect, pageW: Int, pageH: Int, layerPreview: Bitmap?): Bitmap? {
+        val bitmap = Bitmap.createBitmap(rect.width(), rect.height(), Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        canvas.translate(-rect.left.toFloat(), -rect.top.toFloat())
+        val drawn = try {
+            when (element.type) {
+                Element.TRAIL_TYPE_TILE -> { drawTitleBackground(canvas, element, 1f); true }
+                Element.TRAIL_TYPE_LINK -> { drawLink(canvas, element, 1f, colorMode = false); true }
+                Element.TRAIL_TYPE_PICTURE -> drawPicture(canvas, element, pageW, pageH, 1f, layerPreview)
+                else -> false
+            }
+        } catch (error: Throwable) {
+            bitmap.recycle()
+            throw error
+        }
+        if (drawn) return bitmap
+        bitmap.recycle()
+        return null
+    }
+
     private fun drawElementLayers(
         canvas: Canvas,
         elements: List<Element>,
@@ -232,7 +257,7 @@ object VectorPageRenderer {
             style = Paint.Style.FILL
             if (colorOverride != null) {
                 this.color = colorOverride
-            } else if (stroke?.penType == PEN_TYPE_MARKER) {
+            } else if (stroke?.penType == PenSizeSpec.MARKER) {
                 this.color = washColor(color)
                 xfermode = PorterDuffXfermode(PorterDuff.Mode.MULTIPLY)
             } else {
@@ -381,7 +406,6 @@ object VectorPageRenderer {
         canvas.restore()
     }
 
-    
     private fun drawDigestCreateMarker(
         canvas: Canvas,
         rect: RectF,
@@ -567,12 +591,10 @@ object VectorPageRenderer {
         pageH: Int,
         scale: Float,
         layerPreview: Bitmap?,
-    ) {
-        val picture = element.picture ?: return
-        val rect = picture.rect ?: return
-        
-        
-        
+    ): Boolean {
+        val picture = element.picture ?: return false
+        val rect = picture.rect ?: return false
+
         val left = rect.left.toFloat()
         val top = rect.top.toFloat()
         val right = rect.right.toFloat()
@@ -580,7 +602,7 @@ object VectorPageRenderer {
         val destination = RectF(left * scale, top * scale, right * scale, bottom * scale)
         if (destination.width() <= 0f || destination.height() <= 0f) {
             Log.w(TAG, "picture degenerate rect: l=${rect.left} t=${rect.top} r=${rect.right} b=${rect.bottom}")
-            return
+            return false
         }
 
         val path = picture.picturePath.orEmpty()
@@ -599,16 +621,14 @@ object VectorPageRenderer {
                 } finally {
                     bitmap.recycle()
                 }
-                return
+                return true
             }
             Log.w(TAG, "picture decode failed: $path")
         } else {
             Log.i(TAG, "picture path unreadable ($path), using layer preview crop")
         }
 
-        
-        
-        val preview = layerPreview ?: return
+        val preview = layerPreview ?: return false
         val px = preview.width.toFloat() / pageW
         val py = preview.height.toFloat() / pageH
         val src = Rect(
@@ -619,15 +639,16 @@ object VectorPageRenderer {
         )
         if (src.width() <= 0 || src.height() <= 0) {
             Log.w(TAG, "picture preview crop empty, skipped")
-            return
+            return false
         }
         canvas.drawBitmap(
             preview, src, destination,
             Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG),
         )
+        return true
     }
 
-    private fun decodeSampledBitmap(path: String, targetW: Int, targetH: Int): Bitmap? {
+    internal fun decodeSampledBitmap(path: String, targetW: Int, targetH: Int): Bitmap? {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeFile(path, bounds)
         if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
@@ -647,7 +668,6 @@ object VectorPageRenderer {
         )
     }
 
-    
     private fun emrToPage(
         x: Float,
         y: Float,
@@ -677,7 +697,6 @@ object VectorPageRenderer {
         else -> null
     }
 
-    
     private fun resolveColor(raw: Int, colorMode: Boolean): Int {
         val value = raw.toLong() and 0xFFFFFFFFL
         return if (value <= 0xFF) {

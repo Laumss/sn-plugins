@@ -1,4 +1,5 @@
 package me.laumss.notipal.panels
+import me.laumss.notipal.NotipalDirs
 import me.laumss.notipal.BuildConfig
 
 import android.graphics.Bitmap
@@ -13,24 +14,35 @@ object DocScreenshotService {
 
     private const val TAG = "DocScreenshotService"
 
-    private const val STAGING_DIR       = "/sdcard/SCREENSHOT/.plugin_staging"
-    private const val QUEUE_DIR         = "$STAGING_DIR/queue"
-    private const val QUEUE_META_FILE   = "$QUEUE_DIR/queue_meta.json"
-    private const val HISTORY_DIR       = "/sdcard/SCREENSHOT/.plugin_history"
-    private const val SESSION_FILE      = "$STAGING_DIR/stitch_session.json"
-    private const val STITCH_IMAGES_DIR = "$STAGING_DIR/stitch_images"
+    private val STAGING_DIR get() = NotipalDirs.docScreenshots
+    internal val QUEUE_DIR get() = "$STAGING_DIR/queue"
+    private val QUEUE_META_FILE get() = "$QUEUE_DIR/queue_meta.json"
+    internal val HISTORY_DIR get() = "$STAGING_DIR/history"
+    private val SESSION_FILE get() = "$STAGING_DIR/stitch_session.json"
+    private val STITCH_IMAGES_DIR get() = "$STAGING_DIR/stitch_images"
     private const val MAX_HISTORY       = 20
 
     fun cropAndSave(srcPath: String, crop: CropPanel.CropResult, destPath: String): Boolean {
         var source: Bitmap? = null
         var cropped: Bitmap? = null
         return try {
-            val decoded = BitmapFactory.decodeFile(srcPath) ?: return false
-            source = decoded
-            val output = Bitmap.createBitmap(decoded, crop.offsetX, crop.offsetY, crop.width, crop.height)
+            val t0 = System.currentTimeMillis()
+            if (copyIfWholePng(srcPath, crop, destPath)) return true
+            val rect = android.graphics.Rect(
+                crop.offsetX, crop.offsetY, crop.offsetX + crop.width, crop.offsetY + crop.height
+            )
+            val output = StitchLayout.pendingCrop(srcPath, rect) ?: decodeRegion(srcPath, rect) ?: run {
+                val decoded = BitmapFactory.decodeFile(srcPath) ?: return false
+                source = decoded
+                Bitmap.createBitmap(decoded, crop.offsetX, crop.offsetY, crop.width, crop.height)
+            }
             cropped = output
+            val t1 = System.currentTimeMillis()
             FileOutputStream(destPath).use { fos ->
                 if (!output.compress(Bitmap.CompressFormat.PNG, 100, fos)) return false
+            }
+            if (BuildConfig.ENABLE_DEBUG) {
+                Log.i(TAG, "cropAndSave ${crop.width}x${crop.height} decode=${t1 - t0}ms encode=${System.currentTimeMillis() - t1}ms")
             }
             true
         } catch (e: Exception) {
@@ -43,6 +55,38 @@ object DocScreenshotService {
             if (cropped !== source) cropped?.recycle()
             source?.recycle()
         }
+    }
+
+    private fun decodeRegion(srcPath: String, rect: android.graphics.Rect): Bitmap? {
+        val decoder = try {
+            @Suppress("DEPRECATION")
+            android.graphics.BitmapRegionDecoder.newInstance(srcPath, false)
+        } catch (e: Exception) {
+            null
+        } ?: return null
+        return try {
+            decoder.decodeRegion(rect, null)
+        } catch (e: IllegalArgumentException) {
+            null
+        } finally {
+            decoder.recycle()
+        }
+    }
+
+    private fun copyIfWholePng(srcPath: String, crop: CropPanel.CropResult, destPath: String): Boolean {
+        if (crop.offsetX != 0 || crop.offsetY != 0) return false
+        val size = StitchLayout.resultSize(srcPath) ?: run {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(srcPath, bounds)
+            if (bounds.outMimeType != "image/png") return false
+            bounds.outWidth to bounds.outHeight
+        }
+        if (crop.width != size.first || crop.height != size.second) return false
+        if (!StitchLayout.awaitWritten(srcPath)) return false
+        val t0 = System.currentTimeMillis()
+        File(srcPath).copyTo(File(destPath), overwrite = true)
+        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "whole image copied ${size.first}x${size.second} in ${System.currentTimeMillis() - t0}ms")
+        return true
     }
 
     private fun ensureDirs(): Boolean {
@@ -59,33 +103,40 @@ object DocScreenshotService {
     }
 
     fun stageToQueue(srcPath: String, crop: CropPanel.CropResult, insertNext: Boolean = false): String? {
-        return try {
-            if (!ensureDirs()) return null
-            val ts = System.currentTimeMillis()
-            val dest = "$QUEUE_DIR/$ts.png"
-            if (!cropAndSave(srcPath, crop, dest)) return null
-            if (insertNext && !markInsertNext("$ts.png")) {
-                try { File(dest).delete() } catch (_: Exception) {}
-                return null
-            }
-            dest
-        } catch (e: Exception) {
-            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "stageToQueue failed: ${e.message}", e)
-            null
+        if (!ensureDirs()) return null
+        val ts = System.currentTimeMillis()
+        val dest = "$QUEUE_DIR/$ts.png"
+        if (!cropAndSave(srcPath, crop, dest)) return null
+        if (insertNext && !markInsertNext("$ts.png")) {
+            try { File(dest).delete() } catch (_: Exception) {}
+            return null
         }
+        return dest
     }
 
     fun saveToHistory(srcPath: String, crop: CropPanel.CropResult): String? {
-        return try {
+        if (!ensureDirs()) return null
+        val ts = System.currentTimeMillis()
+        val dest = "$HISTORY_DIR/$ts.png"
+        val ok = cropAndSave(srcPath, crop, dest)
+        if (ok) pruneHistory()
+        return if (ok) dest else null
+    }
+
+    fun moveToHistory(pngPath: String): String? {
+        val src = File(pngPath)
+        val dest = File(HISTORY_DIR, "${System.currentTimeMillis()}.png")
+        try {
             if (!ensureDirs()) return null
-            val ts = System.currentTimeMillis()
-            val dest = "$HISTORY_DIR/$ts.png"
-            val ok = cropAndSave(srcPath, crop, dest)
-            if (ok) pruneHistory()
-            if (ok) dest else null
+            src.copyTo(dest, overwrite = true)
+            pruneHistory()
+            return dest.absolutePath
         } catch (e: Exception) {
-            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "saveToHistory failed: ${e.message}", e)
-            null
+            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "moveToHistory failed: ${e.message}", e)
+            dest.delete()
+            return null
+        } finally {
+            src.delete()
         }
     }
 
@@ -121,15 +172,9 @@ object DocScreenshotService {
     }
 
     fun unmarkInsertNext(fileName: String) {
-        try {
-            val set = loadQueueMeta()
-            if (set.remove(fileName)) saveQueueMeta(set)
-        } catch (e: Exception) {
-            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "unmarkInsertNext failed: ${e.message}", e)
-        }
+        val set = loadQueueMeta()
+        if (set.remove(fileName)) saveQueueMeta(set)
     }
-
-    fun isInsertNext(fileName: String): Boolean = loadQueueMeta().contains(fileName)
 
     fun firstInsertNextFile(): File? {
         return try {
@@ -160,8 +205,7 @@ object DocScreenshotService {
         val path: String,
         val width: Int,
         val height: Int,
-        
-        
+
         var trimTop: Int = 0,
         var overlap: Int = 0
     )
@@ -170,7 +214,7 @@ object DocScreenshotService {
         var mode: String = MODE_STRIP,
         var cols: Int = 2,
         var gridOrder: String = "row",
-        
+
         var cropTop: Float = 0f,
         var cropBottom: Float = 0f,
         var cropLeft: Float = 0f,
@@ -291,7 +335,6 @@ object DocScreenshotService {
         }
     }
 
-    
     @Synchronized
     fun addImage(imagePath: String, width: Int, height: Int): StitchSessionData? {
         return try {

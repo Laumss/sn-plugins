@@ -1,15 +1,14 @@
-export const PAGE_MARGIN_RIGHT = 0.04;
-export const MAX_INSERT_LEFT_RATIO = 0.60;
-export const MIN_TEXTBOX_WIDTH_RATIO = 0.20;
-export const MIN_TEXTBOX_FONT_COLUMNS = 8;
+const PAGE_MARGIN_RIGHT = 0.04;
+const MAX_INSERT_LEFT_RATIO = 0.60;
+const MIN_TEXTBOX_WIDTH_RATIO = 0.20;
+const MIN_TEXTBOX_FONT_COLUMNS = 8;
 
-export interface SafeInsertionGeometry {
+interface SafeInsertionGeometry {
   left: number;
   right: number;
   safeMaxLeft: number;
   minTextboxWidth: number;
 }
-
 
 export function normalizeInsertionLeft(
   pageWidth: number,

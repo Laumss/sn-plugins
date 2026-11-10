@@ -6,10 +6,8 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
-import android.graphics.drawable.GradientDrawable
 import android.view.ViewGroup
 import android.widget.ImageView
-
 
 class FolderCoverView(context: Context) : ViewGroup(context) {
 
@@ -32,7 +30,6 @@ class FolderCoverView(context: Context) : ViewGroup(context) {
     private val outline = Path()
     private var geo: Geometry? = null
 
-    
     val slots: List<ImageView> = List(4) { makeSlot() }
 
     init {
@@ -42,12 +39,6 @@ class FolderCoverView(context: Context) : ViewGroup(context) {
 
     private fun makeSlot(): ImageView = ImageView(context).apply {
         scaleType = ImageView.ScaleType.CENTER_CROP
-        val border = ScreenScale.dp(context, 1).coerceAtLeast(1)
-        setPadding(border, border, border, border)
-        background = GradientDrawable().apply {
-            setColor(Color.WHITE)
-            setStroke(border, Color.parseColor("#999999"))
-        }
         visibility = INVISIBLE
     }
 
@@ -116,7 +107,6 @@ class FolderCoverView(context: Context) : ViewGroup(context) {
             )
         }
 
-        
         fun slotSize(ctx: Context, w: Int, h: Int): Pair<Int, Int> {
             val r = geometry(w, h, ScreenScale.dp(ctx, 1.5f).coerceAtLeast(2).toFloat()).slots[0]
             return r.width().toInt() to r.height().toInt()

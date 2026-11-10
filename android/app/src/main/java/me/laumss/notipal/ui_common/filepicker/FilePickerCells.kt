@@ -21,7 +21,6 @@ import java.io.File
 import java.util.Locale
 import kotlin.math.roundToInt
 
-
 object FilePickerCells {
     const val COVER_ASPECT = 450f / 350f
     private const val DOCUMENT_FOLD_RATIO = 0.18f
@@ -30,7 +29,12 @@ object FilePickerCells {
     private const val FILE_CARD_SELECTED_STROKE = 4f
     private val fileCardStroke = Color.rgb(184, 184, 184)
     private val previewImageExts = setOf("jpg", "jpeg", "png", "webp")
-    private val documentPreviewExts = setOf("note", "pdf", "cbz", "epub")
+    private val documentPreviewExts = setOf("note", "pdf", "cbz", "epub", "zip")
+
+    private val documentCoverExts = setOf("pdf", "epub", "cbz", "zip", "note")
+
+    fun hasDocumentCover(name: String): Boolean =
+        name.substringAfterLast('.', "").lowercase(Locale.ROOT) in documentCoverExts
 
     fun isPreviewImage(name: String): Boolean =
         name.substringAfterLast('.', "").lowercase(Locale.ROOT) in previewImageExts
@@ -173,21 +177,39 @@ object FilePickerCells {
             )
             loadThumb(path, image, coverW, coverH)
         } else {
-            card.addView(TextView(ctx).apply {
-                text = extension.uppercase(Locale.ROOT).ifBlank { "FILE" }
-                setTextSize(TypedValue.COMPLEX_UNIT_PX, FilePickerScale.px(ctx, 36f).toFloat())
-                typeface = Typeface.SERIF
-                setTextColor(Color.rgb(65, 65, 65))
-                gravity = Gravity.CENTER
-            }, FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT,
-            ))
+            addExtensionLabel(ctx, card, extension)
+            if (extension in documentCoverExts) {
+
+                val image = ImageView(ctx).apply {
+                    scaleType = ImageView.ScaleType.FIT_CENTER
+                }
+                card.addView(
+                    image,
+                    FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                    ),
+                )
+                loadThumb(path, image, coverW, coverH)
+            }
         }
         cell.addView(card, LinearLayout.LayoutParams(coverW, coverH))
         val title = File(name).nameWithoutExtension.takeIf { it.isNotBlank() } ?: name
         cell.addView(metaBlock(ctx, title, detail, folder = false))
         return cell to card
+    }
+
+    private fun addExtensionLabel(ctx: Context, card: FileCardView, extension: String) {
+        card.addView(TextView(ctx).apply {
+            text = extension.uppercase(Locale.ROOT).ifBlank { "FILE" }
+            setTextSize(TypedValue.COMPLEX_UNIT_PX, FilePickerScale.px(ctx, 36f).toFloat())
+            typeface = Typeface.SERIF
+            setTextColor(Color.rgb(65, 65, 65))
+            gravity = Gravity.CENTER
+        }, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT,
+        ))
     }
 
     private fun metaBlock(
@@ -236,6 +258,8 @@ object FilePickerCells {
         }
         private var cardSelected = selected
 
+        private var showingCover = false
+
         init {
             setWillNotDraw(false)
             isClickable = true
@@ -247,6 +271,12 @@ object FilePickerCells {
                 (w * NOTE_SPINE_RATIO + 3f * scale).roundToInt().coerceAtLeast(1)
             } else 0
             setPadding(noteStart, 0, 0, 0)
+        }
+
+        fun setShowingCover(showing: Boolean) {
+            if (showingCover == showing) return
+            showingCover = showing
+            invalidate()
         }
 
         fun setCardSelected(selected: Boolean) {
@@ -265,7 +295,7 @@ object FilePickerCells {
             strokePaint.strokeWidth = (if (cardSelected) FILE_CARD_SELECTED_STROKE else FILE_CARD_STROKE) * scale
             strokePaint.color = if (cardSelected) Color.BLACK else fileCardStroke
             val inset = strokePaint.strokeWidth / 2f
-            if (extension in documentPreviewExts && extension != "note") {
+            if (extension in documentPreviewExts && extension != "note" && !showingCover) {
                 val fold = w * DOCUMENT_FOLD_RATIO
                 val outline = documentOutline(w, h, inset, fold)
                 val checkpoint = canvas.save()
@@ -296,7 +326,6 @@ object FilePickerCells {
             if (cardSelected) drawSelectionBadge(canvas)
         }
 
-        
         private fun drawSelectionBadge(canvas: Canvas) {
             val left = 10f * scale
             val top = 10f * scale
@@ -310,7 +339,7 @@ object FilePickerCells {
             strokePaint.strokeWidth = (if (cardSelected) FILE_CARD_SELECTED_STROKE else FILE_CARD_STROKE) * scale
             strokePaint.color = if (cardSelected) Color.BLACK else fileCardStroke
             val inset = strokePaint.strokeWidth / 2f
-            if (extension in documentPreviewExts && extension != "note") {
+            if (extension in documentPreviewExts && extension != "note" && !showingCover) {
                 val outline = documentOutline(w, h, inset, w * DOCUMENT_FOLD_RATIO)
                 canvas.drawPath(outline, fillPaint)
                 if (!fillOnly) canvas.drawPath(outline, strokePaint)
@@ -332,7 +361,6 @@ object FilePickerCells {
             }
     }
 
-    
     private fun folderPath(
         path: Path,
         left: Float, top: Float, right: Float, bottom: Float,
@@ -355,7 +383,6 @@ object FilePickerCells {
         path.close()
     }
 
-    
     private class CompactFolderIconView(
         context: Context,
         private val scale: Float,
@@ -376,7 +403,7 @@ object FilePickerCells {
         override fun onDraw(canvas: Canvas) {
             val w = width.toFloat()
             val h = height.toFloat()
-            
+
             val iconW = minOf(w, h * 1.2f)
             val iconH = iconW / 1.2f
             val left = (w - iconW) / 2f
@@ -427,13 +454,17 @@ object FilePickerCells {
 
         init {
             setWillNotDraw(false)
+            val slotStroke = (2f * scale).roundToInt().coerceAtLeast(1)
             previewPaths.take(4).forEach { path ->
                 val image = ImageView(context).apply {
                     scaleType = ImageView.ScaleType.CENTER_INSIDE
                     background = GradientDrawable().apply {
                         setColor(Color.WHITE)
-                        setStroke((2f * scale).roundToInt().coerceAtLeast(1), Color.rgb(35, 35, 35))
+                        setStroke(slotStroke, Color.rgb(35, 35, 35))
                     }
+
+                    setPadding(slotStroke, slotStroke, slotStroke, slotStroke)
+                    cropToPadding = true
                     tag = path
                 }
                 previewImages.add(image)
@@ -473,8 +504,7 @@ object FilePickerCells {
                 tabEnd, tabSlope, bodyTop, radius = w * 0.045f,
             )
             canvas.drawPath(outline, fillPaint)
-            
-            
+
             val checkpoint = canvas.save()
             canvas.clipPath(outline)
             canvas.drawRect(0f, 0f, tabEnd + tabSlope, bodyTop, tabPaint)

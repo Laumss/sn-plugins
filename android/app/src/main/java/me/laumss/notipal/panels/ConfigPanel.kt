@@ -10,8 +10,6 @@ import android.view.Gravity
 import android.view.View
 import android.widget.*
 import com.facebook.react.bridge.ReactApplicationContext
-import me.laumss.notipal.relay.AIRelayCore
-import me.laumss.notipal.relay.core.AppPrefs
 import me.laumss.notipal.ui_common.*
 import org.json.JSONArray
 import org.json.JSONObject
@@ -36,16 +34,17 @@ class ConfigPanel(
         private const val SHARED_CONFIG_STORE_KEY = "shared_preset"
         private const val CONFIG_STORE_KEY = "note_preset"
         private const val DOC_CONFIG_STORE_KEY = "doc_preset"
-        private const val PREFS_NAME = "quicktoolbar_presets"
         private const val TOOL_GRID_COLUMNS = 5
         private const val TOOL_GRID_CELL_HEIGHT_DP = 84
         private const val TOOL_GRID_ICON_SIZE_DP = 44
+
+        private const val TOOL_GRID_ICON_STROKE_THIN_DP = 1.2f
         private const val NOTE_SECTION_TITLE_SP = 21.11f
         private const val NOTE_SECTION_HINT_SP = 16.15f
         private const val TAB_TOOLS = 0
 
-        
         private var currentTab = TAB_TOOLS
+
     }
 
     data class ToolDef(
@@ -57,8 +56,9 @@ class ConfigPanel(
     )
 
     private val TOOL_DEFS = listOf(
-        ToolDef("insert_image",          "icons/ic_tool_image.xml",    "insert_image",          "config_tool_image"),
-        ToolDef("insert_doc_screenshot", "icons/ic_tool_doc.xml",      "insert_doc_screenshot", "config_tool_doc"),
+
+        ToolDef("insert_doc_screenshot", "icons/ic_tool_image.xml",    "insert_doc_screenshot", "config_tool_image_capture"),
+        ToolDef(FloatingToolbarModule.CLIP_MANAGER_TOOL_ID, "icons/ic_tool_doc.xml", FloatingToolbarModule.CLIP_MANAGER_TOOL_ID, "config_tool_clip_manager"),
         ToolDef("insert_text",           "icons/ic_tool_text.xml",     "insert_text",           "config_tool_text"),
         ToolDef(FloatingToolbarModule.SMART_LASSO_TOOL_ID, "icons/ic_tool_lasso_ai.xml", FloatingToolbarModule.SMART_LASSO_TOOL_ID, "config_tool_smart_lasso"),
         ToolDef("insert_link",           "icons/ic_tool_link.xml",     "insert_link",           "config_tool_link"),
@@ -93,7 +93,6 @@ class ConfigPanel(
     private val tabPages = mutableListOf<View>()
     private var restoreBtn: View? = null
 
-    
     internal val isActuallyVisible: Boolean
         get() = rootView?.let { root ->
             root.visibility == View.VISIBLE && root.isAttachedToWindow
@@ -104,8 +103,7 @@ class ConfigPanel(
             Log.i(tag, "show requested showing=$isShowing visible=$isActuallyVisible")
         }
         currentInstance = this
-        
-        
+
         FloatingToolbarModule.setConfigPanelShowPending(true)
         FloatingToolbarModule.setConfigPanelActive(true)
         loadSharedTools()
@@ -113,8 +111,7 @@ class ConfigPanel(
         loadDocTools()
         if (isShowing) resumeVisibility()
         showPanel { shown ->
-            
-            
+
             if (currentInstance === this) {
                 FloatingToolbarModule.setConfigPanelShowPending(false)
             }
@@ -151,9 +148,7 @@ class ConfigPanel(
         tabPages.clear()
         restoreBtn = null
         if (wasCurrent) {
-            
-            
-            
+
             if (FloatingToolbarModule.isConfigPanelShowPending()) {
                 if (BuildConfig.ENABLE_DEBUG) Log.i(tag, "onHide: newer show pending, keep session")
                 return
@@ -230,20 +225,11 @@ class ConfigPanel(
         }
     }
 
-    
-
     private fun selectTab(idx: Int) {
         currentTab = idx
         for (i in tabPages.indices) tabPages[i].visibility = if (i == idx) View.VISIBLE else View.GONE
         restoreBtn?.visibility = if (idx == TAB_TOOLS) View.VISIBLE else View.GONE
         if (idx == TAB_TOOLS) scrollHost?.refreshThumb()
-    }
-
-    private fun lightDivider(h: PanelHost, sideDp: Int): View = View(h.ctx).apply {
-        layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 1).apply {
-            leftMargin = h.dp(sideDp); rightMargin = h.dp(sideDp)
-        }
-        setBackgroundColor(Color.parseColor("#D8D8D8"))
     }
 
     private fun pageSection(h: PanelHost, title: String): TextView = TextView(h.ctx).apply {
@@ -267,9 +253,6 @@ class ConfigPanel(
         }
     }
 
-    
-
-    
     private fun settingRow(h: PanelHost, title: String, value: TextView?, action: View?): LinearLayout {
         val row = LinearLayout(h.ctx).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -333,67 +316,7 @@ class ConfigPanel(
         }
         refreshPeer()
         page.addView(settingRow(h, NativeLocale.t("config_default_peer"), peerValue, peerBtn))
-
-        page.addView(pageSection(h, NativeLocale.t("config_sec_airrelay")))
-        val core = AIRelayCore.get(reactContext)
-        val phoneValue = valueText(h)
-        lateinit var phoneBtn: TextView
-        fun refreshPhone() {
-            val info = core.pairedPhoneInfo()
-            if (info != null) {
-                phoneValue.text = "${info.host}:${info.port}"
-                phoneBtn.visibility = View.VISIBLE
-            } else {
-                phoneValue.text = NativeLocale.t("config_airrelay_none")
-                phoneBtn.visibility = View.GONE
-            }
-        }
-        phoneBtn = smallButton(h, NativeLocale.t("config_airrelay_unbind")) {
-            core.unpairPhone()
-            refreshPhone()
-        }
-        refreshPhone()
-        page.addView(settingRow(h, NativeLocale.t("config_airrelay_phone"), phoneValue, phoneBtn))
-        page.addView(lightDivider(h, 28))
-
-        val toggle = SwitchMark(h.ctx, AppPrefs.autoOpenDetail(reactContext)).apply {
-            layoutParams = LinearLayout.LayoutParams(h.dp(56), h.dp(32))
-        }
-        val autoRow = settingRow(h, NativeLocale.t("config_airrelay_auto_open"), null, toggle)
-        autoRow.setOnClickListener {
-            val next = !AppPrefs.autoOpenDetail(reactContext)
-            AppPrefs.setAutoOpenDetail(reactContext, next)
-            toggle.on = next
-        }
-        page.addView(autoRow)
     }
-
-    
-    private class SwitchMark(ctx: android.content.Context, initial: Boolean) : View(ctx) {
-        var on: Boolean = initial
-            set(value) { field = value; invalidate() }
-        private val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
-        private val rect = android.graphics.RectF()
-        override fun onDraw(canvas: android.graphics.Canvas) {
-            val stroke = height * 0.07f
-            val r = height / 2f
-            rect.set(stroke / 2, stroke / 2, width - stroke / 2, height - stroke / 2)
-            paint.style = android.graphics.Paint.Style.FILL
-            paint.color = if (on) Color.BLACK else Color.WHITE
-            canvas.drawRoundRect(rect, r, r, paint)
-            paint.style = android.graphics.Paint.Style.STROKE
-            paint.strokeWidth = stroke
-            paint.color = Color.BLACK
-            canvas.drawRoundRect(rect, r, r, paint)
-            val knobR = r - stroke * 2.5f
-            val cx = if (on) width - r else r
-            paint.style = android.graphics.Paint.Style.FILL
-            paint.color = if (on) Color.WHITE else Color.BLACK
-            canvas.drawCircle(cx, height / 2f, knobR, paint)
-        }
-    }
-
-    
 
     private fun buildAboutPage(h: PanelHost): View = scrollPage(h) { page ->
         page.addView(LinearLayout(h.ctx).apply {
@@ -433,60 +356,8 @@ class ConfigPanel(
         }
     }
 
-    
-    private fun qrCard(h: PanelHost, payload: String, title: String, desc: String, link: String): View {
-        val card = LinearLayout(h.ctx).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(h.dp(16), h.dp(16), h.dp(20), h.dp(16))
-            background = GradientDrawable().apply {
-                setColor(Color.WHITE)
-                setStroke(h.dp(1), Color.parseColor("#BBBBBB"))
-                cornerRadius = h.dp(6).toFloat()
-            }
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { leftMargin = h.dp(24); rightMargin = h.dp(24); topMargin = h.dp(16) }
-        }
-        val qr = QrCode.encode(payload)
-        if (qr != null) {
-            val target = h.dp(150)
-            val scale = maxOf(2, target / (qr.size + 4))
-            val bmp = qr.toBitmap(scale, quiet = 2)
-            card.addView(ImageView(h.ctx).apply {
-                setImageBitmap(bmp)
-                scaleType = ImageView.ScaleType.CENTER
-                layoutParams = LinearLayout.LayoutParams(bmp.width, bmp.height).apply { rightMargin = h.dp(20) }
-            })
-        }
-        val col = LinearLayout(h.ctx).apply {
-            orientation = LinearLayout.VERTICAL
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-        }
-        col.addView(TextView(h.ctx).apply {
-            text = title
-            textSize = h.sp(18f)
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-            setTextColor(Color.BLACK)
-        })
-        col.addView(TextView(h.ctx).apply {
-            text = desc
-            textSize = h.sp(14f)
-            setTextColor(Color.parseColor("#666666"))
-            setPadding(0, h.dp(6), 0, 0)
-            setLineSpacing(h.dp(2).toFloat(), 1f)
-        })
-        col.addView(TextView(h.ctx).apply {
-            text = link
-            textSize = h.sp(14f)
-            setTextColor(Color.BLACK)
-            setPadding(0, h.dp(10), 0, 0)
-            isSingleLine = true
-            ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
-        })
-        card.addView(col)
-        return card
-    }
+    private fun qrCard(h: PanelHost, payload: String, title: String, desc: String, link: String, wrapLink: Boolean = false): View =
+        QrLinkCard.build(h, payload, title, desc, link, wrapLink)
 
     private fun rebuildToolList() {
         val content = contentArea ?: return
@@ -583,7 +454,7 @@ class ConfigPanel(
     }
 
     private fun noteToolDefs(): List<ToolDef> {
-        val ids = listOf("insert_image", "insert_link")
+        val ids = listOf(FloatingToolbarModule.CLIP_MANAGER_TOOL_ID, "insert_link")
         return ids.mapNotNull { id -> TOOL_DEFS.find { it.id == id } }
     }
 
@@ -592,7 +463,7 @@ class ConfigPanel(
     private fun defaultSharedToolDefs(): List<ToolDef> = sharedToolDefs()
 
     private fun defaultToolDefs(): List<ToolDef> = listOf(
-        TOOL_DEFS.first { it.id == "insert_image" }
+        TOOL_DEFS.first { it.id == FloatingToolbarModule.CLIP_MANAGER_TOOL_ID }
     )
 
     private fun makeToolGrid(): GridLayout {
@@ -640,7 +511,7 @@ class ConfigPanel(
             setImageDrawable(
                 UiUtils.loadAssetIcon(
                     reactContext, tool.iconAsset, dp(TOOL_GRID_ICON_SIZE_DP),
-                    Color.parseColor("#111111")
+                    Color.parseColor("#111111"), toolGridStrokeDeltaPx()
                 )
             )
         }
@@ -732,13 +603,16 @@ class ConfigPanel(
         draggingToolId = null
     }
 
+    private fun toolGridStrokeDeltaPx(): Float = -dp(TOOL_GRID_ICON_STROKE_THIN_DP).toFloat()
+
     private fun applyNoteToolVisibility(icon: ImageView, tool: ToolDef) {
         icon.alpha = 1f
         icon.clearColorFilter()
         icon.setImageDrawable(
             UiUtils.loadAssetIcon(
                 reactContext, tool.iconAsset, dp(TOOL_GRID_ICON_SIZE_DP),
-                if (tool.hidden) Color.parseColor("#B3B3B3") else Color.parseColor("#111111")
+                if (tool.hidden) Color.parseColor("#B3B3B3") else Color.parseColor("#111111"),
+                toolGridStrokeDeltaPx()
             )
         )
     }
@@ -798,27 +672,6 @@ class ConfigPanel(
         target.requestLayout()
     }
 
-    private fun removeTool(id: String, scope: ToolScope) {
-        val list = mutableTools(scope)
-        list.removeAll { it.id == id }
-        when (scope) {
-            ToolScope.SHARED -> refreshSharedToolGrids(rebind = true)
-            ToolScope.NOTE -> refreshToolGrids(rebind = true)
-            ToolScope.DOC -> refreshDocToolGrids(rebind = true)
-        }
-    }
-
-    private fun addTool(tool: ToolDef, scope: ToolScope) {
-        val list = mutableTools(scope)
-        if (list.any { it.id == tool.id }) return
-        list.add(tool)
-        when (scope) {
-            ToolScope.SHARED -> refreshSharedToolGrids(rebind = true)
-            ToolScope.NOTE -> refreshToolGrids(rebind = true)
-            ToolScope.DOC -> refreshDocToolGrids(rebind = true)
-        }
-    }
-
     private fun restoreDefaultSharedTools() {
         sharedTools.clear()
         sharedTools.addAll(defaultSharedToolDefs())
@@ -836,14 +689,16 @@ class ConfigPanel(
         val result = mutableListOf<ToolDef>()
         var found = false
         try {
-            val raw = reactContext.getSharedPreferences(PREFS_NAME, 0).getString(key, null)
+            val raw = reactContext.getSharedPreferences(NotipalPrefs.PRESETS_FILE, 0).getString(key, null)
             val arr = raw?.let { JSONObject(it).optJSONArray("tools") }
             if (arr != null) {
                 found = true
                 for (i in 0 until arr.length()) {
                     val item = arr.optJSONObject(i) ?: continue
-                    val id = item.optString("id", "")
-                    val action = item.optString("action", "")
+                    var id = item.optString("id", "")
+                    var action = item.optString("action", "")
+
+                    if (id == "insert_image") { id = FloatingToolbarModule.CLIP_MANAGER_TOOL_ID; action = id }
                     val def = allowed.find { it.id == id || it.action == action } ?: continue
                     if (result.none { it.id == def.id }) {
                         result.add(def.copy(hidden = item.optBoolean("hidden", false)))
@@ -899,30 +754,26 @@ class ConfigPanel(
     }
 
     private fun saveSharedTools() {
-        reactContext.getSharedPreferences(PREFS_NAME, 0).edit()
+        reactContext.getSharedPreferences(NotipalPrefs.PRESETS_FILE, 0).edit()
             .putString(SHARED_CONFIG_STORE_KEY, toolJson(sharedTools)).apply()
     }
 
     private fun saveTools() {
-        try {
-            reactContext.getSharedPreferences(PREFS_NAME, 0).edit()
-                .putString(CONFIG_STORE_KEY, toolJson(tools)).apply()
-            if (BuildConfig.ENABLE_DEBUG) Log.i(tag, "saveTools: saved ${tools.size} note-only tools")
-        } catch (e: Exception) {
-            if (BuildConfig.ENABLE_DEBUG) Log.e(tag, "saveTools: ${e.message}")
-        }
+        reactContext.getSharedPreferences(NotipalPrefs.PRESETS_FILE, 0).edit()
+            .putString(CONFIG_STORE_KEY, toolJson(tools)).apply()
+        if (BuildConfig.ENABLE_DEBUG) Log.i(tag, "saveTools: saved ${tools.size} note-only tools")
     }
 
     private fun loadDocTools() {
         val (stored, found) = readStoredTools(DOC_CONFIG_STORE_KEY, docToolDefs())
         docTools.clear()
-        val groupedPreset = reactContext.getSharedPreferences(PREFS_NAME, 0)
+        val groupedPreset = reactContext.getSharedPreferences(NotipalPrefs.PRESETS_FILE, 0)
             .contains(SHARED_CONFIG_STORE_KEY)
         docTools.addAll(if (found && (groupedPreset || stored.isNotEmpty())) stored else docToolDefs())
     }
 
     private fun saveDocTools() {
-        reactContext.getSharedPreferences(PREFS_NAME, 0).edit()
+        reactContext.getSharedPreferences(NotipalPrefs.PRESETS_FILE, 0).edit()
             .putString(DOC_CONFIG_STORE_KEY, toolJson(docTools)).apply()
     }
 

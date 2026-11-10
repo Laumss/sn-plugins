@@ -22,35 +22,20 @@ class TextLayoutEngine(reactContext: ReactApplicationContext) :
         private const val PAGE_MARGIN_RIGHT = 0.04
         private const val TOP_MARGIN_BASE = 150
         private const val BASE_PAGE_HEIGHT = 1872
-        
+
         private const val WIDTH_ADJUSTMENT = 30
-        
-        
-        
-        
-        
+
         private const val SYSTEM_FONT_WRAP_SAFETY_RATIO = 0.15
         private const val SYSTEM_FONT_WRAP_SAFETY_MIN_LINES = 8
         private const val MAX_INSERT_LEFT_RATIO = 0.60
         private const val MIN_TEXTBOX_WIDTH_RATIO = 0.20
         private const val MIN_TEXTBOX_FONT_COLUMNS = 8
 
-        
-        
-        
-        
-        
         private const val DEVICE_LINE_HEIGHT = 42
         const val NOTE_RENDER_PAD = 28
 
         private const val MIN_TEXTBOX_HEIGHT = 48
 
-        
-        
-        
-        
-        
-        
         private const val EMOJI_PER_EXTRA_LINE = 4
         private val EMOJI_REGEX = Regex("[\\x{1F000}-\\x{1FAFF}\\x{2600}-\\x{27BF}\\x{FE0F}\\x{2190}-\\x{21FF}\\x{2B00}-\\x{2BFF}]")
 
@@ -135,8 +120,7 @@ class TextLayoutEngine(reactContext: ReactApplicationContext) :
             val nativeHeight = layout.height
             val measuredLineCount = layout.lineCount
             val renderLineCount = noteRenderLineCount(measuredLineCount)
-            
-            
+
             val deviceHeight = renderLineCount * DEVICE_LINE_HEIGHT
 
             val segments = text.split("\n").filter { it.trim().isNotEmpty() }
@@ -180,7 +164,6 @@ class TextLayoutEngine(reactContext: ReactApplicationContext) :
         }
     }
 
-    
     @ReactMethod
     fun measureLineStarts(params: ReadableMap, promise: Promise) {
         try {

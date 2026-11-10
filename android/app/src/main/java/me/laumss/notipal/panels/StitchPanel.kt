@@ -33,7 +33,6 @@ class StitchPanel(
     override val fullScreen = true
     override val windowFlags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
 
-    
     override val forcedOrientation: Int? = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
 
     companion object {
@@ -69,7 +68,7 @@ class StitchPanel(
     private val previews = mutableListOf<Bitmap?>()
     private var canvasView: StitchCanvas? = null
     private var seamLabel: TextView? = null
-    
+
     private var selectedSeam = 1
     private var busy = false
     private var aligning = false
@@ -119,22 +118,20 @@ class StitchPanel(
         currentInstance = null
     }
 
-    private fun prefs() = try {
-        reactContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-    } catch (_: Exception) { null }
+    private fun prefs() = reactContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     private fun applySavedLayout(s: StitchSessionData) {
-        val p = prefs() ?: return
+        val p = prefs()
         s.params.mode = if (p.getString(PREF_LAST_MODE, null) == StitchParams.MODE_GRID)
             StitchParams.MODE_GRID else StitchParams.MODE_STRIP
         s.params.cols = p.getInt(PREF_LAST_COLS, 2).coerceIn(2, 4)
     }
 
     private fun saveLayout(params: StitchParams) {
-        prefs()?.edit()
-            ?.putString(PREF_LAST_MODE, params.mode)
-            ?.putInt(PREF_LAST_COLS, params.cols)
-            ?.apply()
+        prefs().edit()
+            .putString(PREF_LAST_MODE, params.mode)
+            .putInt(PREF_LAST_COLS, params.cols)
+            .apply()
     }
 
     private fun loadPreviews(s: StitchSessionData) {
@@ -223,8 +220,6 @@ class StitchPanel(
         return v.measuredHeight
     }
 
-    
-
     private fun buildFooter(s: StitchSessionData, strip: Boolean): LinearLayout {
         val wrapper = LinearLayout(reactContext).apply {
             orientation = LinearLayout.VERTICAL
@@ -285,7 +280,7 @@ class StitchPanel(
                 row.addView(makeChip("$c", selected = c == active) { setCols(c) })
             }
         }
-        
+
         if (n > s.params.cols.coerceIn(1, n)) {
             row.addView(
                 segmented(
@@ -370,8 +365,6 @@ class StitchPanel(
         label.text = if (s.images.size > 2) "${NativeLocale.t("stitch_seam", i)} · $overlap" else overlap
     }
 
-    
-
     private fun setMode(mode: String) {
         val s = session ?: return
         if (busy) return
@@ -433,7 +426,7 @@ class StitchPanel(
         if (busy || aligning) return
         s.images.reverse()
         previews.reverse()
-        
+
         for (img in s.images) { img.trimTop = 0; img.overlap = 0 }
         selectedSeam = s.images.size - 1
         rebuildContent()
@@ -447,7 +440,7 @@ class StitchPanel(
         try { java.io.File(last.path).delete() } catch (_: Exception) {}
         if (previews.size > s.images.size) previews.removeAt(previews.size - 1)?.recycle()
         if (s.images.size < 2) {
-            
+
             busy = true
             onContinue?.invoke(s)
             return
@@ -478,9 +471,6 @@ class StitchPanel(
         hide()
     }
 
-    
-
-    
     private class Handle(
         val kind: Int, val index: Int,
         val x1: Float, val y1: Float, val x2: Float, val y2: Float,
@@ -560,7 +550,7 @@ class StitchPanel(
             val availH = height - pad * 2
             val fitWidth = availW / lay.width
             val fitAll = min(fitWidth, availH / lay.height)
-            
+
             scale = if (isStrip(s)) min(fitWidth, max(fitAll, fitWidth * 0.4f)) else fitAll
             val contentH = lay.height * scale
             originX = (width - lay.width * scale) / 2f
@@ -572,7 +562,7 @@ class StitchPanel(
                 maxScroll = contentH - availH
             }
             if (focusPending) {
-                
+
                 focusPending = false
                 val seamY = lay.pieces.getOrNull(selectedSeam)?.dst?.top ?: 0f
                 scrollOff = seamY * scale - availH / 2f
@@ -742,7 +732,7 @@ class StitchPanel(
                         H_RIGHT -> s.params.cropRight = (startVal - dx / scale / first.width)
                             .coerceIn(0f, max(0f, MAX_SIDE_CROP - s.params.cropLeft))
                     }
-                    
+
                     arrangement = StitchLayout.compute(s)
                     when (h.kind) {
                         H_TOP -> originY = startOriginY + (s.params.cropTop - startVal) * first.height * scale

@@ -9,7 +9,6 @@ object ScreenScale {
 
     private val isA5X2: Boolean = Build.BOARD == "A5X2"
 
-    
     private val isA5X: Boolean =
         !isA5X2 &&
             (Build.MODEL.equals("Supernote A5 X", ignoreCase = true) ||
@@ -18,36 +17,12 @@ object ScreenScale {
                 Build.MODEL.equals("A5X", ignoreCase = true) ||
                 Build.MODEL.endsWith(" A5X", ignoreCase = true))
 
-    
-    fun isCompact1404(ctx: Context): Boolean {
-        val dm = ctx.resources.displayMetrics
-        val shortSide = minOf(dm.widthPixels, dm.heightPixels)
-        val longSide = maxOf(dm.widthPixels, dm.heightPixels)
-        return shortSide == 1404 && longSide == 1872 && !isA5X
-    }
-
-    
-    fun gridColumns(screenW: Int, screenH: Int): Int {
-        if (screenW <= screenH) return 3
-        if (isA5X || isA5X2) return 5
-        return 4
-    }
-
-    private const val COMPACT_GRID_TEXT_BOOST = 1.22f
-
-    fun gridSp(ctx: Context, v: Float): Float {
-        val base = sp(ctx, v)
-        return if (isCompact1404(ctx)) base * COMPACT_GRID_TEXT_BOOST else base
-    }
-
     private const val DESIGN_DENSITY = 1.875f
 
     private const val MIN_FACTOR = 0.88f
 
-    
     private const val LOW_DENSITY_BOOST = 1.37f
 
-    
     private const val A5X_TOOLBAR_BOOST = 5.2f / 3.8f
 
     private fun needsBoost(ctx: Context): Boolean {
@@ -59,7 +34,6 @@ object ScreenScale {
     private fun densityBoost(ctx: Context): Float =
         if (needsBoost(ctx)) LOW_DENSITY_BOOST else 1.0f
 
-    
     fun factor(ctx: Context): Float {
         val dm = ctx.resources.displayMetrics
         val shortSide = minOf(dm.widthPixels, dm.heightPixels)
@@ -73,11 +47,10 @@ object ScreenScale {
         val dm = ctx.resources.displayMetrics
         val shortSide = minOf(dm.widthPixels, dm.heightPixels)
         val longSide = maxOf(dm.widthPixels, dm.heightPixels)
-        
+
         return shortSide == 1404 && longSide == 1872 && dm.density <= 1.5f
     }
 
-    
     fun toolbarFactor(ctx: Context): Float {
         val base = factor(ctx)
         return when {
@@ -86,7 +59,6 @@ object ScreenScale {
         }
     }
 
-    
     private fun boostedFactor(ctx: Context): Float = factor(ctx) * densityBoost(ctx)
 
     fun px(ctx: Context, designPx: Number): Int {
@@ -122,7 +94,6 @@ object ScreenScale {
 
     private fun isLargeScreen(screenLong: Int) = screenLong >= LARGE_SCREEN_LONG_PX
 
-    
     private fun useLargePanelPct(screenLong: Int) = isA5X || isLargeScreen(screenLong)
 
     fun panelWidth(density: Float, screenW: Int, screenH: Int, screenLong: Int): Int {

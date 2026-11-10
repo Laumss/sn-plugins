@@ -21,6 +21,7 @@ class PalettePanel(
 
     override val tag = "PalettePanel"
     override val panelName = "palette"
+    override val yieldsLexi = true
     override val heightRatio = 0.90
 
     companion object {
@@ -32,14 +33,6 @@ class PalettePanel(
             return inst
         }
 
-        private const val PREFS_NAME = "quicktoolbar_presets"
-
-        
-        private const val SNAPSHOT_PREF_KEY = "preset_95"
-        private const val SNAP_COLS = 1
-        private const val SNAP_ROWS = 3
-
-        
         const val COLS = 5
         const val VISIBLE_COLS = 5
         const val ROWS = 2
@@ -68,11 +61,9 @@ class PalettePanel(
         private val INK2 = Color.parseColor("#6B6B6B")
         private val LINE = Color.parseColor("#C6C6C6")
         private val LINE2 = Color.parseColor("#9D9D9D")
-        private val FAINT = Color.parseColor("#9D9D9D")
 
-        
         fun normalizePenType(raw: Int): Int? = when (raw) {
-            PenSizeSpec.NEEDLE, PenSizeSpec.BALL, PenSizeSpec.CALLIGRAPHY, PenSizeSpec.MARKER -> raw
+            PenSizeSpec.NEEDLE, PenSizeSpec.BALL, PenSizeSpec.CALLIGRAPHY, PenSizeSpec.MARKER, PenSizeSpec.PENCIL -> raw
             else -> null
         }
     }
@@ -93,9 +84,9 @@ class PalettePanel(
     private val MOSAIC_PENS = listOf(
         PenDef("ball", PenSizeSpec.CALLIGRAPHY, NativeLocale.t("pen_calligraphy")),
         PenDef("needle", 10, NativeLocale.t("pen_needle")),
+        PenDef("pencil", PenSizeSpec.PENCIL, NativeLocale.t("pen_pencil")),
         PenDef("marker", 11, NativeLocale.t("pen_marker")),
         PenDef("mk-lightGray", 11, NativeLocale.t("palette_marker_light_gray")),
-        PenDef("mk-gray", 11, NativeLocale.t("palette_marker_mid_gray")),
         PenDef("mk-darkGray", 11, NativeLocale.t("palette_marker_dark_gray")),
     )
 
@@ -105,40 +96,16 @@ class PalettePanel(
 
     private fun penDefById(id: String) = visiblePens().find { it.id == canonicalPenId(id) } ?: visiblePens()[0]
 
-    data class PenColorDef(val key: String, val value: Int, val label: String, val swatch: Int, val hex: String = "", val isExtended: Boolean = false)
+    data class PenColorDef(val key: String, val value: Int, val label: String, val swatch: Int)
 
     private val PRODUCT_COLORS = listOf(
-        PenColorDef("black",     0x00, NativeLocale.t("color_black"),      Color.BLACK, "#000000"),
-        PenColorDef("darkGray",  0x9D, NativeLocale.t("color_dark_gray"),  Color.parseColor("#9D9D9D"), "#9D9D9D"),
-        PenColorDef("lightGray", 0xC9, NativeLocale.t("color_light_gray"), Color.parseColor("#C9C9C9"), "#C9C9C9"),
-        PenColorDef("ghost",     0xFE, NativeLocale.t("color_ghost"),      Color.WHITE, "#FFFFFF"),
+        PenColorDef("black",     0x00, NativeLocale.t("color_black"),      Color.BLACK),
+        PenColorDef("darkGray",  0x9D, NativeLocale.t("color_dark_gray"),  Color.parseColor("#9D9D9D")),
+        PenColorDef("lightGray", 0xC9, NativeLocale.t("color_light_gray"), Color.parseColor("#C9C9C9")),
+        PenColorDef("ghost",     0xFE, NativeLocale.t("color_ghost"),      Color.WHITE),
     )
 
-    private val EXTENDED_COLORS = listOf(
-        PenColorDef("blue",   0x00, NativeLocale.t("color_blue"),   Color.parseColor("#3F6FA8"), "#3F6FA8", isExtended = true),
-        PenColorDef("red",    0x00, NativeLocale.t("color_red"),    Color.parseColor("#B23F3F"), "#B23F3F", isExtended = true),
-        PenColorDef("pink",   0x00, NativeLocale.t("color_pink"),   Color.parseColor("#C266A0"), "#C266A0", isExtended = true),
-        PenColorDef("orange", 0x00, NativeLocale.t("color_orange"), Color.parseColor("#C67C33"), "#C67C33", isExtended = true),
-        PenColorDef("green",  0x00, NativeLocale.t("color_green"),  Color.parseColor("#4F8C4F"), "#4F8C4F", isExtended = true),
-        PenColorDef("cyan",   0x00, NativeLocale.t("color_cyan"),   Color.parseColor("#3C9A9A"), "#3C9A9A", isExtended = true),
-        PenColorDef("lime",   0x00, NativeLocale.t("color_lime"),   Color.parseColor("#94A93C"), "#94A93C", isExtended = true),
-        PenColorDef("purple", 0x00, NativeLocale.t("color_purple"), Color.parseColor("#7B5BA6"), "#7B5BA6", isExtended = true),
-    )
-
-    private val EXTENDED_BRIGHT = listOf(
-        PenColorDef("blue_b",   0x00, NativeLocale.t("color_blue"),   Color.parseColor("#7FB2E2"), "#7FB2E2", isExtended = true),
-        PenColorDef("red_b",    0x00, NativeLocale.t("color_red"),    Color.parseColor("#E58585"), "#E58585", isExtended = true),
-        PenColorDef("pink_b",   0x00, NativeLocale.t("color_pink"),   Color.parseColor("#ECA6CF"), "#ECA6CF", isExtended = true),
-        PenColorDef("orange_b", 0x00, NativeLocale.t("color_orange"), Color.parseColor("#EEB66E"), "#EEB66E", isExtended = true),
-        PenColorDef("green_b",  0x00, NativeLocale.t("color_green"),  Color.parseColor("#90CA90"), "#90CA90", isExtended = true),
-        PenColorDef("cyan_b",   0x00, NativeLocale.t("color_cyan"),   Color.parseColor("#7BCDCD"), "#7BCDCD", isExtended = true),
-        PenColorDef("lime_b",   0x00, NativeLocale.t("color_lime"),   Color.parseColor("#CCDB79"), "#CCDB79", isExtended = true),
-        PenColorDef("purple_b", 0x00, NativeLocale.t("color_purple"), Color.parseColor("#B398DB"), "#B398DB", isExtended = true),
-    )
-
-    private val ALL_COLORS = PRODUCT_COLORS + EXTENDED_COLORS + EXTENDED_BRIGHT
-
-    private fun colorDefByKey(key: String) = ALL_COLORS.find { it.key == key }
+    private fun colorDefByKey(key: String) = PRODUCT_COLORS.find { it.key == key }
 
     data class TierPreset(val key: String, var labelValue: Float)
 
@@ -149,19 +116,11 @@ class PalettePanel(
         TierPreset("thick",  1.0f),
     )
 
-    data class Preset(val penId: String, val color: String, val thickness: Int, val locked: Boolean = false) {
-        val penType: Int get() = when {
-            penId == "marker" || penId.startsWith("mk-") -> PenSizeSpec.MARKER
-            penId == "ball" -> PenSizeSpec.BALL
-            penId == "brush" -> PenSizeSpec.CALLIGRAPHY
-            else -> PenSizeSpec.NEEDLE
-        }
-    }
+    data class Preset(val penId: String, val color: String, val thickness: Int, val locked: Boolean = false)
 
     private var strokeCount = 0
     private var geometryCount = 0
     private var avgThickness = 100
-    private var hasMarkerStroke = false
     private var elementNums = listOf<Int>()
     private var dominantPenType: Int? = null
     private var dominantPenColor: Int? = null
@@ -190,14 +149,10 @@ class PalettePanel(
     private val penBtns = mutableMapOf<String, View>()
     private val colorBtns = mutableMapOf<String, View>()
     private val tierBtns = mutableMapOf<String, View>()
-
-    
-    data class SnapshotRec(
-        val id: String, val sticker: String, val thumb: String,
-        val note: String, val page: Int, val ts: Long
-    )
-    private var snapshots = listOf<SnapshotRec>()
-    private var snapshotGrid: LinearLayout? = null
+    private var tierRowView: View? = null
+    private var stepperView: View? = null
+    private var pencilGrid: View? = null
+    private val pencilCircles = mutableListOf<View>()
 
     fun show(infoJson: String) {
         currentInstance = this
@@ -218,8 +173,7 @@ class PalettePanel(
         thicknessChanged = false
         activeTierKey = null
         thickness = PenSizeSpec.snap(initialPenType, avgThickness)
-        
-        
+
         if (elementNums.isNotEmpty() || (mosaicSession && (mosaicSelection.optJSONArray("strokeIds")?.length() ?: 0) > 0)) pushCurrentPreset()
         showPanel()
     }
@@ -241,7 +195,6 @@ class PalettePanel(
     override fun onHide() {
         thicknessLabel = null
         gridContainer = null
-        snapshotGrid = null
         colorContainer = null
         colorHeaderLabel = null
         penTypeLabel = null
@@ -251,6 +204,10 @@ class PalettePanel(
         penBtns.clear()
         colorBtns.clear()
         tierBtns.clear()
+        tierRowView = null
+        stepperView = null
+        pencilGrid = null
+        pencilCircles.clear()
         currentInstance = null
     }
 
@@ -271,7 +228,6 @@ class PalettePanel(
             strokeCount = o.optInt("strokeCount", 0)
             geometryCount = o.optInt("geometryCount", 0)
             avgThickness = o.optInt("avgThickness", 100)
-            hasMarkerStroke = o.optBoolean("hasMarkerStroke", false)
             dominantPenType = if (o.has("dominantPenType") && !o.isNull("dominantPenType"))
                 o.getInt("dominantPenType") else null
             dominantPenColor = if (o.has("dominantPenColor") && !o.isNull("dominantPenColor"))
@@ -285,7 +241,6 @@ class PalettePanel(
 
     private fun curPreset(): Preset? = selectedSlot?.let { presets[it] }
 
-    
     private fun pushCurrentPreset() {
         val penId = selectedPenId ?: return
         val color = selectedColor ?: return
@@ -349,44 +304,6 @@ class PalettePanel(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(1.5f)
             )
             setBackgroundColor(LINE)
-        }
-    }
-
-    private fun makeSectionHeader(zhLabel: String, enLabel: String, trailingText: String? = null): LinearLayout {
-        return LinearLayout(reactContext).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(18), 0, dp(18), 0)
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { bottomMargin = dp(12) }
-
-            addView(TextView(reactContext).apply {
-                text = zhLabel
-                textSize = sp(14.5f)
-                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-                setTextColor(INK)
-            })
-
-            addView(TextView(reactContext).apply {
-                text = enLabel.uppercase()
-                textSize = sp(11.5f)
-                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-                setTextColor(INK2)
-                letterSpacing = 0.15f
-                setPadding(dp(9), 0, 0, 0)
-            })
-
-            if (trailingText != null) {
-                addView(View(reactContext).apply {
-                    layoutParams = LinearLayout.LayoutParams(0, 0, 1f)
-                })
-                addView(TextView(reactContext).apply {
-                    text = trailingText
-                    textSize = sp(12.5f)
-                    setTextColor(FAINT)
-                })
-            }
         }
     }
 
@@ -584,197 +501,6 @@ class PalettePanel(
             setImageBitmap(VectorAssets.loadBitmap(reactContext, asset, iconSize))
             layoutParams = FrameLayout.LayoutParams(iconSize, iconSize, Gravity.CENTER)
         })
-    }
-
-    
-
-    
-    fun reloadSnapshots() {
-        handler.post {
-            loadSnapshots()
-            rebuildSnapshotGrid()
-        }
-    }
-
-    private fun loadSnapshots() {
-        snapshots = try {
-            val json = reactContext.getSharedPreferences(PREFS_NAME, 0)
-                .getString(SNAPSHOT_PREF_KEY, null)
-            if (json == null) emptyList() else {
-                val arr = JSONArray(json)
-                (0 until arr.length()).mapNotNull { i ->
-                    val o = arr.optJSONObject(i) ?: return@mapNotNull null
-                    val sticker = o.optString("sticker", "")
-                    if (sticker.isEmpty()) return@mapNotNull null
-                    SnapshotRec(
-                        o.optString("id", ""), sticker, o.optString("thumb", ""),
-                        o.optString("note", ""), o.optInt("page", 0), o.optLong("ts", 0L)
-                    )
-                }.take(SNAP_ROWS)
-            }
-        } catch (e: Exception) {
-            if (BuildConfig.ENABLE_DEBUG) Log.w(tag, "loadSnapshots: ${e.message}")
-            emptyList()
-        }
-    }
-
-    private fun buildSnapshotSection(): LinearLayout {
-        val section = LinearLayout(reactContext).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(0, 0, 0, 0)
-        }
-
-        val headerRow = LinearLayout(reactContext).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 0, 0, dp(16))
-        }
-        headerRow.addView(TextView(reactContext).apply {
-            text = NativeLocale.t("palette_snapshot_header")
-            textSize = sp(18f)
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-            setTextColor(INK)
-        })
-        section.addView(headerRow)
-
-        snapshotGrid = LinearLayout(reactContext).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(0, 0, 0, 0)
-        }
-        section.addView(snapshotGrid)
-
-        loadSnapshots()
-        rebuildSnapshotGrid()
-        return section
-    }
-
-    private fun rebuildSnapshotGrid() {
-        val container = snapshotGrid ?: return
-        container.removeAllViews()
-        val gap = dp(7)
-
-        for (r in 0 until SNAP_ROWS) {
-            val row = LinearLayout(reactContext).apply {
-                orientation = LinearLayout.HORIZONTAL
-                layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                ).apply { if (r > 0) topMargin = gap }
-            }
-            for (c in 0 until SNAP_COLS) {
-                if (c > 0) row.addView(View(reactContext).apply {
-                    layoutParams = LinearLayout.LayoutParams(gap, 0)
-                })
-                val idx = r * SNAP_COLS + c
-                row.addView(if (idx < snapshots.size) {
-                    makeSnapshotCard(snapshots[idx])
-                } else {
-                    makeEmptySnapshotCard()
-                })
-            }
-            container.addView(row)
-        }
-
-    }
-
-    private fun makeEmptySnapshotCard(): View {
-        return FrameLayout(reactContext).apply {
-            layoutParams = LinearLayout.LayoutParams(0, dp(170), 1f)
-            background = GradientDrawable().apply {
-                setColor(Color.WHITE)
-                setStroke(dp(1.5f), LINE)
-                cornerRadius = 0f
-            }
-        }
-    }
-
-    private fun makeSnapshotCard(rec: SnapshotRec): View {
-        val cardH = dp(170)
-        val card = FrameLayout(reactContext).apply {
-            layoutParams = LinearLayout.LayoutParams(0, cardH, 1f)
-            background = GradientDrawable().apply {
-                setColor(Color.WHITE)
-                setStroke(dp(1.5f), LINE2)
-                cornerRadius = 0f
-            }
-            setOnClickListener { requestSnapshotRestore(rec) }
-        }
-
-        val inner = LinearLayout(reactContext).apply {
-            orientation = LinearLayout.VERTICAL
-            layoutParams = FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT
-            )
-            setPadding(dp(6), dp(6), dp(6), dp(5))
-        }
-        inner.addView(ImageView(reactContext).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
-            )
-            scaleType = ImageView.ScaleType.FIT_CENTER
-            decodeThumb(rec.thumb, dp(140))?.let { setImageBitmap(it) }
-                ?: setImageDrawable(null)
-        })
-        inner.addView(TextView(reactContext).apply {
-            text = "P${rec.page + 1} · " + java.text.SimpleDateFormat(
-                "MM-dd HH:mm", java.util.Locale.getDefault()
-            ).format(java.util.Date(rec.ts))
-            textSize = sp(11.5f)
-            setTextColor(INK2)
-            gravity = Gravity.CENTER
-            maxLines = 1
-            setPadding(0, dp(2), 0, 0)
-        })
-        card.addView(inner)
-
-        card.addView(TextView(reactContext).apply {
-            text = "✕"
-            textSize = sp(14f)
-            setTextColor(INK2)
-            gravity = Gravity.CENTER
-            val sz = dp(30)
-            layoutParams = FrameLayout.LayoutParams(sz, sz, Gravity.TOP or Gravity.END)
-            setOnClickListener { requestSnapshotDelete(rec) }
-        })
-
-        return card
-    }
-
-    private fun decodeThumb(path: String, targetW: Int): Bitmap? {
-        if (path.isEmpty()) return null
-        return try {
-            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            BitmapFactory.decodeFile(path, bounds)
-            if (bounds.outWidth <= 0) return null
-            var sample = 1
-            while (bounds.outWidth / (sample * 2) >= targetW) sample *= 2
-            BitmapFactory.decodeFile(path, BitmapFactory.Options().apply { inSampleSize = sample })
-        } catch (e: Exception) {
-            if (BuildConfig.ENABLE_DEBUG) Log.w(tag, "decodeThumb: ${e.message}")
-            null
-        }
-    }
-
-    private fun requestSnapshotRestore(rec: SnapshotRec) {
-        showConfirmDialog(NativeLocale.t("palette_snapshot_restore_confirm")) {
-            
-            hide()
-            toolbarModule.restoreToolbar()
-            toolbarModule.emitEvent("paletteSnapshot", Arguments.createMap().apply {
-                putString("op", "restore")
-                putString("sticker", rec.sticker)
-            })
-        }
-    }
-
-    private fun requestSnapshotDelete(rec: SnapshotRec) {
-        showConfirmDialog(NativeLocale.t("palette_snapshot_delete_confirm")) {
-            toolbarModule.emitEvent("paletteSnapshot", Arguments.createMap().apply {
-                putString("op", "delete")
-                putString("id", rec.id)
-            })
-        }
     }
 
     private fun buildLowerSplitSection(): LinearLayout {
@@ -984,7 +710,7 @@ class PalettePanel(
                     shape = GradientDrawable.OVAL
                     setColor(def.swatch)
                     setStroke(
-                        if (def.isExtended) dp(1) else dp(1.5f),
+                        dp(1.5f),
                         when (def.key) {
                             "black" -> Color.BLACK
                             "darkGray" -> Color.parseColor("#9D9D9D")
@@ -1043,6 +769,7 @@ class PalettePanel(
             tierRow.addView(btn)
         }
         parent.addView(tierRow)
+        tierRowView = tierRow
 
         val stepper = LinearLayout(reactContext).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -1062,8 +789,80 @@ class PalettePanel(
         stepper.addView(thicknessLabel)
         stepper.addView(makeStepperBtn("+") { stepThickness(1) })
         parent.addView(stepper)
+        stepperView = stepper
+
+        val grid = buildPencilGrid()
+        parent.addView(grid)
+        pencilGrid = grid
 
         syncThicknessDisplay()
+    }
+
+    private fun buildPencilGrid(): LinearLayout {
+        val grid = LinearLayout(reactContext).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            visibility = View.GONE
+        }
+        PenSizeSpec.PENCIL_LABELS.indices.chunked(4).forEachIndexed { rowIndex, row ->
+            val line = LinearLayout(reactContext).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER
+                if (rowIndex > 0) layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { topMargin = dp(12) }
+            }
+            row.forEachIndexed { i, grade ->
+                if (i > 0) line.addView(View(reactContext).apply {
+                    layoutParams = LinearLayout.LayoutParams(ScreenScale.px(reactContext, EDITOR_GAP_PX), 0)
+                })
+                line.addView(makePencilCell(grade))
+            }
+            grid.addView(line)
+        }
+        return grid
+    }
+
+    private fun makePencilCell(grade: Int): LinearLayout {
+        val circleSize = ScreenScale.px(reactContext, EDITOR_CIRCLE_PX)
+        val circle = FrameLayout(reactContext).apply {
+            layoutParams = LinearLayout.LayoutParams(circleSize, circleSize)
+            background = makeSlotCircleBackground(false)
+            val dotSize = ScreenScale.px(reactContext, 18f + 30f * grade / PenSizeSpec.PENCIL_LABELS.lastIndex)
+            addView(View(reactContext).apply {
+                layoutParams = FrameLayout.LayoutParams(dotSize, dotSize, Gravity.CENTER)
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(INK)
+                }
+            })
+        }
+        pencilCircles.add(circle)
+        return LinearLayout(reactContext).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(circleSize, LinearLayout.LayoutParams.WRAP_CONTENT)
+            setOnClickListener {
+                thickness = PenSizeSpec.stepsFor(PenSizeSpec.PENCIL)[grade]
+                thicknessChanged = true
+                activeTierKey = null
+                syncThicknessDisplay()
+                updateTierSelection()
+                updateApplyState()
+                autoSaveToActivePreset()
+            }
+            addView(circle)
+            addView(TextView(reactContext).apply {
+                text = PenSizeSpec.PENCIL_LABELS[grade]
+                textSize = sp(15f)
+                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                setTextColor(INK)
+                gravity = Gravity.CENTER
+                layoutParams = LinearLayout.LayoutParams(
+                    circleSize, ScreenScale.px(reactContext, SLOT_LABEL_HEIGHT_PX)
+                ).apply { topMargin = ScreenScale.px(reactContext, SLOT_LABEL_MARGIN_PX) }
+            })
+        }
     }
 
     private fun makeTierBtn(tier: TierPreset): LinearLayout {
@@ -1149,6 +948,14 @@ class PalettePanel(
     private fun updateTierSelection() {
         val isMarker = effectivePenType() == PenSizeSpec.MARKER
         thicknessSection?.visibility = if (isMarker) View.GONE else View.VISIBLE
+        val isPencil = effectivePenType() == PenSizeSpec.PENCIL
+        tierRowView?.visibility = if (isPencil) View.GONE else View.VISIBLE
+        stepperView?.visibility = if (isPencil) View.GONE else View.VISIBLE
+        pencilGrid?.visibility = if (isPencil) View.VISIBLE else View.GONE
+        if (isPencil) {
+            val current = PenSizeSpec.stepIndex(PenSizeSpec.PENCIL, thickness)
+            pencilCircles.forEachIndexed { i, circle -> circle.background = makeSlotCircleBackground(i == current) }
+        }
         for ((key, btn) in tierBtns) {
             val isActive = activeTierKey == key
             val tier = tierPresets.find { it.key == key } ?: continue
@@ -1235,14 +1042,9 @@ class PalettePanel(
     }
 
     private fun showConfirmDialog(msg: String, onConfirm: () -> Unit) {
-        com.ratta.supernote.pluginlib.api.HostUIAPI.getInstance().showRattaDialog(
-            reactContext.currentActivity, msg,
-            NativeLocale.t("cancel"), NativeLocale.t("confirm"), false,
-            object : com.ratta.supernote.pluginlib.callback.RattaDialogListener {
-                override fun onConfirm() { onConfirm() }
-                override fun onCancel() {}
-            }
-        )
+        me.laumss.notipal.ui_common.Dialog.confirmResult(reactContext, msg) { confirmed ->
+            if (confirmed) onConfirm()
+        }
     }
 
     private fun autoSaveToActivePreset() {
@@ -1269,7 +1071,8 @@ class PalettePanel(
     }
 
     private fun updateApplyState() {
-        val hasSelection = !mosaicSession || (mosaicSelection.optJSONArray("strokeIds")?.length() ?: 0) > 0
+        val hasSelection = if (mosaicSession) (mosaicSelection.optJSONArray("strokeIds")?.length() ?: 0) > 0
+            else elementNums.isNotEmpty()
         val canApply = hasSelection && (colorChanged() || thicknessChanged || penTypeChanged())
         applyBtn?.alpha = if (canApply) 1f else 0.4f
         applyBtn?.isEnabled = canApply
@@ -1300,29 +1103,18 @@ class PalettePanel(
             return
         }
         val colorDef = selectedColor?.let { colorDefByKey(it) }
-        val colorValue = if (colorChanged() && colorDef != null) {
-            if (colorDef.isExtended) 0x00 else colorDef.value
-        } else null
+        val colorValue = if (colorChanged() && colorDef != null) colorDef.value else null
 
         val map = Arguments.createMap().apply {
             if (colorValue != null) putInt("penColor", colorValue)
             if (thicknessChanged) putInt("thickness", thickness)
             if (penTypeChanged()) putInt("penType", effectivePenType()!!)
             putString("elementNums", JSONArray(elementNums).toString())
-            
-            
-            putBoolean("hasMarkerStroke", hasMarkerStroke)
         }
         toolbarModule.beginPaletteApply()
-        
-        
+
         applyBtn?.isEnabled = false
-        
-        
-        
-        
-        
-        
+
         suspendVisibility()
         toolbarModule.emitEvent("paletteApply", map)
     }
@@ -1334,15 +1126,10 @@ class PalettePanel(
 
     private fun loadPresets() {
         try {
-            val prefs = reactContext.getSharedPreferences(PREFS_NAME, 0)
+            val prefs = reactContext.getSharedPreferences(NotipalPrefs.PRESETS_FILE, 0)
             val key = MosaicPaletteSpec.presetsKey(mosaicSession)
             val json = prefs.getString(key, null) ?: return
             val arr = JSONArray(json)
-            
-            val legacyKey = "${key}_legacy_10_slots"
-            if (arr.length() > MAX_SLOTS && !prefs.contains(legacyKey)) {
-                prefs.edit().putString(legacyKey, json).apply()
-            }
             for (i in 0 until MAX_SLOTS) {
                 if (i >= arr.length() || arr.isNull(i)) {
                     presets[i] = null
@@ -1370,10 +1157,10 @@ class PalettePanel(
                     put("color", p.color)
                     put("thickness", p.thickness)
                     put("locked", p.locked)
-                    put("penType", if (mosaicSession) penDefById(p.penId).penType else p.penType)
+                    put("penType", penDefById(p.penId).penType)
                 })
             }
-            val prefs = reactContext.getSharedPreferences(PREFS_NAME, 0)
+            val prefs = reactContext.getSharedPreferences(NotipalPrefs.PRESETS_FILE, 0)
             prefs.edit().putString(MosaicPaletteSpec.presetsKey(mosaicSession), arr.toString()).apply()
             PaletteBubbleModule.reloadPresets()
         } catch (e: Exception) {
@@ -1383,7 +1170,7 @@ class PalettePanel(
 
     private fun loadTierPrefs() {
         try {
-            val prefs = reactContext.getSharedPreferences(PREFS_NAME, 0)
+            val prefs = reactContext.getSharedPreferences(NotipalPrefs.PRESETS_FILE, 0)
             val defaults = floatArrayOf(0.3f, 0.5f, 0.7f, 1.0f)
             tierPresets.forEachIndexed { index, tier -> tier.labelValue = defaults[index] }
             val json = prefs.getString(MosaicPaletteSpec.tiersKey(mosaicSession), null) ?: return
@@ -1402,7 +1189,7 @@ class PalettePanel(
             for (tier in tierPresets) {
                 o.put(tier.key, tier.labelValue.toDouble())
             }
-            val prefs = reactContext.getSharedPreferences(PREFS_NAME, 0)
+            val prefs = reactContext.getSharedPreferences(NotipalPrefs.PRESETS_FILE, 0)
             prefs.edit().putString(MosaicPaletteSpec.tiersKey(mosaicSession), o.toString()).apply()
         } catch (_: Exception) {}
     }

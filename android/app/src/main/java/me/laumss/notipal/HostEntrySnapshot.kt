@@ -2,7 +2,6 @@ package me.laumss.notipal
 
 import android.view.View
 
-
 internal data class HostEntrySnapshot(
     val lastShowType: Int,
     val pluginViewVisible: Boolean,

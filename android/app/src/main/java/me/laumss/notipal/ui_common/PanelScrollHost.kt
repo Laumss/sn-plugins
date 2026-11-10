@@ -13,7 +13,6 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import com.facebook.react.bridge.ReactApplicationContext
-import kotlin.math.roundToInt
 
 class PanelScrollHost(
     private val ctx: ReactApplicationContext,
@@ -22,7 +21,6 @@ class PanelScrollHost(
     private val density = ctx.resources.displayMetrics.density
     private val scale = ScreenScale.factor(ctx)
     private fun dp(v: Int) = ScreenScale.dp(ctx, v)
-    private fun dpf(v: Float) = v * density * scale
 
     companion object {
 
@@ -59,8 +57,7 @@ class PanelScrollHost(
         }
 
         scrollBar = RattaScrollBar(ctx, density * scale).apply {
-            
-            
+
             visibility = View.INVISIBLE
             onDragScrollPercent = { pct ->
                 scrollView.getChildAt(0)?.let { child ->

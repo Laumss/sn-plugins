@@ -8,7 +8,7 @@ import android.view.InputDevice
 import android.view.MotionEvent
 import android.widget.LinearLayout
 
-class TouchSinkLayout(context: Context) : LinearLayout(context) {
+open class TouchSinkLayout(context: Context) : LinearLayout(context) {
 
     override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
         super.dispatchTouchEvent(ev)

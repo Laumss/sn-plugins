@@ -18,9 +18,7 @@ class InklingPackages : ReactPackage {
                     android.util.Log.i("InklingPackages", "registered $name")
                 }
             } catch (t: Throwable) {
-                
-                
-                
+
                 if (BuildConfig.ENABLE_DEBUG) {
                     android.util.Log.e(
                         "InklingPackages",
@@ -34,7 +32,6 @@ class InklingPackages : ReactPackage {
         tryAdd("LocalSendModule") { LocalSendModule(reactContext) }
         tryAdd("AIRelayModule") { AIRelayModule(reactContext) }
         tryAdd("FloatingBubble") { FloatingBubbleModule(reactContext) }
-        tryAdd("AiBubble") { AiBubbleModule(reactContext) }
         tryAdd("PaletteBubble") { PaletteBubbleModule(reactContext) }
         tryAdd("TextLayoutEngine") { TextLayoutEngine(reactContext) }
         tryAdd("TextboxMetrics") { TextboxMetricsModule(reactContext) }

@@ -20,37 +20,43 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArraySet
 import kotlin.concurrent.thread
 
-
 object LocalSendDiscovery {
     private const val TAG = "LocalSendDiscovery"
     const val MULTICAST_ADDR = "224.0.0.167"
     const val MULTICAST_PORT = 53317
+
     private const val ANNOUNCE_INTERVAL_MS = 5_000L
+    private const val ANNOUNCE_BURST_COUNT = 3
+    private const val ANNOUNCE_BURST_GAP_MS = 2_000L
+
+    private const val SOCKET_WAIT_MS = 500L
     private const val ANNOUNCE_POLL_MS = 500L
-    
+
     private const val DICTATION_PEER_TTL_MS = 15_000L
-    private const val PEER_CLEANUP_INTERVAL_MS = 5_000L
     private const val MAX_FINGERPRINT_LENGTH = 256
     private const val MAX_ALIAS_LENGTH = 128
     private const val SOCKET_RETRY_INITIAL_MS = 1_000L
     private const val SOCKET_RETRY_MAX_MS = 15_000L
 
-    
     data class DictationPeer(
         val alias: String,
         val ip: String,
         val fingerprint: String,
-        
+
         val llmPort: Int,
         val authRequired: Boolean = false,
         val announcementSequence: Long = 0L,
-        
+
         val lastSeen: Long = SystemClock.elapsedRealtime(),
     )
 
     fun interface DictationPeerListener {
-        
+
         fun onPeerSeen(peer: DictationPeer, endpointChanged: Boolean)
+    }
+
+    fun interface NetworkListener {
+        fun onNetworkChanged(reason: String)
     }
 
     private val lifecycleLock = Any()
@@ -58,7 +64,11 @@ object LocalSendDiscovery {
     @Volatile private var discoveryRunning = false
     @Volatile private var dictationListeningRequested = false
     @Volatile private var localSendListeningRequested = false
-    @Volatile private var localSendAnnounceEnabled = false
+    @Volatile private var localSendAnnounceContinuous = false
+    @Volatile private var announceBurstLeft = 0
+
+    private val announceSignal = Object()
+    private var wakeSeq = 0L
     @Volatile private var socketGeneration = 0L
 
     @Volatile private var multicastSocket: MulticastSocket? = null
@@ -66,16 +76,14 @@ object LocalSendDiscovery {
     @Volatile private var networkCallback: ConnectivityManager.NetworkCallback? = null
     @Volatile private var appContext: Context? = null
 
-    
     @Volatile private var announcementProvider: (() -> JSONObject)? = null
-    
+
     @Volatile private var localSendAnnouncementHandler: ((String, JSONObject) -> Unit)? = null
 
     private val dictationPeers = ConcurrentHashMap<String, DictationPeer>()
     private val dictationSequences = ConcurrentHashMap<String, Long>()
     private val dictationPeerListeners = CopyOnWriteArraySet<DictationPeerListener>()
-
-    
+    private val networkListeners = CopyOnWriteArraySet<NetworkListener>()
 
     @JvmStatic
     fun startDictationListening(context: Context) {
@@ -105,7 +113,16 @@ object LocalSendDiscovery {
         dictationPeerListeners -= listener
     }
 
-    
+    @JvmStatic
+    fun addNetworkListener(listener: NetworkListener) {
+        networkListeners += listener
+    }
+
+    @JvmStatic
+    fun removeNetworkListener(listener: NetworkListener) {
+        networkListeners -= listener
+    }
+
     @JvmStatic
     fun startLocalSendDiscovery(
         context: Context,
@@ -122,12 +139,12 @@ object LocalSendDiscovery {
         }
     }
 
-    
     @JvmStatic
     fun stopLocalSendDiscovery() {
         synchronized(lifecycleLock) {
             localSendListeningRequested = false
-            localSendAnnounceEnabled = false
+            localSendAnnounceContinuous = false
+            announceBurstLeft = 0
             announcementProvider = null
             localSendAnnouncementHandler = null
             stopIfNoDemand()
@@ -136,21 +153,34 @@ object LocalSendDiscovery {
 
     @JvmStatic
     fun setLocalSendAnnouncing(enabled: Boolean) {
-        localSendAnnounceEnabled = enabled
+        if (localSendAnnounceContinuous == enabled) return
+        localSendAnnounceContinuous = enabled
+        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "LocalSend continuous announce=$enabled")
+        wakeAnnounceLoop()
     }
 
-    
+    @JvmStatic
+    fun requestLocalSendAnnounce(reason: String) {
+        announceBurstLeft = ANNOUNCE_BURST_COUNT
+        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "LocalSend announce burst reason=$reason")
+        wakeAnnounceLoop()
+    }
+
+    private fun wakeAnnounceLoop() {
+        synchronized(announceSignal) {
+            wakeSeq++
+            announceSignal.notifyAll()
+        }
+    }
+
     @JvmStatic
     fun restartForNetworkChange() {
         restartForNetworkChange("external")
     }
 
-    
-
     private fun hasDiscoveryDemand(): Boolean =
         dictationListeningRequested || localSendListeningRequested
 
-    
     private fun ensureDiscoveryRunning() {
         if (discoveryRunning && multicastSocket != null) return
         val ctx = appContext ?: return
@@ -162,7 +192,6 @@ object LocalSendDiscovery {
         thread(isDaemon = true, name = "LSDiscovery-Announce") { announceLoop(generation) }
     }
 
-    
     private fun stopIfNoDemand() {
         if (hasDiscoveryDemand()) return
         discoveryRunning = false
@@ -173,14 +202,13 @@ object LocalSendDiscovery {
         dictationSequences.clear()
     }
 
-    
     private fun closeSocketLocked() {
         socketGeneration++
         try { multicastSocket?.close() } catch (_: Exception) {}
         multicastSocket = null
+        wakeAnnounceLoop()
     }
 
-    
     private fun ensureNetworkCallbackLocked() {
         if (networkCallback != null) return
         val ctx = appContext ?: return
@@ -218,10 +246,12 @@ object LocalSendDiscovery {
             if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "network changed ($reason), rebinding discovery")
             closeSocketLocked()
             ensureDiscoveryRunning()
+            if (localSendListeningRequested) requestLocalSendAnnounce("network $reason")
         }
+
+        if (reason != "lost") networkListeners.forEach { it.onNetworkChanged(reason) }
     }
 
-    
     private fun unregisterNetworkCallbackLocked() {
         val callback = networkCallback ?: return
         networkCallback = null
@@ -257,8 +287,6 @@ object LocalSendDiscovery {
                     joinGroup(group)
                 }
 
-                
-                
                 preferredWifiInterface()?.let { networkInterface = it }
                 if (BuildConfig.ENABLE_DEBUG) {
                     val names = interfaces.joinToString { it.name }.ifEmpty { "default" }
@@ -273,6 +301,7 @@ object LocalSendDiscovery {
     }
 
     private fun discoveryLoop(generation: Long) {
+        PluginIdentity.claim()
         var retryDelayMs = SOCKET_RETRY_INITIAL_MS
         val buf = ByteArray(8192)
         while (isCurrentGeneration(generation)) {
@@ -340,49 +369,64 @@ object LocalSendDiscovery {
     }
 
     private fun announceLoop(generation: Long) {
+        PluginIdentity.claim()
         val group = try { InetAddress.getByName(MULTICAST_ADDR) } catch (_: Exception) { return }
         var lastAnnounceAt = 0L
-        var lastPeerCleanupAt = 0L
         var announceCount = 0
         while (discoveryRunning && generation == socketGeneration) {
+            val seenWake = synchronized(announceSignal) { wakeSeq }
             val now = SystemClock.elapsedRealtime()
-            if (now - lastPeerCleanupAt >= PEER_CLEANUP_INTERVAL_MS) {
-                pruneExpiredDictationPeers(now)
-                lastPeerCleanupAt = now
-            }
-            if (localSendAnnounceEnabled && now - lastAnnounceAt >= ANNOUNCE_INTERVAL_MS) {
-                val socket = multicastSocket
-                val payload = announcementProvider?.invoke()
-                if (socket != null && payload != null) {
-                    val data = payload.toString().toByteArray(Charsets.UTF_8)
-                    val targets = (listOf(group) + lanBroadcastAddresses())
-                        .distinctBy { it.hostAddress }
-                    var sent = 0
-                    targets.forEach { target ->
-                        try {
-                            socket.send(DatagramPacket(data, data.size, target, MULTICAST_PORT))
-                            sent++
-                        } catch (e: Exception) {
-                            if (discoveryRunning && BuildConfig.ENABLE_DEBUG) {
-                                Log.d(TAG, "announce to ${target.hostAddress} failed: ${e.message}")
-                            }
-                        }
-                    }
-                    if (sent > 0) {
+            var waitMs = Long.MAX_VALUE
+            val continuous = localSendAnnounceContinuous
+            if (localSendListeningRequested && (continuous || announceBurstLeft > 0)) {
+                val gap = if (continuous) ANNOUNCE_INTERVAL_MS else ANNOUNCE_BURST_GAP_MS
+                val due = lastAnnounceAt + gap - now
+                waitMs = minOf(waitMs, when {
+                    lastAnnounceAt != 0L && due > 0 -> due
+                    sendAnnouncement(group, announceCount + 1) -> {
                         lastAnnounceAt = now
                         announceCount++
-                        if (BuildConfig.ENABLE_DEBUG && (announceCount <= 3 || announceCount % 12 == 0)) {
-                            Log.i(TAG, "LocalSend announce #$announceCount sent to " +
-                                targets.joinToString { it.hostAddress })
-                        }
+                        if (announceBurstLeft > 0) announceBurstLeft--
+                        gap
+                    }
+                    else -> SOCKET_WAIT_MS
+                })
+            }
+
+            try {
+                synchronized(announceSignal) {
+                    if (wakeSeq == seenWake) {
+                        if (waitMs == Long.MAX_VALUE) announceSignal.wait() else announceSignal.wait(waitMs.coerceAtLeast(1L))
                     }
                 }
+            } catch (_: InterruptedException) {
+                return
             }
-            try { Thread.sleep(ANNOUNCE_POLL_MS) } catch (_: InterruptedException) { break }
         }
     }
 
-    
+    private fun sendAnnouncement(group: InetAddress, number: Int): Boolean {
+        val socket = multicastSocket ?: return false
+        val payload = announcementProvider?.invoke() ?: return false
+        val data = payload.toString().toByteArray(Charsets.UTF_8)
+        val targets = (listOf(group) + lanBroadcastAddresses()).distinctBy { it.hostAddress }
+        var sent = 0
+        targets.forEach { target ->
+            try {
+                socket.send(DatagramPacket(data, data.size, target, MULTICAST_PORT))
+                sent++
+            } catch (e: Exception) {
+                if (discoveryRunning && BuildConfig.ENABLE_DEBUG) {
+                    Log.d(TAG, "announce to ${target.hostAddress} failed: ${e.message}")
+                }
+            }
+        }
+        if (sent > 0 && BuildConfig.ENABLE_DEBUG) {
+            Log.i(TAG, "LocalSend announce #$number sent to ${targets.joinToString { it.hostAddress }}")
+        }
+        return sent > 0
+    }
+
     @JvmStatic
     fun sendUnicast(ip: String, payload: JSONObject) {
         try {
@@ -392,8 +436,6 @@ object LocalSendDiscovery {
             if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "unicast to $ip failed: ${e.message}")
         }
     }
-
-    
 
     private fun dispatchMulticastPacket(senderIp: String, msg: String) {
         if (isLocalAddress(senderIp)) return
@@ -406,8 +448,7 @@ object LocalSendDiscovery {
     }
 
     private fun handleDictationAnnouncement(senderIp: String, dto: JSONObject) {
-        
-        
+
         val sender = runCatching { InetAddress.getByName(senderIp) }.getOrNull()
         if (sender !is Inet4Address || sender.isAnyLocalAddress || sender.isMulticastAddress) return
         if (dto.has("protocolVersion")) {
@@ -430,10 +471,11 @@ object LocalSendDiscovery {
         if (authMode != null && authMode != if (authRequired) "jwt" else "none") return
         val sequence = readOptionalLong(dto, "sequence") ?: 0L
         val now = SystemClock.elapsedRealtime()
+
+        pruneExpiredDictationPeers(now)
         if (sequence > 0L) {
             val previousSequence = dictationSequences[fp]
-            
-            
+
             val previousPeer = dictationPeers[fp]
             if (previousSequence != null && sequence <= previousSequence &&
                 previousPeer != null && now - previousPeer.lastSeen < 1_000L) return
@@ -458,16 +500,13 @@ object LocalSendDiscovery {
         if (endpointChanged && BuildConfig.ENABLE_DEBUG) {
             Log.i(TAG, "AIRelay peer ${peer.alias} @ ${peer.ip}:${peer.llmPort} auth=${peer.authRequired} fp=${fp.take(8)}")
         }
-        dictationPeerListeners.forEach {
-            try { it.onPeerSeen(peer, endpointChanged) } catch (_: Exception) {}
-        }
+        dictationPeerListeners.forEach { it.onPeerSeen(peer, endpointChanged) }
     }
 
     private fun isValidFingerprint(value: String): Boolean =
         value.isNotEmpty() && value.length <= MAX_FINGERPRINT_LENGTH &&
             value == value.trim() && value.none { it.isISOControl() || it.isWhitespace() }
 
-    
     private fun readDictationPort(dto: JSONObject): Int? {
         val value = when {
             dto.has("dictationLlmPort") -> dto.opt("dictationLlmPort")
@@ -508,8 +547,6 @@ object LocalSendDiscovery {
         }
     }
 
-    
-
     private fun acquireMulticastLock(ctx: Context) {
         if (multicastLock?.isHeld == true) return
         try {
@@ -543,7 +580,6 @@ object LocalSendDiscovery {
         }
     }
 
-    
     private fun multicastInterfaces(): List<NetworkInterface> {
         val result = mutableListOf<NetworkInterface>()
         try {
@@ -562,7 +598,6 @@ object LocalSendDiscovery {
         return result
     }
 
-    
     private fun lanBroadcastAddresses(): List<InetAddress> {
         val result = mutableListOf<InetAddress>()
         multicastInterfaces().forEach { iface ->
@@ -577,9 +612,9 @@ object LocalSendDiscovery {
         return result.distinctBy { it.hostAddress }
     }
 
-    private fun isLocalAddress(ip: String): Boolean = ip in localIps()
+    internal fun isLocalAddress(ip: String): Boolean = ip in localIps()
 
-    private fun localIps(): Set<String> {
+    internal fun localIps(): Set<String> {
         val result = mutableSetOf<String>()
         try {
             val interfaces = NetworkInterface.getNetworkInterfaces()

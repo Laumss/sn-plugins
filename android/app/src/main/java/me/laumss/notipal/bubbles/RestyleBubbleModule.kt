@@ -21,9 +21,7 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import me.laumss.notipal.ui_common.VectorAssets
 import com.facebook.react.bridge.*
-import com.facebook.react.modules.core.DeviceEventManagerModule
 import org.json.JSONArray
-import org.json.JSONObject
 
 class PaletteBubbleModule(reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext) {
@@ -49,30 +47,56 @@ class PaletteBubbleModule(reactContext: ReactApplicationContext) :
         @Volatile @JvmStatic private var screenWidth = 1404
 
         @Volatile @JvmStatic private var stickyX: Int = 24
-        @Volatile @JvmStatic private var stickyY: Int = 200
 
-        @Volatile @JvmStatic private var wantShown: Boolean = false
+        @Volatile @JvmStatic private var stickyY: Int = -1
+        private const val FIRST_BOTTOM_MARGIN_PX = 200
+
+        @Volatile private var wantShown: Boolean = false
+            set(value) {
+                field = value
+                if (value) me.laumss.notipal.LexiLink.hold("paletteBubble") else me.laumss.notipal.LexiLink.release("paletteBubble")
+            }
 
         @Volatile @JvmStatic
         private var currentInstance: PaletteBubbleModule? = null
+
+        @JvmStatic fun isShowing(): Boolean = bubbleView != null
 
         @Volatile @JvmStatic
         private var presets: Array<PresetData?> = arrayOfNulls(MAX_SLOTS)
         private var presetsMosaic = false
 
-        private const val PREFS_NAME = "quicktoolbar_presets"
-        
         private const val COLS = 5
         private const val VISIBLE_COLS = 5
         private const val ROWS = 2
         private const val MAX_SLOTS = COLS * ROWS - 1
 
-        
         private val INK = Color.BLACK
-        private val LINE = Color.parseColor("#C6C6C6")
         private val LINE2 = Color.parseColor("#9D9D9D")
 
+        @JvmStatic private fun detachBubble() {
+            BubbleWindowSupport.detach(windowManager, bubbleView, "PaletteBubble")
+            bubbleView = null; layoutParams = null
+        }
+
+        @Volatile @JvmStatic private var stowed = false
+
+        @JvmStatic fun stowStatic() {
+            if (!wantShown) return
+            stowed = true
+            wantShown = false
+            hideStatic()
+        }
+
+        @JvmStatic fun unstowStatic(ctx: ReactApplicationContext) {
+            if (!stowed) return
+            stowed = false
+            wantShown = true
+            reshowLast(ctx)
+        }
+
         @JvmStatic fun toggleStatic() {
+            stowed = false
             val h = Handler(Looper.getMainLooper())
             h.post {
                 if (bubbleView != null) {
@@ -80,6 +104,8 @@ class PaletteBubbleModule(reactContext: ReactApplicationContext) :
                     hideStatic()
                 } else {
                     wantShown = true
+
+                    me.laumss.notipal.panels.RelayInboxPanel.closeForPalette()
                     reloadPresetsInternal()
                     currentInstance?.createBubble()
                 }
@@ -89,17 +115,13 @@ class PaletteBubbleModule(reactContext: ReactApplicationContext) :
         @JvmStatic fun hideStatic() {
             val h = Handler(Looper.getMainLooper())
             h.post {
-                if (bubbleView != null) {
-                    bubbleView?.let { FloatingDragRefresh.endNow(it) }
-                    try { windowManager?.removeView(bubbleView) } catch (_: Exception) {}
-                    bubbleView = null; layoutParams = null
-                }
+                if (bubbleView != null) detachBubble()
                 currentInstance?.notifyToolbarHighlight()
             }
         }
 
-        
         @JvmStatic fun hideAndForget() {
+            stowed = false
             wantShown = false
             hideStatic()
         }
@@ -109,13 +131,11 @@ class PaletteBubbleModule(reactContext: ReactApplicationContext) :
             val h = Handler(Looper.getMainLooper())
             h.post {
                 if (!FloatingToolbarModule.isInNoteApp()) return@post
-                
+
                 if (FloatingToolbarModule.anyNativeOverlayOwnsScreen()) return@post
                 if (bubbleView != null) {
                     if (!force) return@post
-                    bubbleView?.let { FloatingDragRefresh.endNow(it) }
-                    try { windowManager?.removeView(bubbleView) } catch (_: Exception) {}
-                    bubbleView = null; layoutParams = null
+                    detachBubble()
                 }
                 reloadPresetsInternal()
                 val inst = currentInstance
@@ -127,16 +147,14 @@ class PaletteBubbleModule(reactContext: ReactApplicationContext) :
         @JvmStatic fun handleOrientationChange() {
             Handler(Looper.getMainLooper()).post {
                 val inst = currentInstance ?: return@post
-                try {
-                    val dm = inst.reactApplicationContext.resources.displayMetrics
-                    val newW = dm.widthPixels; val newH = dm.heightPixels
-                    if (newW == screenWidth && newH == screenHeight) return@post
-                    screenWidth = newW; screenHeight = newH
-                    val lp = layoutParams ?: return@post
-                    val v = bubbleView ?: return@post
-                    
-                    try { windowManager?.updateViewLayout(v, lp) } catch (_: Exception) {}
-                } catch (_: Exception) {}
+                val dm = inst.reactApplicationContext.resources.displayMetrics
+                val newW = dm.widthPixels; val newH = dm.heightPixels
+                if (newW == screenWidth && newH == screenHeight) return@post
+                screenWidth = newW; screenHeight = newH
+                val lp = layoutParams ?: return@post
+                val v = bubbleView ?: return@post
+
+                try { windowManager?.updateViewLayout(v, lp) } catch (_: Exception) {}
             }
         }
 
@@ -145,7 +163,7 @@ class PaletteBubbleModule(reactContext: ReactApplicationContext) :
                 val prevMosaic = presetsMosaic
                 val prevPresets = presets
                 reloadPresetsInternal()
-                
+
                 if (bubbleView != null &&
                     (prevMosaic != presetsMosaic || !prevPresets.contentEquals(presets))) {
                     currentInstance?.rebuildSlots()
@@ -155,10 +173,10 @@ class PaletteBubbleModule(reactContext: ReactApplicationContext) :
 
         private fun reloadPresetsInternal() {
             val inst = currentInstance ?: return
-            presetsMosaic = MosaicLink.isBoardSurface()
+            presetsMosaic = MosaicLink.isBoardVisible()
             presets = arrayOfNulls(MAX_SLOTS)
             try {
-                val prefs = inst.reactApplicationContext.getSharedPreferences(PREFS_NAME, 0)
+                val prefs = inst.reactApplicationContext.getSharedPreferences(NotipalPrefs.PRESETS_FILE, 0)
                 val json = prefs.getString(MosaicPaletteSpec.presetsKey(presetsMosaic), null)
                 val newPresets = arrayOfNulls<PresetData>(MAX_SLOTS)
                 if (json != null) {
@@ -184,15 +202,16 @@ class PaletteBubbleModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    
     @ReactMethod fun hideTemporarily() { hideStatic() }
 
     @ReactMethod fun restore() { reshowLast(reactApplicationContext) }
 
     @ReactMethod fun show() {
         handler.post {
+            stowed = false
             wantShown = true
             if (bubbleView != null) return@post
+            me.laumss.notipal.panels.RelayInboxPanel.closeForPalette()
             reloadPresetsInternal()
             createBubble()
         }
@@ -200,8 +219,10 @@ class PaletteBubbleModule(reactContext: ReactApplicationContext) :
 
     private fun createBubble() {
         if (FloatingToolbarModule.areFloatingOverlaysSuspendedForPalette()) return
+
+        if (me.laumss.notipal.panels.RelayInboxPanel.typingSmall()) return
         val context = reactApplicationContext
-        
+
         removeBubble(notify = false)
 
         windowManager = context.getSystemService(android.content.Context.WINDOW_SERVICE) as WindowManager
@@ -222,20 +243,23 @@ class PaletteBubbleModule(reactContext: ReactApplicationContext) :
             frameWidth = 0f
         }
         populateSlots(bubbleView!!)
+        if (stickyY < 0) {
+            val unspecified = android.view.View.MeasureSpec.makeMeasureSpec(0, android.view.View.MeasureSpec.UNSPECIFIED)
+            bubbleView!!.measure(unspecified, unspecified)
+            stickyY = (screenHeight - bubbleView!!.measuredHeight - FIRST_BOTTOM_MARGIN_PX).coerceAtLeast(0)
+        }
 
         layoutParams = BubbleWindowSupport.overlayParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT
         ).apply {
-            
+
             flags = flags or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
             gravity = Gravity.TOP or Gravity.START
             x = stickyX
             y = stickyY
         }
 
-        
-        
         bubbleView!!.onDragStart = {
             val lp = layoutParams
             val view = bubbleView
@@ -281,7 +305,6 @@ class PaletteBubbleModule(reactContext: ReactApplicationContext) :
         notifyToolbarHighlight()
     }
 
-    
     private fun populateSlots(container: LinearLayout) {
         container.removeAllViews()
         val context = reactApplicationContext
@@ -387,7 +410,7 @@ class PaletteBubbleModule(reactContext: ReactApplicationContext) :
         })
 
         cell.setOnClickListener {
-            if (mosaicPreset != MosaicLink.isBoardSurface()) {
+            if (mosaicPreset != MosaicLink.isBoardVisible()) {
                 reloadPresets()
                 return@setOnClickListener
             }
@@ -417,11 +440,7 @@ class PaletteBubbleModule(reactContext: ReactApplicationContext) :
     }
 
     private fun removeBubble(notify: Boolean = true) {
-        if (bubbleView != null) {
-            bubbleView?.let { FloatingDragRefresh.endNow(it) }
-            try { windowManager?.removeView(bubbleView) } catch (e: Exception) { if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "removeView: ${e.message}") }
-            bubbleView = null; layoutParams = null
-        }
+        if (bubbleView != null) detachBubble()
         if (notify) notifyToolbarHighlight()
     }
 
@@ -429,12 +448,10 @@ class PaletteBubbleModule(reactContext: ReactApplicationContext) :
         BubbleWindowSupport.emitEvent(reactApplicationContext, TAG, name, params)
 
     private fun notifyToolbarHighlight() {
-        try {
-            FloatingToolbarModule.currentInstance?.setToolActive(
-                FloatingToolbarModule.INK_PALETTE_TOOL_ID,
-                bubbleView != null
-            )
-        } catch (e: Exception) { if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "notifyToolbarHighlight: ${e.message}") }
+        FloatingToolbarModule.currentInstance?.setToolActive(
+            FloatingToolbarModule.INK_PALETTE_TOOL_ID,
+            bubbleView != null
+        )
     }
 
     override fun onCatalystInstanceDestroy() {
@@ -446,13 +463,7 @@ class PaletteBubbleModule(reactContext: ReactApplicationContext) :
     @ReactMethod fun removeListeners(count: Int) {}
 }
 
-
-class DraggablePaletteLayout(context: android.content.Context) : LinearLayout(context) {
-    private companion object {
-        
-        const val DRAG_THRESHOLD_PX = 10
-    }
-
+class DraggablePaletteLayout(context: android.content.Context) : TouchSinkLayout(context) {
     var onDragStart: (() -> Unit)? = null
     var onDrag: ((Int, Int) -> Unit)? = null
     var onDragEnd: (() -> Unit)? = null
@@ -463,14 +474,13 @@ class DraggablePaletteLayout(context: android.content.Context) : LinearLayout(co
 
     private fun beginDragIfMoved(ev: MotionEvent): Boolean {
         if (dragging) return true
-        if (Math.abs(ev.rawX - downRawX) > DRAG_THRESHOLD_PX || Math.abs(ev.rawY - downRawY) > DRAG_THRESHOLD_PX) {
+        if (Math.abs(ev.rawX - downRawX) > BubbleWindowSupport.DRAG_THRESHOLD_PX || Math.abs(ev.rawY - downRawY) > BubbleWindowSupport.DRAG_THRESHOLD_PX) {
             dragging = true
             onDragStart?.invoke()
         }
         return dragging
     }
 
-    
     var frameWidth = 0f
     var frameColor = Color.BLACK
     private val framePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
@@ -483,16 +493,6 @@ class DraggablePaletteLayout(context: android.content.Context) : LinearLayout(co
             val h = frameWidth / 2f
             canvas.drawRect(h, h, width - h, height - h, framePaint)
         }
-    }
-
-    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
-        super.dispatchTouchEvent(ev)
-        return true
-    }
-
-    override fun dispatchGenericMotionEvent(ev: MotionEvent): Boolean {
-        if (ev.isFromSource(InputDevice.SOURCE_STYLUS)) return true
-        return super.dispatchGenericMotionEvent(ev)
     }
 
     override fun onInterceptTouchEvent(ev: MotionEvent): Boolean {
@@ -509,8 +509,6 @@ class DraggablePaletteLayout(context: android.content.Context) : LinearLayout(co
         return false
     }
 
-    
-    
     override fun onTouchEvent(ev: MotionEvent): Boolean {
         when (ev.actionMasked) {
             MotionEvent.ACTION_DOWN -> {

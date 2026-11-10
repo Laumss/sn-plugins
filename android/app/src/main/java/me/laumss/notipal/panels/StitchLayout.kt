@@ -16,15 +16,12 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
-
 object StitchLayout {
 
     private const val TAG = "StitchLayout"
 
-    
     const val MIN_VISIBLE_PX = 24
 
-    
     class Piece(val index: Int, val src: Rect, val dst: RectF)
 
     class Result(val width: Int, val height: Int, val pieces: List<Piece>)
@@ -32,7 +29,6 @@ object StitchLayout {
     fun compute(s: StitchSessionData): Result =
         if (s.params.mode == StitchParams.MODE_GRID) grid(s) else strip(s)
 
-    
     fun maxOverlap(s: StitchSessionData, i: Int): Int {
         if (i <= 0 || i >= s.images.size) return 0
         val srcs = stripSources(s)
@@ -101,12 +97,23 @@ object StitchLayout {
         return Result(cellW * cols, cellH * rows, pieces)
     }
 
-    
+    private val pendingLock = Any()
+    private var pendingPath: String? = null
+    private var pendingBitmap: Bitmap? = null
+
+    private class Write(val width: Int, val height: Int) {
+        val done = java.util.concurrent.CountDownLatch(1)
+        @Volatile var ok = false
+    }
+
+    private val writes = HashMap<String, Write>()
+
     fun render(s: StitchSessionData, outPath: String): Pair<Int, Int>? {
         val layout = compute(s)
         if (layout.width <= 0 || layout.height <= 0) return null
+        val t0 = System.currentTimeMillis()
         var out: Bitmap? = null
-        return try {
+        try {
             val result = Bitmap.createBitmap(layout.width, layout.height, Bitmap.Config.ARGB_8888)
             out = result
             val canvas = Canvas(result)
@@ -117,18 +124,92 @@ object StitchLayout {
                 canvas.drawBitmap(bmp, piece.src, piece.dst, paint)
                 bmp.recycle()
             }
-            FileOutputStream(outPath).use { fos ->
-                if (!result.compress(Bitmap.CompressFormat.PNG, 100, fos)) return null
-            }
-            layout.width to layout.height
         } catch (e: Exception) {
             if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "render failed: ${e.message}", e)
-            null
+            out?.recycle()
+            return null
         } catch (e: OutOfMemoryError) {
             if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "render out of memory", e)
-            null
-        } finally {
             out?.recycle()
+            return null
         }
+        val result = out ?: return null
+        if (BuildConfig.ENABLE_DEBUG) {
+            Log.i(TAG, "composed ${layout.width}x${layout.height} from ${layout.pieces.size} images in ${System.currentTimeMillis() - t0}ms")
+        }
+        val previous = synchronized(pendingLock) {
+            val p = pendingPath
+            pendingPath = outPath
+            pendingBitmap = result
+            writes.keys.retainAll { it == outPath }
+            writes[outPath] = Write(result.width, result.height)
+            p
+        }
+        deleteStaleResults(outPath, previous)
+        kotlin.concurrent.thread(isDaemon = false, name = "stitch-write") { writePending(outPath, result) }
+        return layout.width to layout.height
+    }
+
+    private fun writePending(path: String, bmp: Bitmap) {
+        android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
+        val t0 = System.currentTimeMillis()
+        val ok = try {
+            FileOutputStream(path).use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        } catch (e: Exception) {
+            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "write failed: ${e.message}", e)
+            false
+        }
+        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "wrote $path ok=$ok in ${System.currentTimeMillis() - t0}ms")
+        synchronized(pendingLock) {
+            writes[path]?.let { it.ok = ok; it.done.countDown() }
+
+            if (!ok && pendingBitmap === bmp) return
+            if (pendingBitmap === bmp) {
+                pendingBitmap = null
+                pendingPath = null
+            }
+            bmp.recycle()
+        }
+    }
+
+    private fun deleteStaleResults(current: String, previous: String?) {
+        val dir = java.io.File(current).parentFile ?: return
+        try {
+            dir.listFiles { f -> f.name.startsWith("stitch_result_") && f.absolutePath != current }
+                ?.forEach { it.delete() }
+        } catch (_: Exception) {}
+        if (previous != null && previous != current) java.io.File(previous).delete()
+    }
+
+    fun resultSize(path: String): Pair<Int, Int>? =
+        synchronized(pendingLock) { writes[path]?.let { it.width to it.height } }
+
+    fun awaitWritten(path: String): Boolean {
+        val w = synchronized(pendingLock) { writes[path] } ?: return true
+        w.done.await()
+        return w.ok
+    }
+
+    class Preview(val bitmap: Bitmap, val origW: Int, val origH: Int)
+
+    fun pendingPreview(path: String, reqW: Int, reqH: Int): Preview? = synchronized(pendingLock) {
+        val bmp = pendingBitmap?.takeIf { pendingPath == path && !it.isRecycled } ?: return null
+        val f = min(1f, min(reqW.toFloat() / bmp.width, reqH.toFloat() / bmp.height))
+        val w = max(1, (bmp.width * f).roundToInt())
+        val h = max(1, (bmp.height * f).roundToInt())
+        try {
+            val scaled = Bitmap.createScaledBitmap(bmp, w, h, true)
+                .let { if (it === bmp) bmp.copy(Bitmap.Config.ARGB_8888, false) else it }
+            Preview(scaled, bmp.width, bmp.height)
+        } catch (e: OutOfMemoryError) {
+            null
+        }
+    }
+
+    fun pendingCrop(path: String, src: Rect): Bitmap? = synchronized(pendingLock) {
+        val bmp = pendingBitmap?.takeIf { pendingPath == path && !it.isRecycled } ?: return null
+        val out = Bitmap.createBitmap(src.width(), src.height(), Bitmap.Config.ARGB_8888)
+        Canvas(out).drawBitmap(bmp, src, Rect(0, 0, src.width(), src.height()), null)
+        out
     }
 }

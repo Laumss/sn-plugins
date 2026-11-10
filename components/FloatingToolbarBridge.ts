@@ -1,23 +1,18 @@
-
-
 import { NativeModules, NativeEventEmitter } from 'react-native';
 
-function getFT(): any {
+function getFT() {
   return NativeModules.FloatingToolbar;
 }
 
 export const ENABLE_DEBUG: boolean =
   getFT()?.getConstants?.()?.ENABLE_DEBUG ??
   getFT()?.ENABLE_DEBUG ??
-  
-  
-  Boolean(typeof globalThis !== 'undefined' && (globalThis as any).__DEV__);
 
+  Boolean(typeof globalThis !== 'undefined' && (globalThis as { __DEV__?: unknown }).__DEV__);
 
 let pendingButtonId: number | null = null;
 let appMounted = false;
 let lastHostButtonEventAt = 0;
-let lastHostButtonId: number | null = null;
 let lastHostButtonHandledAt = 0;
 
 export function setPendingButton(id: number | null): void {
@@ -44,18 +39,11 @@ export function isAppMounted(): boolean {
 
 export function markHostButtonEvent(id?: unknown): void {
   lastHostButtonEventAt = Date.now();
-  const numericId = typeof id === 'number' ? id : Number(id);
-  lastHostButtonId = Number.isFinite(numericId) ? numericId : null;
 }
 
 export function getLastHostButtonEventAt(): number {
   return lastHostButtonEventAt;
 }
-
-export function getLastHostButtonId(): number | null {
-  return lastHostButtonId;
-}
-
 
 export function markHostButtonHandled(): void {
   lastHostButtonHandledAt = Date.now();
@@ -65,12 +53,13 @@ export function getLastHostButtonHandledAt(): number {
   return lastHostButtonHandledAt;
 }
 
-export interface ToolTapEvent {
+interface ToolTapEvent {
   toolId: string;
   toolAction: string;
   toolName: string;
 }
 
+export type Subscription = { remove(): void };
 
 export interface MosaicBoardState {
   visible: boolean;
@@ -128,7 +117,6 @@ const FloatingToolbarBridge = {
     }
   },
 
-  
   requestClosePluginView(): boolean {
     try {
       const mod = getFT();
@@ -203,7 +191,6 @@ const FloatingToolbarBridge = {
     }
   },
 
-  
   paletteApplyFinished(): void {
     try {
       getFT()?.paletteApplyFinished();
@@ -220,11 +207,11 @@ const FloatingToolbarBridge = {
     }
   },
 
-  paletteSnapshotsChanged(): void {
+  parkToolbarForPastedClip(holdForSelection: boolean): void {
     try {
-      getFT()?.paletteSnapshotsChanged();
+      getFT()?.parkToolbarForPastedClip(holdForSelection);
     } catch (e) {
-      console.warn('[FloatingToolbarBridge]: paletteSnapshotsChanged failed:', e);
+      console.warn('[FloatingToolbarBridge]: parkToolbarForPastedClip failed:', e);
     }
   },
 
@@ -266,10 +253,6 @@ const FloatingToolbarBridge = {
     getFT()?.imageInsertFinished(requestId, path, success);
   },
 
-  consumeReceivedImageDelete(path: string): boolean {
-    return getFT()?.consumeReceivedImageDelete(path) === true;
-  },
-
   setLocale(loc: 'zh' | 'en'): void {
     try { getFT()?.setLocale(loc); } catch (_) {}
   },
@@ -282,14 +265,6 @@ const FloatingToolbarBridge = {
     try { getFT()?.openPanel(screen); } catch (_) {}
   },
 
-  openPluginSettingsAfterFileWritePermissionDenied(): void {
-    try {
-      getFT()?.openPluginSettingsAfterFileWritePermissionDenied?.();
-    } catch (e) {
-      console.warn('[FloatingToolbarBridge]: openPluginSettingsAfterFileWritePermissionDenied failed:', e);
-    }
-  },
-
   async requestFileReadPermission(): Promise<boolean> {
     try {
       return await getFT()?.requestFileReadPermission?.() ?? false;
@@ -297,6 +272,12 @@ const FloatingToolbarBridge = {
       console.warn('[FloatingToolbarBridge]: requestFileReadPermission failed:', e);
       return false;
     }
+  },
+
+  async readTextFile(path: string): Promise<string | null | undefined> {
+    const read = getFT()?.readTextFile;
+    if (!read) return undefined;
+    return await read(path);
   },
 
   async requestFileWritePermission(): Promise<boolean> {
@@ -334,25 +315,8 @@ const FloatingToolbarBridge = {
     }
   },
 
-  drainReceivedDeletes(): string[] {
-    try {
-      const json = getFT()?.drainReceivedDeletes();
-      return json ? JSON.parse(json) : [];
-    } catch (e) {
-      return [];
-    }
-  },
-
   docLinkInsertFinished(requestId: string, selectionReady: boolean, targetFile: string, targetPage: number): void {
     getFT()?.docLinkInsertFinished(requestId, selectionReady, targetFile, targetPage);
-  },
-
-  showImagePanel(): void {
-    try {
-      getFT()?.showImagePanel();
-    } catch (e) {
-      console.warn('[FloatingToolbarBridge]: showImagePanel failed:', e);
-    }
   },
 
   showDocLinkPanel(currentFilePath?: string | null): void {
@@ -379,24 +343,20 @@ const FloatingToolbarBridge = {
     }
   },
 
-  
   isMosaicBoardVisible(): boolean {
     try { return getFT()?.isMosaicBoardVisible?.() === true; } catch { return false; }
   },
 
-  
   getMosaicSurface(): string {
     try { return getFT()?.getMosaicSurface() ?? ''; } catch { return ''; }
   },
 
-  
   isDocumentMode(): boolean {
     try { return getFT()?.isDocumentMode() === true; } catch { return false; }
   },
 
-  
-  isMosaicBoardSurface(): boolean {
-    try { return getFT()?.isMosaicBoardSurface() === true; } catch { return false; }
+  isDocTextSelected(): boolean {
+    try { return getFT()?.isDocTextSelected?.() === true; } catch { return false; }
   },
 
   getMosaicNoteRef(): string | null {
@@ -406,13 +366,11 @@ const FloatingToolbarBridge = {
     } catch { return null; }
   },
 
-  
   async enqueueMosaicImage(path: string, source: string): Promise<boolean> {
     try { return (await getFT()?.enqueueMosaicImage?.(path, source)) === true; }
     catch (e) { console.warn('[FloatingToolbarBridge]: enqueueMosaicImage failed:', e); return false; }
   },
 
-  
   requestMosaicTextCard(text: string, anchorScreenX: number, anchorScreenY: number): void {
     try { getFT()?.requestMosaicTextCard?.(text, Math.round(anchorScreenX), Math.round(anchorScreenY)); }
     catch (e) { console.warn('[FloatingToolbarBridge]: requestMosaicTextCard failed:', e); }
@@ -458,11 +416,25 @@ const FloatingToolbarBridge = {
     }
   },
 
-  showLassoScreenshotPanelForSendFromBubble(): void {
-    try {
-      getFT()?.showLassoScreenshotPanelForSendFromBubble();
-    } catch (e) {
-      console.warn('[FloatingToolbarBridge]: showLassoScreenshotPanelForSendFromBubble failed:', e);
+  isHostLassoMenuOpen(): boolean {
+    try { return getFT()?.isHostLassoMenuOpen?.() === true; } catch { return false; }
+  },
+
+  releaseStaleLassoMenu(reason: string): void {
+    try { getFT()?.releaseStaleLassoMenu?.(reason); } catch (e) {
+      console.warn('[FloatingToolbarBridge]: releaseStaleLassoMenu failed:', e);
+    }
+  },
+
+  beginBusyProgress(kind: 'paste' | 'palette', delayMs: number): void {
+    try { getFT()?.beginBusyProgress?.(kind, delayMs); } catch (e) {
+      console.warn('[FloatingToolbarBridge]: beginBusyProgress failed:', e);
+    }
+  },
+
+  endBusyProgress(): void {
+    try { getFT()?.endBusyProgress?.(); } catch (e) {
+      console.warn('[FloatingToolbarBridge]: endBusyProgress failed:', e);
     }
   },
 
@@ -473,9 +445,21 @@ const FloatingToolbarBridge = {
       console.warn('[FloatingToolbarBridge]: showSmartLassoCapture failed:', e);
     }
   },
+
+  onSmartLassoSelectionShown(callback: (e: { request: number }) => void): Subscription {
+    const emitter = getEmitter();
+    if (!emitter) return { remove() {} };
+    return emitter.addListener('onSmartLassoSelectionShown', callback);
+  },
+
+  setSmartLassoSelectionKind(request: number, sendsText: boolean): void {
+    try { getFT()?.setSmartLassoSelectionKind?.(request, sendsText); } catch (e) {
+      console.warn('[FloatingToolbarBridge]: setSmartLassoSelectionKind failed:', e);
+    }
+  },
   onToolModeExit(
     cb: (e: { toolId: string; toolAction: string }) => void
-  ): { remove(): void } {
+  ): Subscription {
     const emitter = getEmitter();
     if (!emitter) return { remove() {} };
     return emitter.addListener('onToolModeExit', cb);
@@ -487,19 +471,19 @@ const FloatingToolbarBridge = {
     } catch (_) {}
   },
 
-  onToolTap(callback: (event: ToolTapEvent) => void): { remove(): void } {
+  onToolTap(callback: (event: ToolTapEvent) => void): Subscription {
     const emitter = getEmitter();
     if (!emitter) return { remove() {} };
     return emitter.addListener('onToolTap', callback);
   },
 
-  onToolLongPress(callback: (event: { toolId: string; toolName: string }) => void): { remove(): void } {
+  onToolLongPress(callback: (event: { toolId: string; toolName: string }) => void): Subscription {
     const emitter = getEmitter();
     if (!emitter) return { remove() {} };
     return emitter.addListener('onToolLongPress', callback);
   },
 
-  onToolbarOpenMain(callback: () => void): { remove(): void } {
+  onToolbarOpenMain(callback: () => void): Subscription {
     const emitter = getEmitter();
     if (!emitter) return { remove() {} };
     return emitter.addListener('onToolbarOpenMain', () => callback());
@@ -513,32 +497,37 @@ const FloatingToolbarBridge = {
       screenshotBbox?: { left: number; top: number; right: number; bottom: number };
       detailId?: string;
     }) => void
-  ): { remove(): void } {
+  ): Subscription {
     const emitter = getEmitter();
     if (!emitter) return { remove() {} };
     return emitter.addListener('onNativePanelClose', callback);
   },
 
-  
-  onNoteForegroundChanged(callback: (data: { inNote: boolean }) => void): { remove(): void } {
+  onNoteForegroundChanged(callback: (data: { inNote: boolean }) => void): Subscription {
     const emitter = getEmitter();
     if (!emitter) return { remove() {} };
     return emitter.addListener('onNoteForegroundChanged', callback);
   },
 
-  onHostAppModeChanged(callback: (data: { document: boolean; reason?: string }) => void): { remove(): void } {
+  onHostAppModeChanged(callback: (data: { document: boolean; reason?: string }) => void): Subscription {
     const emitter = getEmitter();
     if (!emitter) return { remove() {} };
     return emitter.addListener('onHostAppModeChanged', callback);
   },
 
-  onMosaicBoardVisible(callback: (data: MosaicBoardState) => void): { remove(): void } {
+  onMosaicBoardVisible(callback: (data: MosaicBoardState) => void): Subscription {
     const emitter = getEmitter();
     if (!emitter) return { remove() {} };
     return emitter.addListener('onMosaicBoardVisible', callback);
   },
 
-  onDestroyAll(callback: () => void): { remove(): void } {
+  onFloatsClosed(callback: (data: { reason?: string; ai?: boolean }) => void): Subscription {
+    const emitter = getEmitter();
+    if (!emitter) return { remove() {} };
+    return emitter.addListener('onFloatsClosed', callback);
+  },
+
+  onDestroyAll(callback: () => void): Subscription {
     const emitter = getEmitter();
     if (!emitter) return { remove() {} };
     return emitter.addListener('onToolbarDestroyAll', () => callback());
@@ -548,22 +537,22 @@ const FloatingToolbarBridge = {
     try { getFT()?.updateTitleClips(JSON.stringify(filled)); } catch (_) {}
   },
 
-  onTitleClipTap(callback: (event: { slot: string }) => void): { remove(): void } {
+  onTitleClipTap(callback: (event: { slot: string }) => void): Subscription {
     const emitter = getEmitter();
     if (!emitter) return { remove() {} };
     return emitter.addListener('onTitleClipTap', callback);
   },
 
-  onTitleClipLongPress(callback: (event: { slot: string }) => void): { remove(): void } {
+  onTitleClipLongPress(callback: (event: { slot: string }) => void): Subscription {
     const emitter = getEmitter();
     if (!emitter) return { remove() {} };
     return emitter.addListener('onTitleClipLongPress', callback);
   },
 
-  showPenLassoOverlay(): void {
-    try { getFT()?.showPenLassoOverlay(); } catch (e) {
-      console.warn('[FloatingToolbarBridge]: showPenLassoOverlay failed:', e);
-    }
+  onClipSlotClear(callback: (event: { slot: string }) => void): Subscription {
+    const emitter = getEmitter();
+    if (!emitter) return { remove() {} };
+    return emitter.addListener('onClipSlotClear', callback);
   },
 
   beginPenLassoSelection(requestId: string): void {
@@ -580,13 +569,13 @@ const FloatingToolbarBridge = {
     getFT()?.cancelPenLassoSelection?.(requestId);
   },
 
-  onPenLassoBbox(callback: (event: { left: number; top: number; right: number; bottom: number; requestId?: string }) => void): { remove(): void } {
+  onPenLassoBbox(callback: (event: { left: number; top: number; right: number; bottom: number; requestId?: string }) => void): Subscription {
     const emitter = getEmitter();
     if (!emitter) return { remove() {} };
     return emitter.addListener('onPenLassoBbox', callback);
   },
 
-  onPenLassoCancel(callback: (event?: { requestId?: string }) => void): { remove(): void } {
+  onPenLassoCancel(callback: (event?: { requestId?: string }) => void): Subscription {
     const emitter = getEmitter();
     if (!emitter) return { remove() {} };
     return emitter.addListener('onPenLassoCancel', callback);

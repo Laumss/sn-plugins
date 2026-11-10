@@ -1,10 +1,12 @@
-import { PluginCommAPI, PluginFileAPI, PluginNoteAPI, NativeUIUtils } from 'sn-plugin-lib';
+import { PluginCommAPI, PluginFileAPI, PluginNoteAPI } from 'sn-plugin-lib';
+import HostDialog from './HostDialog';
 import { getRNFS } from './rnfs';
 import { FileLogger } from './FileLogger';
 import FloatingToolbarBridge from './FloatingToolbarBridge';
 import { t } from './i18n';
+import { isHostNoPageError, showHostNoPageHint } from './PenTools';
 
-export interface LinkedFile {
+interface LinkedFile {
   path: string;
   linkType: number;
   label: string;
@@ -14,6 +16,8 @@ export interface ExtractedContent {
   text: string;
   imagePaths: string[];
   linkedFiles: LinkedFile[];
+
+  noPage?: boolean;
 
   lastTextBoxRect?: { left: number; top: number; right: number; bottom: number };
 
@@ -30,27 +34,12 @@ export interface ExtractedContent {
 export type ExtractStage = 'recognizing' | 'done';
 export type ExtractProgress = (stage: ExtractStage) => void;
 
-type WarmEntry = {
-  signature: string;
-  promise: Promise<ExtractedContent>;
-  startedAt: number;
-};
-let _warmEntry: WarmEntry | null = null;
-const WARM_TTL_MS = 30_000;
-
-async function buildWarmSignature(): Promise<string | null> {
-  try {
-    const [fpRes, pgRes, rectRes]: any[] = await Promise.all([
-      PluginCommAPI.getCurrentFilePath(),
-      PluginCommAPI.getCurrentPageNum(),
-      PluginCommAPI.getLassoRect(),
-    ]);
-    if (!fpRes?.success || !pgRes?.success || !rectRes?.success || !rectRes.result) return null;
-    const r = rectRes.result;
-    return `${fpRes.result}|${pgRes.result}|${r.left},${r.top},${r.right},${r.bottom}`;
-  } catch (_) {
-    return null;
-  }
+let _lassoDataPrePopulated = false;
+export function markLassoDataPrePopulated(): void { _lassoDataPrePopulated = true; }
+export function consumeLassoDataPrePopulated(): boolean {
+  const value = _lassoDataPrePopulated;
+  _lassoDataPrePopulated = false;
+  return value;
 }
 
 export class LassoExtractor {
@@ -66,6 +55,10 @@ export class LassoExtractor {
     const res = await PluginCommAPI.getLassoElements() as any;
     if (!res?.success || !Array.isArray(res.result)) {
       FileLogger.logEvent('LassoExtract', `getLassoElements failed: ${res?.error?.message ?? 'unknown'}`);
+      if (isHostNoPageError(res)) {
+        showHostNoPageHint();
+        result.noPage = true;
+      }
       return result;
     }
 
@@ -148,17 +141,13 @@ export class LassoExtractor {
     }
 
     if (unrecognizedStrokes.length > 0) {
-      try { onProgress?.('recognizing'); } catch (_) {}
+      onProgress?.('recognizing');
       try {
-        
-        
-        
-        
+
         const canWrite = await FloatingToolbarBridge.requestFileWritePermission();
         if (!canWrite) {
           FileLogger.logEvent('LassoExtract', 'recognizeElements skipped: no FILE:WRITE permission');
-          try { NativeUIUtils.showErrorTipDialog(t('perm_required')); } catch (_) {}
-          try { FloatingToolbarBridge.openPluginSettingsAfterFileWritePermissionDenied(); } catch (_) {}
+          try { HostDialog.tip(t('perm_required')); } catch (_) {}
           throw new Error('no FILE:WRITE permission');
         }
         const fpRes: any = await PluginCommAPI.getCurrentFilePath();
@@ -188,7 +177,7 @@ export class LassoExtractor {
         FileLogger.logEvent('LassoExtract', `recognizeElements threw: ${String(e)}`);
       }
     }
-    try { onProgress?.('done'); } catch (_) {}
+    onProgress?.('done');
 
     sortable.sort((a, b) => a.sortY - b.sortY);
 
@@ -207,7 +196,7 @@ export class LassoExtractor {
     }
 
     try {
-      const linkRes = await PluginNoteAPI.getLassoLinks() as any;
+      const linkRes = await PluginNoteAPI.getLassoLinks();
       if (linkRes?.success && Array.isArray(linkRes.result)) {
         const currentFilePath = (await PluginCommAPI.getCurrentFilePath())?.result ?? '';
         for (const link of linkRes.result) {
@@ -244,7 +233,7 @@ export class LassoExtractor {
 
     for (const el of elements) {
 
-      try { el.recycle?.(); } catch (_) {}
+      el?.recycle?.();
     }
 
     FileLogger.logEvent('LassoExtract',
@@ -252,56 +241,4 @@ export class LassoExtractor {
     return result;
   }
 
-  static warmup(): void {
-    buildWarmSignature().then(signature => {
-      if (!signature) return;
-
-      if (_warmEntry && _warmEntry.signature === signature
-          && Date.now() - _warmEntry.startedAt < WARM_TTL_MS) {
-        return;
-      }
-      const startedAt = Date.now();
-      const promise = LassoExtractor.extract().catch(e => {
-        console.warn('[LassoExtractor]: warmup extract failed:', e);
-
-        if (_warmEntry?.signature === signature) _warmEntry = null;
-        throw e;
-      });
-      _warmEntry = { signature, promise, startedAt };
-      FileLogger.logEvent('LassoExtract', `warmup started sig=${signature.slice(-32)}`);
-    }).catch(() => {});
-  }
-
-  static async consumeWarmed(onProgress?: ExtractProgress): Promise<ExtractedContent | null> {
-    const entry = _warmEntry;
-    if (!entry) return null;
-    if (Date.now() - entry.startedAt > WARM_TTL_MS) {
-      _warmEntry = null;
-      return null;
-    }
-    const signature = await buildWarmSignature();
-    if (!signature || signature !== entry.signature) {
-
-      _warmEntry = null;
-      return null;
-    }
-    _warmEntry = null;
-
-    let resolved = false;
-    entry.promise.finally(() => { resolved = true; });
-    if (!resolved) {
-      try { onProgress?.('recognizing'); } catch (_) {}
-    }
-    try {
-      const result = await entry.promise;
-      try { onProgress?.('done'); } catch (_) {}
-      FileLogger.logEvent('LassoExtract', `warmup consumed (cached)`);
-      return result;
-    } catch (_) {
-      try { onProgress?.('done'); } catch (_) {}
-      return null;
-    }
-  }
-
 }
-

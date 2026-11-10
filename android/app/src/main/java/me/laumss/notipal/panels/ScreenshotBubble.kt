@@ -20,6 +20,7 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import com.facebook.react.bridge.ReactApplicationContext
 import me.laumss.notipal.FloatingToolbarModule
+import me.laumss.notipal.NotipalPrefs
 import me.laumss.notipal.bubbles.BubbleWindowSupport
 import me.laumss.notipal.ui_common.UiUtils
 
@@ -28,7 +29,6 @@ object ScreenshotBubble {
     private const val TAG = "ScreenshotBubble"
     private const val PRESS_GUARD_OWNER = PenGuardOwner.SCREENSHOT_BUBBLE_PRESS
     private const val PRESS_GUARD_RELEASE_DELAY_MS = PenGuardTiming.BUBBLE_PRESS_RELEASE_MS
-    private const val PREFS_NAME = "quicktoolbar_presets"
     private const val PREF_POSITION_X = "screenshot_bubble_x"
     private const val PREF_POSITION_Y = "screenshot_bubble_y"
 
@@ -44,7 +44,7 @@ object ScreenshotBubble {
     @Volatile var pendingReshow = false
 
     @Volatile var hiddenBySettings = false
-    
+
     @Volatile var hiddenByInactiveCanvas = false
     @Volatile private var hiddenByPalette = false
 
@@ -67,11 +67,9 @@ object ScreenshotBubble {
     private fun scale(): Float = ctx?.let { me.laumss.notipal.ui_common.ScreenScale.factor(it) } ?: 1f
     private fun dp(v: Int): Int = (v * density() * scale()).toInt()
 
-    
     private fun detachView() {
         val v = btnView ?: return
-        FloatingDragRefresh.endNow(v)
-        try { wm?.removeView(v) } catch (_: Exception) {}
+        BubbleWindowSupport.detach(wm, v, TAG)
         btnView = null; lp = null
     }
 
@@ -125,7 +123,7 @@ object ScreenshotBubble {
                 WindowManager.LayoutParams.WRAP_CONTENT
             ).apply {
                 gravity = Gravity.TOP or Gravity.END
-                val prefs = context.getSharedPreferences(PREFS_NAME, 0)
+                val prefs = context.getSharedPreferences(NotipalPrefs.PRESETS_FILE, 0)
                 val defaultX = dp(20)
                 val defaultY = dp(120)
                 val maxX = (context.resources.displayMetrics.widthPixels - totalSize).coerceAtLeast(0)
@@ -316,7 +314,7 @@ object ScreenshotBubble {
 
     private fun savePosition(x: Int, y: Int) {
         val context = ctx ?: return
-        context.getSharedPreferences(PREFS_NAME, 0)
+        context.getSharedPreferences(NotipalPrefs.PRESETS_FILE, 0)
             .edit()
             .putInt(PREF_POSITION_X, x)
             .putInt(PREF_POSITION_Y, y)

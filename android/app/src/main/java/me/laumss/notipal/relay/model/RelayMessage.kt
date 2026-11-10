@@ -4,28 +4,34 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
 
-
 data class RelayMessage(
     val id: String = UUID.randomUUID().toString(),
     var text: String,
-    
+
     val source: String,
     val createdAt: Long = System.currentTimeMillis(),
     var updatedAt: Long = System.currentTimeMillis(),
-    
+
     var closed: Boolean = false,
-    
-    var pinned: Boolean = false,
-    
+
     var inserted: Boolean = false,
-    
+
     var kind: String = "",
+
+    val conversationId: String = "",
+
+    var lead: String = "",
+
+    var starred: Boolean = false,
+
+    var seen: Boolean = true,
+
+    val backend: String = "",
 ) {
-    
+
     val title: String
         get() = text.lineSequence().firstOrNull { it.isNotBlank() }?.trim() ?: ""
 
-    
     val preview: String
         get() {
             val lines = text.lines()
@@ -41,9 +47,13 @@ data class RelayMessage(
         put("createdAt", createdAt)
         put("updatedAt", updatedAt)
         put("closed", closed)
-        put("pinned", pinned)
         put("inserted", inserted)
         put("kind", kind)
+        put("conversationId", conversationId)
+        if (lead.isNotEmpty()) put("lead", lead)
+        if (starred) put("starred", true)
+        if (!seen) put("seen", false)
+        if (backend.isNotEmpty()) put("backend", backend)
     }
 
     companion object {
@@ -54,9 +64,14 @@ data class RelayMessage(
             createdAt = obj.optLong("createdAt", System.currentTimeMillis()),
             updatedAt = obj.optLong("updatedAt", System.currentTimeMillis()),
             closed = obj.optBoolean("closed", true),
-            pinned = obj.optBoolean("pinned", false),
             inserted = obj.optBoolean("inserted", false),
             kind = obj.optString("kind", ""),
+            conversationId = obj.optString("conversationId", ""),
+            lead = obj.optString("lead", ""),
+            starred = obj.optBoolean("starred", false),
+
+            seen = obj.optBoolean("seen", true),
+            backend = obj.optString("backend", ""),
         )
 
         fun listToJson(list: List<RelayMessage>): JSONArray =

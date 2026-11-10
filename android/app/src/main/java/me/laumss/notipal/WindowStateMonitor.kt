@@ -8,9 +8,7 @@ import android.view.ViewGroup
 import com.facebook.react.bridge.ReactApplicationContext
 import java.lang.reflect.Proxy
 
-
 class WindowStateMonitor(private val reactContext: ReactApplicationContext) {
-
 
     fun isFor(context: ReactApplicationContext): Boolean = reactContext === context
 
@@ -24,7 +22,6 @@ class WindowStateMonitor(private val reactContext: ReactApplicationContext) {
 
         private val handler = Handler(Looper.getMainLooper())
     }
-
 
     private val startRequested = java.util.concurrent.atomic.AtomicBoolean(false)
 
@@ -48,7 +45,6 @@ class WindowStateMonitor(private val reactContext: ReactApplicationContext) {
         handler.post { sync() }
     }
 
-
     private fun sync() {
         if (startRequested.get()) {
             if (!hooked) {
@@ -57,9 +53,6 @@ class WindowStateMonitor(private val reactContext: ReactApplicationContext) {
                 tryHook()
             } else {
 
-
-
-
                 refreshCurrentVisibility()
             }
         } else {
@@ -67,7 +60,6 @@ class WindowStateMonitor(private val reactContext: ReactApplicationContext) {
             unhook()
         }
     }
-
 
     private fun refreshCurrentVisibility() {
         val current = container
@@ -80,7 +72,6 @@ class WindowStateMonitor(private val reactContext: ReactApplicationContext) {
         }
         if (current !== live) {
 
-
             if (BuildConfig.ENABLE_DEBUG) {
                 Log.i(TAG, "visibility refresh: container instance changed")
             }
@@ -91,7 +82,6 @@ class WindowStateMonitor(private val reactContext: ReactApplicationContext) {
         }
         onContainerVisibility(live.visibility == View.VISIBLE, force = true)
     }
-
 
     private fun tryHook() {
         if (!startRequested.get() || hooked) return
@@ -165,17 +155,10 @@ class WindowStateMonitor(private val reactContext: ReactApplicationContext) {
             proxyListener = proxy
             hooked = true
 
-
-
-
-
             onContainerVisibility(c.visibility == View.VISIBLE, force = true)
             if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "hooked PluginContainer.visibilityListener (original=${original?.javaClass?.name})")
             return true
         } catch (e: AssertionError) {
-
-
-
 
             if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "React bridge transition: ${e.message}")
             return false
@@ -206,14 +189,12 @@ class WindowStateMonitor(private val reactContext: ReactApplicationContext) {
         }
     }
 
-
     private fun onContainerVisibility(visible: Boolean, force: Boolean = false) {
         val showing = visible
         if (!force && showing == isPluginHostShowing) return
         isPluginHostShowing = showing
         if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "PluginHost window state changed: showing=$showing")
-        
-        
+
         val generation = ++visibilityGeneration
         handler.post {
             if (startRequested.get() && generation == visibilityGeneration) {
@@ -221,7 +202,6 @@ class WindowStateMonitor(private val reactContext: ReactApplicationContext) {
             }
         }
     }
-
 
     private fun findPluginContainer(): ViewGroup? {
         return try {
@@ -240,7 +220,6 @@ class WindowStateMonitor(private val reactContext: ReactApplicationContext) {
             null
         }
     }
-
 
     private fun Class<*>.declaredFieldOrNull(name: String): java.lang.reflect.Field? {
         var cls: Class<*>? = this

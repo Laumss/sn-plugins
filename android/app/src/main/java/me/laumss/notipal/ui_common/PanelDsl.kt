@@ -2,7 +2,6 @@ package me.laumss.notipal.ui_common
 
 import android.graphics.Color
 import android.graphics.Typeface
-import android.view.Gravity
 import android.view.View
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -14,7 +13,6 @@ interface PanelHost {
     fun dp(v: Int): Int
     fun dp(v: Float): Int
     fun sp(v: Float): Float
-    fun gridSp(v: Float): Float
     fun close()
     fun onDispose(block: () -> Unit)
     val panelW: Int
@@ -34,8 +32,6 @@ class ButtonHandle internal constructor() {
             field = value
             view?.let { it.isEnabled = value; it.alpha = if (value) 1f else 0.4f }
         }
-    fun setText(text: String) { view?.text = text }
-    fun setVisible(visible: Boolean) { view?.visibility = if (visible) View.VISIBLE else View.GONE }
 }
 
 class ListHandle internal constructor() {
@@ -45,46 +41,14 @@ class ListHandle internal constructor() {
     fun scrollTop() { scrollTopFn?.invoke() }
 }
 
-class ChipsHandle internal constructor() {
-    internal var chips: PanelChips? = null
-    fun setSelection(key: String?) {
-        chips?.setSelection(key)
-        chips?.rebuildChips()
-    }
-    fun getSelection(): String? = chips?.getSelection()
-}
-
-class CheckboxHandle internal constructor() {
-    internal var box: PanelCheckbox? = null
-    fun setChecked(checked: Boolean) { box?.setChecked(checked) }
-    fun setLabel(text: String) { box?.setLabel(text) }
-    fun setActive(active: Boolean) { box?.setActive(active) }
-}
-
 class TabBarHandle internal constructor() {
     internal var tabBar: PanelTabBar? = null
     fun setSelection(index: Int) { tabBar?.setSelection(index) }
     fun getSelection(): Int = tabBar?.getSelection() ?: 0
 }
 
-class GridHandle internal constructor() {
-    internal var rebuild: (() -> Unit)? = null
-    internal var scrollTopFn: (() -> Unit)? = null
-    fun refresh() { rebuild?.invoke() }
-    fun scrollTop() { scrollTopFn?.invoke() }
-}
-
 class BottomBarScope internal constructor() {
     internal val rightItems = mutableListOf<PanelComponent>()
-    internal var leftFlex: PanelComponent? = null
-
-    fun checkbox(label: String, onClick: () -> Unit): CheckboxHandle {
-        val handle = CheckboxHandle()
-        leftFlex = PanelComponent { h ->
-            PanelCheckbox(h.ctx, label, onClick).also { handle.box = it }.view
-        }
-        return handle
-    }
 
     fun outlined(label: String, onClick: () -> Unit): ButtonHandle {
         val handle = ButtonHandle()
@@ -114,19 +78,8 @@ class BottomBarScope internal constructor() {
 class PanelScope internal constructor() {
     internal val components = mutableListOf<PanelComponent>()
 
-    fun header(title: String, onClose: (() -> Unit)? = null) {
-        components += PanelComponent { h -> PanelHeader.create(h.ctx, title, onClose) }
-    }
-
-    fun chips(keys: List<String>, initial: String? = null, onSelect: (String?) -> Unit): ChipsHandle {
-        val handle = ChipsHandle()
-        components += PanelComponent { h ->
-            val c = PanelChips(h.ctx, keys, onSelect)
-            initial?.let { c.setSelection(it) }
-            handle.chips = c
-            c.createView()
-        }
-        return handle
+    fun header(title: String) {
+        components += PanelComponent { h -> PanelHeader.create(h.ctx, title) }
     }
 
     fun tabBar(tabs: List<PanelTabBar.Tab>, initial: Int = 0, onSelect: (Int) -> Unit): TabBarHandle {
@@ -165,33 +118,6 @@ class PanelScope internal constructor() {
         return handle
     }
 
-    fun <T> grid(
-        itemsProvider: () -> List<T>,
-        emptyText: String,
-        cell: (host: PanelHost, item: T, colWidthPx: Int) -> View
-    ): GridHandle {
-        val handle = GridHandle()
-        components += PanelComponent { h ->
-            val scroll = PanelScrollHost(h.ctx, overlayScrollbar = true)
-            handle.rebuild = {
-                scroll.content.removeAllViews()
-                val items = itemsProvider()
-                if (items.isEmpty()) {
-                    scroll.content.addView(PanelWidgets.emptyView(h, emptyText))
-                } else {
-                    PanelGrid.build(h.ctx, scroll, h.screenW, h.screenH, h.panelW, items) { item, colW ->
-                        cell(h, item, colW)
-                    }
-                }
-                scroll.refreshThumb()
-            }
-            handle.scrollTopFn = { scroll.scrollToTop() }
-            handle.rebuild?.invoke()
-            scroll.view
-        }
-        return handle
-    }
-
     fun section(title: String) {
         components += PanelComponent { h ->
             LinearLayout(h.ctx).apply {
@@ -219,11 +145,7 @@ class PanelScope internal constructor() {
     fun bottomBar(build: BottomBarScope.() -> Unit) {
         val scope = BottomBarScope().apply(build)
         components += PanelComponent { h ->
-            PanelWidgets.bottomBar(
-                h,
-                leftFlex = scope.leftFlex?.build(h),
-                rightButtons = scope.rightItems.map { it.build(h) }
-            )
+            PanelWidgets.bottomBar(h, rightButtons = scope.rightItems.map { it.build(h) })
         }
     }
 }

@@ -1,19 +1,11 @@
-import { PluginCommAPI, PluginFileAPI } from 'sn-plugin-lib';
-
+import { PluginCommAPI, PluginFileAPI, type Rect } from 'sn-plugin-lib';
 
 export interface HostPageSize {
   width: number;
   height: number;
 }
 
-export interface HostPageRect {
-  left: number;
-  top: number;
-  right: number;
-  bottom: number;
-}
-
-function validDimension(value: any): value is number {
+function validDimension(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0;
 }
 
@@ -21,7 +13,6 @@ function pageSizeFromResult(result: any): HostPageSize | null {
   if (!validDimension(result?.width) || !validDimension(result?.height)) return null;
   return { width: Math.round(result.width), height: Math.round(result.height) };
 }
-
 
 export async function getHostPageSize(
   filePath: string,
@@ -41,7 +32,6 @@ export async function getHostPageSize(
   }
 }
 
-
 export async function getCurrentHostPageSize(tag = 'current-page-size'): Promise<HostPageSize | null> {
   try {
     const [fileResponse, pageResponse]: any[] = await Promise.all([
@@ -60,11 +50,10 @@ export async function getCurrentHostPageSize(tag = 'current-page-size'): Promise
   }
 }
 
-
 export function clampHostPageRect(
-  rect: HostPageRect,
+  rect: Rect,
   size: HostPageSize,
-): HostPageRect | null {
+): Rect | null {
   const clamped = {
     left: Math.max(0, Math.floor(rect.left)),
     top: Math.max(0, Math.floor(rect.top)),
@@ -75,4 +64,3 @@ export function clampHostPageRect(
     ? clamped
     : null;
 }
-

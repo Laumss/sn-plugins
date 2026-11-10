@@ -2,7 +2,6 @@ package me.laumss.notipal.ui_common.filepicker
 
 import kotlin.math.min
 
-
 enum class FilePickerDeviceType(val sdkValue: Int) {
     A5(0),
     A6(1),
@@ -28,7 +27,6 @@ data class FilePickerDeviceProfile(
     val pickerGridColumns: Int,
     val supportsA5BookFeatures: Boolean,
 )
-
 
 object FilePickerDeviceProfiles {
     private const val DESIGN_WIDTH_PX = 1920f

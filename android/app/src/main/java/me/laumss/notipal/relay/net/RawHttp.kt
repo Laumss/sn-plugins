@@ -8,13 +8,12 @@ import java.io.OutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.net.URI
-
+import me.laumss.notipal.net.PluginIdentity
 
 object RawHttp {
     private const val TAG = "RawHttp"
     private const val CRLF = "\r\n"
 
-    
     class Response(
         val status: Int,
         val headers: Map<String, String>,
@@ -31,7 +30,6 @@ object RawHttp {
 
     private data class Target(val host: String, val port: Int, val path: String)
 
-    
     private fun parse(url: String): Target {
         val uri = URI(url)
         require(uri.scheme == null || uri.scheme.equals("http", ignoreCase = true)) {
@@ -46,7 +44,6 @@ object RawHttp {
         return Target(host, port, path)
     }
 
-    
     fun request(
         method: String,
         url: String,
@@ -54,15 +51,23 @@ object RawHttp {
         body: ByteArray? = null,
         connectTimeoutMs: Int = 5_000,
         readTimeoutMs: Int = 30_000,
+
+        onSocket: ((Socket) -> Unit)? = null,
+
+        bodyStream: InputStream? = null,
+        bodyLength: Long = 0L,
     ): Response {
         val target = parse(url)
+
+        PluginIdentity.claim()
         val socket = Socket()
+        onSocket?.invoke(socket)
         try {
             socket.tcpNoDelay = true
             socket.connect(InetSocketAddress(target.host, target.port), connectTimeoutMs)
             socket.soTimeout = readTimeoutMs
 
-            writeRequest(socket.getOutputStream(), method, target, headers, body)
+            writeRequest(socket.getOutputStream(), method, target, headers, body, bodyStream, bodyLength)
 
             val input = socket.getInputStream().buffered()
             val (status, respHeaders) = readHead(input)
@@ -80,34 +85,35 @@ object RawHttp {
         target: Target,
         headers: Map<String, String>,
         body: ByteArray?,
+        bodyStream: InputStream?,
+        bodyLength: Long,
     ) {
         val head = StringBuilder()
         head.append(method).append(' ').append(target.path).append(" HTTP/1.1").append(CRLF)
-        
-        
+
         val hostHeader =
             if (target.port == 80) target.host else "${target.host}:${target.port}"
         head.append("Host: ").append(hostHeader).append(CRLF)
-        
-        
+
         head.append("Connection: close").append(CRLF)
-        
+
         head.append("Accept-Encoding: identity").append(CRLF)
         headers.forEach { (k, v) -> head.append(k).append(": ").append(v).append(CRLF) }
-        if (body != null) {
+        if (bodyStream != null) {
+            head.append("Content-Length: ").append(bodyLength).append(CRLF)
+        } else if (body != null) {
             head.append("Content-Length: ").append(body.size).append(CRLF)
         }
         head.append(CRLF)
 
         out.write(head.toString().toByteArray(Charsets.UTF_8))
-        body?.let { out.write(it) }
+        if (bodyStream != null) bodyStream.copyTo(out) else body?.let { out.write(it) }
         out.flush()
     }
 
-    
     private fun readHead(input: InputStream): Pair<Int, Map<String, String>> {
         val statusLine = readLine(input) ?: throw IOException("Empty response")
-        
+
         val parts = statusLine.split(' ', limit = 3)
         if (parts.size < 2) throw IOException("Malformed status line: $statusLine")
         val status = parts[1].toIntOrNull()
@@ -119,14 +125,13 @@ object RawHttp {
             if (line.isEmpty()) break
             val idx = line.indexOf(':')
             if (idx <= 0) continue
-            
+
             val name = line.substring(0, idx).trim().lowercase()
             headers[name] = line.substring(idx + 1).trim()
         }
         return status to headers
     }
 
-    
     private fun readLine(input: InputStream): String? {
         val buf = ByteArrayOutputStream(64)
         while (true) {
@@ -151,7 +156,7 @@ object RawHttp {
         method: String,
         status: Int,
     ): InputStream {
-        
+
         if (method == "HEAD" || status == 204 || status == 304 || status in 100..199) {
             return EmptyStream
         }
@@ -159,8 +164,7 @@ object RawHttp {
             return ChunkedInputStream(input)
         }
         val length = headers["content-length"]?.trim()?.toLongOrNull()
-        
-        
+
         return if (length != null) FixedLengthInputStream(input, length) else input
     }
 
@@ -168,7 +172,6 @@ object RawHttp {
         override fun read(): Int = -1
     }
 
-    
     private class FixedLengthInputStream(
         private val source: InputStream,
         private var remaining: Long,
@@ -191,24 +194,20 @@ object RawHttp {
         override fun available(): Int = minOf(source.available().toLong(), remaining).toInt()
     }
 
-    
     private class ChunkedInputStream(private val source: InputStream) : InputStream() {
         private var chunkRemaining = 0L
         private var finished = false
-        
+
         private var sawFirstChunk = false
 
-        
         private fun ensureChunk(): Boolean {
             if (finished) return false
             if (chunkRemaining > 0) return true
 
-            
-            
             if (sawFirstChunk) readLine(source)
 
             val sizeLine = readLine(source) ?: run { finished = true; return false }
-            
+
             val size = sizeLine.substringBefore(';').trim().toLongOrNull(16)
             if (size == null) {
                 Log.w(TAG, "Malformed chunk size: $sizeLine")
@@ -217,7 +216,7 @@ object RawHttp {
             }
             sawFirstChunk = true
             if (size == 0L) {
-                
+
                 while (true) {
                     val line = readLine(source) ?: break
                     if (line.isEmpty()) break

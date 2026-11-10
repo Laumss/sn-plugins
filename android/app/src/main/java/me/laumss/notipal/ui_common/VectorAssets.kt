@@ -7,17 +7,15 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
 import android.util.Xml
-import com.facebook.react.bridge.ReactApplicationContext
 import org.xmlpull.v1.XmlPullParser
 
 object UiUtils {
 
     fun loadAssetIcon(
-        ctx: ReactApplicationContext,
+        ctx: Context,
         assetName: String,
         sizePx: Int,
         tintColor: Int,
-        strokeWidth: Float = 1.5f,
         strokeDeltaPx: Float = 0f,
     ): android.graphics.drawable.Drawable? {
         val bmp = VectorAssets.loadBitmapTinted(ctx, assetName, sizePx, tintColor, strokeDeltaPx) ?: return null
@@ -38,12 +36,9 @@ object VectorAssets {
 
     private val cache = mutableMapOf<String, Bitmap>()
 
-    
     fun loadBitmap(ctx: Context, assetPath: String, targetWidthPx: Int): Bitmap? =
         loadBitmapTinted(ctx, assetPath, targetWidthPx, null)
 
-    
-    
     fun loadBitmapTinted(ctx: Context, assetPath: String, targetWidthPx: Int, tintColor: Int?, strokeDeltaPx: Float = 0f): Bitmap? {
         val key = "$assetPath@${targetWidthPx}@${tintColor ?: "null"}@$strokeDeltaPx"
         cache[key]?.let { return it }
@@ -126,11 +121,9 @@ object VectorAssets {
         }
     }
 
-
     private fun attr(parser: XmlPullParser, name: String): String? =
         parser.getAttributeValue("http://schemas.android.com/apk/res/android", name)
 
-    
     private fun parseColor(s: String?): Int? {
         if (s == null || !s.startsWith("#")) return null
         val hex = s.substring(1)

@@ -6,7 +6,6 @@ import android.os.IBinder
 import android.os.Parcel
 import android.util.Log
 
-
 object PenDisableClient {
 
     private const val TAG = "PenDisableClient"
@@ -18,9 +17,9 @@ object PenDisableClient {
 
     enum class Result {
         OK,
-        
+
         NO_SERVICE,
-        
+
         FAILED,
     }
 
@@ -105,10 +104,7 @@ object PenDisableClient {
         if (rects.isEmpty()) return Result.FAILED
         val code = CODE_DISABLE_AREA_INFO
         val binder = serviceBinder() ?: return Result.NO_SERVICE
-        
-        
-        
-        
+
         val token = INTERFACE_TOKEN
         val data = Parcel.obtain()
         val reply = Parcel.obtain()
@@ -171,4 +167,9 @@ object PenDisableClient {
 
     fun clearDisableAreas(appName: String): Result =
         sendDisableAreas(appName, listOf(PenAreaGeometry.clearSentinel()))
+
+    fun releaseDisableAreas(appName: String): Result {
+        val replaced = sendDisableAreas(appName, listOf(PenAreaGeometry.emptyTableRect()))
+        return if (replaced == Result.OK) clearDisableAreas(appName) else replaced
+    }
 }

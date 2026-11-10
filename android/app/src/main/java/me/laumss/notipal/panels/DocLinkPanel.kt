@@ -12,7 +12,6 @@ import me.laumss.notipal.ui_common.PanelBase
 import me.laumss.notipal.ui_common.filepicker.FilePicker
 import java.io.File
 
-
 class DocLinkPanel(
     ctx: ReactApplicationContext,
     private val toolbar: FloatingToolbarModule,
@@ -69,7 +68,7 @@ class DocLinkPanel(
     }
 
     override fun buildFullScreenContent(): View {
-        
+
         val host = object : FrameLayout(reactContext) {
             override fun dispatchKeyEvent(event: KeyEvent): Boolean {
                 if (event.keyCode == KeyEvent.KEYCODE_BACK) {
@@ -96,7 +95,6 @@ class DocLinkPanel(
         if (currentInstance === this) currentInstance = null
     }
 
-    
     fun onFileReceived() {
         handler.post { if (isShowing) picker?.refresh() }
     }
@@ -108,8 +106,7 @@ class DocLinkPanel(
 
     private fun requestFileReadPermissionOnce(showingSession: Int) {
         if (session != showingSession || !isShowing || fileReadPermissionRequested) return
-        
-        
+
         fileReadPermissionRequested = true
         val now = System.currentTimeMillis()
         if (now - lastFilePermissionToastAt > 2500L) {
@@ -119,7 +116,7 @@ class DocLinkPanel(
         toolbar.requestPluginFileReadPermission { granted ->
             handler.post {
                 if (session != showingSession || !isShowing) return@post
-                if (granted) picker?.refresh() else toolbar.openPluginSettingsAfterFileReadDenied()
+                if (granted) picker?.refresh()
             }
         }
     }

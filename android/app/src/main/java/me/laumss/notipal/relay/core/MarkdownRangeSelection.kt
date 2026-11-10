@@ -16,8 +16,8 @@ data class MarkdownSelectionState(
     val anchorBlockIndex: Int? = null,
     val ranges: List<MarkdownBlockRange> = emptyList(),
 ) {
-    val groupCount: Int get() = ranges.size
-    val hasSelection: Boolean get() = ranges.isNotEmpty()
+
+    val selectedIndices: List<Int> get() = ranges.flatMap { it.firstBlockIndex..it.lastBlockIndex }
 }
 
 object MarkdownRangeSelection {
@@ -47,8 +47,6 @@ object MarkdownRangeSelection {
             ranges = mergeRanges(state.ranges + completed),
         )
     }
-
-    fun clear(): MarkdownSelectionState = MarkdownSelectionState()
 
     fun isSelected(state: MarkdownSelectionState, blockIndex: Int): Boolean =
         state.ranges.any { blockIndex in it }

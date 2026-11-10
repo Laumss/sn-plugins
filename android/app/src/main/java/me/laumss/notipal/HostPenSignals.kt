@@ -6,7 +6,6 @@ import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 
-
 internal object HostPenSignals {
     private const val TAG = "HostPenSignals"
     private val main = Handler(Looper.getMainLooper())
@@ -14,10 +13,6 @@ internal object HostPenSignals {
     private fun onMain(block: () -> Unit) {
         if (Looper.myLooper() == Looper.getMainLooper()) block() else main.post(block)
     }
-
-    
-    
-    
 
     @Volatile private var pendingReassertReason = "unknown"
 
@@ -37,7 +32,6 @@ internal object HostPenSignals {
         FloatingPenGuard.reassert("foreground change followup")
     }
 
-    
     fun scheduleReassert(
         reason: String,
         allowEmptyAtSchedule: Boolean = false,
@@ -61,7 +55,6 @@ internal object HostPenSignals {
         }
     }
 
-    
     fun scheduleForegroundReassert(fgKey: String) {
         if (!FloatingPenGuard.hasActiveRects()) return
         scheduleReassert(
@@ -75,18 +68,15 @@ internal object HostPenSignals {
     fun cancelScheduledReasserts() {
         main.removeCallbacks(reassertRunnable)
         main.removeCallbacks(foregroundFollowupRunnable)
+        main.removeCallbacks(docWritableFollowupRunnable)
     }
 
-    
-
-    
     @Volatile private var lassoWritableResetPending = false
 
     fun clearLassoWritableReset() {
         lassoWritableResetPending = false
     }
 
-    
     fun onNativePenAreas(
         rects: List<Rect>,
         rotationActive: Boolean,
@@ -100,19 +90,28 @@ internal object HostPenSignals {
                 Log.i(TAG, "lasso close candidate: writable reset observed")
             }
         } else if (lassoWritableResetPending && !isFullScreenSnapshot) {
-            
+
             lassoWritableResetPending = false
             SubviewLogMonitor.closeLassoMenuFromFallback("writable reset completed")
         }
-        
+
         val transientHostUi = SubviewLogMonitor.isToolbarMenuOpen() ||
             SubviewLogMonitor.isLassoMenuOpen() ||
-            SubviewLogMonitor.isSubviewOpen() ||
-            SubviewLogMonitor.isOwnedRotationDialogOpen()
+            SubviewLogMonitor.isSubviewOpen()
         val accepted = FloatingPenGuard.updateHostPenAreas(
             incoming = rects,
             commitBaseline = !transientHostUi && !rotationActive
         )
+        if (rotationActive) {
+
+            if (accepted && isWritableReset) {
+                rotationBaselineCandidate = null
+            } else if (accepted && !isFullScreenSnapshot && !transientHostUi && rects.isNotEmpty()) {
+                rotationBaselineCandidate = rects.map(::Rect)
+            }
+        } else {
+            rotationBaselineCandidate = null
+        }
         val guardActive = FloatingPenGuard.hasActiveRects()
         if (accepted && !isWritableReset && !isFullScreenSnapshot && !transientHostUi && !rotationActive) {
             DocChromeProbe.request("host native pen snapshot")
@@ -125,17 +124,23 @@ internal object HostPenSignals {
         }
 
         if (rotationActive) {
-            
-            if (accepted) FloatingPenGuard.reassert("rotation full-screen hold")
+
+            if (accepted) {
+                FloatingPenGuard.reassert("rotation full-screen hold")
+                scheduleReassert(
+                    reason = "rotation full-screen hold followup",
+                    delayMs = PenGuardTiming.HOST_SNAPSHOT_REASSERT_DELAY_MS
+                )
+            }
         } else if (accepted && guardActive && !isWritableReset) {
-            
+
             FloatingPenGuard.reassert("host native pen snapshot immediate")
             scheduleReassert(
                 reason = "host native pen snapshot",
                 delayMs = PenGuardTiming.HOST_SNAPSHOT_REASSERT_DELAY_MS
             )
         } else if (accepted && isWritableReset) {
-            
+
             cancelScheduledReasserts()
             if (!guardActive) {
                 FloatingPenGuard.dropIdleGuardState("writable reset, no live rects")
@@ -147,7 +152,6 @@ internal object HostPenSignals {
             }
         }
 
-        
         if (insertImageFlowActive && !SubviewLogMonitor.isLassoMenuOpen()) {
             if (isWritableReset) {
                 insertPlacementResetSeen = true
@@ -165,14 +169,27 @@ internal object HostPenSignals {
         }
     }
 
-    
     fun onHostTableRebuilt(rotationActive: Boolean) {
         FloatingPenGuard.noteHostTableRewritten()
         if (!rotationActive) scheduleReassert("host pen table rebuild")
-        else FloatingPenGuard.reassert("rotation full-screen hold (host rebuild)")
+        else {
+            FloatingPenGuard.reassert("rotation full-screen hold (host rebuild)")
+            scheduleReassert("rotation full-screen hold (host rebuild) followup")
+        }
     }
 
-    
+    @Volatile private var rotationBaselineCandidate: List<Rect>? = null
+
+    fun onRotationSettled() {
+        val candidate = rotationBaselineCandidate ?: return
+        rotationBaselineCandidate = null
+        val accepted = FloatingPenGuard.updateHostPenAreas(candidate, commitBaseline = true)
+        Log.i(TAG, "rotation settled: host table from the sync as baseline accepted=$accepted rects=$candidate")
+    }
+
+    fun resetRotationBaseline() {
+        rotationBaselineCandidate = null
+    }
 
     private val lassoMenuReleaseRunnable: Runnable = Runnable {
         if (BuildConfig.ENABLE_DEBUG) {
@@ -189,10 +206,6 @@ internal object HostPenSignals {
     fun cancelLassoMenuRelease() {
         main.removeCallbacks(lassoMenuReleaseRunnable)
     }
-
-    
-    
-    
 
     @Volatile var insertImageFlowActive = false
         private set
@@ -212,27 +225,9 @@ internal object HostPenSignals {
         FloatingPenGuard.setFullScreenActive(false, PenGuardOwner.INSERT_IMAGE)
     }
 
-    
-
-    fun beginPaletteApplyGuard(): Unit =
-        FloatingPenGuard.setFullScreenActive(true, PenGuardOwner.PALETTE_APPLY)
-
-    fun endPaletteApplyGuard(): Unit =
-        FloatingPenGuard.setFullScreenActive(false, PenGuardOwner.PALETTE_APPLY)
-
-    
-    
-    
-    
-    
-    
-    
-    
-
     @Volatile private var docLassoHoldArmedAt = 0L
     @Volatile private var docStickerHoldArmedAt = 0L
 
-    
     @Volatile var docStickerPending = false
         private set
 
@@ -242,7 +237,6 @@ internal object HostPenSignals {
         if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "inserted-sticker pending selection timed out")
     }
 
-    
     fun armDocLassoHold(reason: String, confirmed: Boolean = false): Unit = onMain {
         if (!confirmed) return@onMain
         docLassoHoldArmedAt = SystemClock.elapsedRealtime()
@@ -258,7 +252,6 @@ internal object HostPenSignals {
         Log.i(TAG, "doc lasso hold released reason=$reason")
     }
 
-    
     fun onStickerInserted(document: Boolean): Unit = onMain {
         docStickerPending = true
         main.removeCallbacks(stickerPendingTimeoutRunnable)
@@ -287,7 +280,6 @@ internal object HostPenSignals {
         Log.i(TAG, "doc sticker hold released reason=$reason")
     }
 
-    
     fun onDocWriteAreaRebuilt(): Unit = onMain {
         DocChromeProbe.request("document write-area rebuilt")
         if (docLassoHoldArmedAt != 0L || docStickerHoldArmedAt != 0L) {
@@ -297,15 +289,22 @@ internal object HostPenSignals {
         }
     }
 
-    
+    private val docWritableFollowupRunnable: Runnable = Runnable {
+        FloatingPenGuard.reassertDocumentAreas("document writable followup")
+    }
 
-    
+    fun onDocWritableEnabled(): Unit = onMain {
+        FloatingPenGuard.reassertDocumentAreas("document writable enabled")
+        main.removeCallbacks(docWritableFollowupRunnable)
+        main.postDelayed(docWritableFollowupRunnable, PenGuardTiming.DOC_WRITABLE_REASSERT_FOLLOWUP_MS)
+    }
+
     fun resetForMonitorStop(reason: String) {
         cancelScheduledReasserts()
         cancelLassoMenuRelease()
         lassoWritableResetPending = false
         endInsertImageGuard()
-        endPaletteApplyGuard()
+        FloatingPenGuard.setFullScreenActive(false, PenGuardOwner.PALETTE_APPLY)
         releaseDocStickerHold(reason)
         releaseDocLassoHold(reason)
         clearDocStickerPending()

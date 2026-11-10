@@ -1,14 +1,11 @@
 package me.laumss.notipal.ui_common.filepicker
 
-import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.RectF
 import android.util.Base64
-import android.view.View
-
 
 internal object FilePickerSelectionArtwork {
     private fun decode(data: String): Bitmap {
@@ -20,20 +17,5 @@ internal object FilePickerSelectionArtwork {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
     fun draw(canvas: Canvas, selected: Boolean, bounds: RectF) {
         canvas.drawBitmap(if (selected) checked else unchecked, null, bounds, paint)
-    }
-}
-
-internal class FilePickerSelectionMark(ctx: Context) : View(ctx) {
-    var checked = false
-        set(value) {
-            if (field == value) return
-            field = value
-            invalidate()
-        }
-    private val bounds = RectF()
-    override fun onDraw(canvas: Canvas) {
-        super.onDraw(canvas)
-        bounds.set(0f, 0f, width.toFloat(), height.toFloat())
-        FilePickerSelectionArtwork.draw(canvas, checked, bounds)
     }
 }

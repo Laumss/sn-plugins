@@ -12,23 +12,25 @@ import com.facebook.react.bridge.ReadableArray
 import com.facebook.react.bridge.ReadableMap
 import com.facebook.react.bridge.WritableMap
 import com.ratta.supernote.plugincommon.data.common.trail.Element
-import com.ratta.supernote.plugincommon.data.common.trail.Stroke
+import com.ratta.supernote.plugincommon.data.common.trail.Geometry
 import me.laumss.notipal.PenSizeSpec
 import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.Executors
+import kotlin.math.PI
+import kotlin.math.cos
 import kotlin.math.roundToInt
-
+import kotlin.math.sin
 
 object ClipboardElementIo {
     private const val TAG = "ClipboardElementIo"
-    
+
     private const val NOTE_PRESSURE_MAX = 4095
     private val worker = Executors.newSingleThreadExecutor { r ->
         Thread(r, "Notipal-clipboard-io").apply { isDaemon = true }
     }
     private val contourBatches = mutableMapOf<String, List<Pair<Element, Array<FloatArray>?>>>()
-    private var stickerEngine: ClipboardStickerEngine? = null 
+    private var stickerEngine: ClipboardStickerEngine? = null
 
     internal fun stickerContours(
         hasSamplePoints: Boolean, contours: Array<FloatArray>?,
@@ -165,7 +167,7 @@ object ClipboardElementIo {
             require(pageWidth > 0 && pageHeight > 0)
             val machine = context.getInt("machineType")
             val rotation = if (pageWidth > pageHeight) 1090 else 1000
-            
+
             val snapshots = batch.mapIndexed { index, (source, _) ->
                 val meta = metadata.getMap(index) ?: error("clipboard metadata missing")
                 check(meta.getString("uuid") == source.uuid) { "clipboard element order changed" }
@@ -260,8 +262,7 @@ object ClipboardElementIo {
         promise: Promise,
     ) {
         val started = SystemClock.elapsedRealtime()
-        
-        
+
         try {
             val plugin = PageImageSource.getPluginApp(ctx)
             val getTrail = plugin.javaClass.getMethod("getTrail", String::class.java)
@@ -325,7 +326,7 @@ object ClipboardElementIo {
                             maxWidth = maxOf(maxWidth, rawThickness / 100.0)
                             penCounts[sdkPenType] = (penCounts[sdkPenType] ?: 0) + 1
                             if (sdkPenType == 11) {
-                                
+
                                 markerColors[stroke.penColor] = (markerColors[stroke.penColor] ?: 0) + 1
                             }
                             count++
@@ -335,7 +336,7 @@ object ClipboardElementIo {
                     check(count > 0) { "clipboard has no stroke points skipped=$skipped skippedNums=${skippedNums.take(100)}" }
                     val rect = rectMap((left - 32).coerceAtLeast(0), (top - 32).coerceAtLeast(0),
                         (right + 32).coerceAtMost(pageWidth), (bottom + 32).coerceAtMost(pageHeight))
-                    
+
                     val metadata = JSONObject().put("v", 1)
                         .put("sourcePageSize", JSONObject().put("width", pageWidth).put("height", pageHeight))
                         .put("sourceRect", JSONObject(rect.toHashMap()))
@@ -359,15 +360,141 @@ object ClipboardElementIo {
         }
     }
 
-    
     internal fun writeStroke(
         out: JsonWriter,
         el: Element,
         mapX: (Int) -> Int = { it },
         mapY: (Int) -> Int = { it },
         includeContours: Boolean = false,
+        noteCoordinates: NotePageCoordinates? = null,
         onPoint: (Int, Int) -> Unit = { _, _ -> },
     ): String? {
+        return visitStroke(el, includeContours) { points, outlines, sdkPenType, rawThickness, penColor ->
+            val pressures = el.stroke?.pressures
+            val hasOutline = outlines.isNotEmpty()
+
+            val style = when (sdkPenType) {
+                PenSizeSpec.NEEDLE, PenSizeSpec.BALL -> 15
+                PenSizeSpec.MARKER -> 11
+                else -> 16
+            }
+            out.beginObject().name("penStyle").value(style.toLong())
+            out.name("sourcePenType").value(sdkPenType.toLong())
+            out.name("sdkPenType").value(sdkPenType.toLong())
+            out.name("layerNum").value(el.layerNum.toLong())
+            out.name("sdkThickness").value(rawThickness.toLong())
+
+            out.name("drawPathWidth").value(rawThickness.toLong())
+            out.name("sdkFactorResize").value(el.factorResize)
+            out.name("width").value((rawThickness / 100.0).coerceAtLeast(1.0))
+            out.name("penColor").value(penColor.toLong())
+
+            el.angles?.takeIf { it.isNotEmpty() }?.let { angles ->
+                out.name("angles").beginArray()
+                for (angle in angles) out.value(angle.toLong())
+                out.endArray()
+                if (angles.size >= 2) {
+                    out.name("tilt").beginArray().value(angles[0].toLong()).value(angles[1].toLong()).endArray()
+                }
+            }
+            if (hasOutline) {
+                out.name("geometry").value("contours")
+                out.name("contours").beginArray()
+                for (ring in outlines) {
+                    out.beginArray()
+                    for (i in ring.indices) out.value((noteCoordinates?.contour(ring[i], i) ?: ring[i]).toDouble())
+                    out.endArray()
+                }
+                out.endArray()
+            }
+            out.name("pts").beginArray()
+            for (i in 0 until points.size / 2) {
+                val x = mapX(points[i * 2]); val y = mapY(points[i * 2 + 1])
+                val pressure = pressures?.getOrNull(i)?.toInt()?.div(NOTE_PRESSURE_MAX.toDouble())
+                    ?.coerceIn(0.0, 1.0) ?: 1.0
+                out.value(x.toLong()).value(y.toLong()).value(pressure)
+                onPoint(x, y)
+            }
+            out.endArray().endObject()
+        }
+    }
+
+    internal fun copyNoteStroke(el: Element, noteCoordinates: NotePageCoordinates, penColor: Int? = null,
+                                accept: (Map<String, Any>) -> Unit): String? {
+        val reason = copyContourStroke(el, noteCoordinates, penColor, accept)
+        return if (reason != null && el.type == Element.TRAIL_TYPE_GEO) copyGeometryPath(el, penColor, accept) else reason
+    }
+
+    private fun copyContourStroke(el: Element, noteCoordinates: NotePageCoordinates, penColor: Int?,
+                                  accept: (Map<String, Any>) -> Unit): String? =
+        visitStroke(el, true) { source, outlines, pen, thickness, color ->
+            val samples = source.size / 2
+            val count = samples + outlines.sumOf { it.size / 2 }
+            val points = FloatArray(count * 2)
+            val pressures = FloatArray(count) { 1f }
+            for (i in 0 until samples) {
+                points[i * 2] = source[i * 2].toFloat()
+                points[i * 2 + 1] = source[i * 2 + 1].toFloat()
+                pressures[i] = (el.stroke?.pressures?.getOrNull(i)?.toInt()?.div(NOTE_PRESSURE_MAX.toDouble())
+                    ?.coerceIn(0.0, 1.0) ?: 1.0).toFloat()
+            }
+            val ends = if (outlines.isEmpty()) IntArray(0) else IntArray(outlines.size + 1)
+            var at = samples
+            if (ends.isNotEmpty()) ends[0] = samples
+            outlines.forEachIndexed { index, ring ->
+                for (i in ring.indices) points[at * 2 + i] = noteCoordinates.contour(ring[i], i)
+                at += ring.size / 2; ends[index + 1] = at
+            }
+            accept(mapOf("sdkPenType" to pen, "drawPathWidth" to thickness,
+                "width" to (thickness / 100.0).coerceAtLeast(1.0), "penColor" to (penColor ?: color),
+                "points" to points, "pressures" to pressures,
+                "angles" to (el.angles?.let { values -> IntArray(values.size) { values[it].toInt() } } ?: IntArray(0)),
+                "contourOffsets" to ends))
+        }
+
+    private fun copyGeometryPath(el: Element, penColor: Int?, accept: (Map<String, Any>) -> Unit): String? {
+        val geometry = el.geometry ?: return "missingGeometry"
+        val points = geometryPath(geometry) ?: return "geometry:${geometry.type}"
+        val thickness = geometry.penWidth.coerceAtLeast(1)
+        accept(mapOf("sdkPenType" to (if (geometry.penType == PenSizeSpec.MARKER) PenSizeSpec.MARKER else PenSizeSpec.NEEDLE),
+            "drawPathWidth" to thickness, "width" to (thickness / 100.0).coerceAtLeast(1.0),
+            "penColor" to (penColor ?: geometry.penColor), "points" to points,
+            "pressures" to FloatArray(points.size / 2) { GEOMETRY_PRESSURE },
+            "angles" to IntArray(0), "contourOffsets" to IntArray(0)))
+        return null
+    }
+
+    private fun geometryPath(geometry: Geometry): FloatArray? {
+        if (geometry.type == "GEO_circle" || geometry.type == "GEO_ellipse") {
+            val center = geometry.ellipseCenterPoint ?: return null
+            val rx = geometry.ellipseMajorAxisRadius.toDouble()
+            val ry = geometry.ellipseMinorAxisRadius.toDouble()
+            if (rx <= 0.0 && ry <= 0.0) return null
+
+            val angle = Math.toRadians(geometry.ellipseAngle)
+            val ca = cos(angle)
+            val sa = sin(angle)
+            val out = FloatArray((GEOMETRY_ELLIPSE_SEGMENTS + 1) * 2)
+            for (k in 0 until GEOMETRY_ELLIPSE_SEGMENTS) {
+                val t = 2.0 * PI * k / GEOMETRY_ELLIPSE_SEGMENTS
+                val dx = rx * cos(t)
+                val dy = ry * sin(t)
+                out[k * 2] = (center.x + dx * ca - dy * sa).toFloat()
+                out[k * 2 + 1] = (center.y + dx * sa + dy * ca).toFloat()
+            }
+            out[out.size - 2] = out[0]; out[out.size - 1] = out[1]
+            return out
+        }
+        val vertices = geometry.points?.filterNotNull()?.takeIf { it.size >= 2 } ?: return null
+        val close = (geometry.type == "GEO_polygon" || geometry.type == "curvePolygon") && vertices.first() != vertices.last()
+        val out = FloatArray((vertices.size + if (close) 1 else 0) * 2)
+        vertices.forEachIndexed { i, p -> out[i * 2] = p.x.toFloat(); out[i * 2 + 1] = p.y.toFloat() }
+        if (close) { out[out.size - 2] = out[0]; out[out.size - 1] = out[1] }
+        return out
+    }
+
+    private inline fun visitStroke(el: Element, includeContours: Boolean,
+        accept: (IntArray, List<FloatArray>, Int, Int, Int) -> Unit): String? {
         val geometry = if (includeContours && el.type == 700) el.geometry else null
         if (el.type != Element.TRAIL_TYPE_STROKE && geometry == null) return "type:${el.type}"
         val stroke = el.stroke
@@ -375,70 +502,27 @@ object ClipboardElementIo {
         val points = if (geometry != null) IntArray(0) else stroke?.points ?: IntArray(0)
         val outlines = if (includeContours) el.contoursSrc?.filter { it.isNotEmpty() } else null
         val hasOutline = !outlines.isNullOrEmpty()
+
+        if (includeContours && geometry == null && points.isEmpty() && !hasOutline) return "emptyStroke"
         if (!hasOutline && points.size < (if (includeContours) 2 else 4)) return "shortPoints:${points.size / 2}"
         if (hasOutline) require(outlines!!.all { ring -> ring.size % 2 == 0 && ring.all { it.isFinite() } }) { "Invalid note contour" }
-        val pressures = stroke?.pressures
         val sdkPenType = geometry?.penType ?: stroke!!.penType
-        if (sdkPenType !in SUPPORTED_PEN_TYPES) return "penType:$sdkPenType"
-        
-        
-        
-        
+
+        val contourPen = includeContours && hasOutline && sdkPenType in CONTOUR_PEN_TYPES
+        if (sdkPenType !in SUPPORTED_PEN_TYPES && !contourPen) return "penType:$sdkPenType"
+
         val rawThickness = (geometry?.penWidth ?: el.thickness).coerceAtLeast(1)
-        
-        val style = when (sdkPenType) {
-            PenSizeSpec.NEEDLE, PenSizeSpec.BALL -> 15
-            PenSizeSpec.MARKER -> 11
-            else -> 16
-        }
-        out.beginObject().name("penStyle").value(style.toLong())
-        out.name("sourcePenType").value(sdkPenType.toLong())
-        out.name("sdkPenType").value(sdkPenType.toLong())
-        out.name("layerNum").value(el.layerNum.toLong())
-        out.name("sdkThickness").value(rawThickness.toLong())
-        
-        
-        
-        out.name("drawPathWidth").value(rawThickness.toLong())
-        out.name("sdkFactorResize").value(el.factorResize)
-        out.name("width").value((rawThickness / 100.0).coerceAtLeast(1.0))
-        out.name("penColor").value((geometry?.penColor ?: stroke!!.penColor).toLong())
-        
-        
-        el.angles?.takeIf { it.isNotEmpty() }?.let { angles ->
-            out.name("angles").beginArray()
-            for (angle in angles) out.value(angle.toLong())
-            out.endArray()
-            if (angles.size >= 2) {
-                out.name("tilt").beginArray().value(angles[0].toLong()).value(angles[1].toLong()).endArray()
-            }
-        }
-        if (hasOutline) {
-            out.name("geometry").value("contours")
-            out.name("contours").beginArray()
-            for (ring in outlines!!) {
-                out.beginArray()
-                for (value in ring) out.value(value.toDouble())
-                out.endArray()
-            }
-            out.endArray()
-        }
-        out.name("pts").beginArray()
-        for (i in 0 until points.size / 2) {
-            val x = mapX(points[i * 2]); val y = mapY(points[i * 2 + 1])
-            val pressure = pressures?.getOrNull(i)?.toInt()?.div(NOTE_PRESSURE_MAX.toDouble())
-                ?.coerceIn(0.0, 1.0) ?: 1.0
-            out.value(x.toLong()).value(y.toLong()).value(pressure)
-            onPoint(x, y)
-        }
-        out.endArray().endObject()
+        accept(points, outlines.orEmpty(), sdkPenType, rawThickness, geometry?.penColor ?: stroke!!.penColor)
         return null
     }
 
-    
     private val SUPPORTED_PEN_TYPES = setOf(
         PenSizeSpec.NEEDLE, PenSizeSpec.BALL, PenSizeSpec.CALLIGRAPHY, PenSizeSpec.MARKER,
     )
+    private val CONTOUR_PEN_TYPES = setOf(1, 12, 14)
+
+    private const val GEOMETRY_PRESSURE = 0.6f
+    private const val GEOMETRY_ELLIPSE_SEGMENTS = 64
 
     private fun transformCoordinate(
         value: Int, sourceRect: ReadableMap?, targetRect: ReadableMap?, axis: String, pageSize: Int,

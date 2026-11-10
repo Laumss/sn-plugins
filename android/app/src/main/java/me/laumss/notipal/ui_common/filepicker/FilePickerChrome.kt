@@ -12,7 +12,6 @@ import android.view.Gravity
 import android.view.View
 import android.widget.LinearLayout
 
-
 object FilePickerChrome {
 
     class BottomTrayHandle(
@@ -21,7 +20,7 @@ object FilePickerChrome {
         private val divider: View,
         private val multiButton: TrayIconButton,
     ) {
-        
+
         fun setAction(label: String, visible: Boolean, enabled: Boolean = true, count: Int = 0) {
             actionButton.contentDescription = label
             actionButton.count = count
@@ -37,7 +36,6 @@ object FilePickerChrome {
         }
     }
 
-    
     class TrayIconButton(ctx: Context, private val glyph: Glyph) : View(ctx) {
         enum class Glyph { BACK, CHECK, MULTI }
 
@@ -48,7 +46,6 @@ object FilePickerChrome {
                 invalidate()
             }
 
-        
         var active = false
             set(value) {
                 if (field == value) return
@@ -97,13 +94,13 @@ object FilePickerChrome {
                 val radius = activeRect.height() / 2f
                 canvas.drawRoundRect(activeRect, radius, radius, activePaint)
             }
-            
-            val size = minOf(width, height) * 0.6f
+
+            val size = minOf(width, height) * 0.56f
             val s = size / 24f
             val ox = (width - size) / 2f
             val oy = (height - size) / 2f
             strokePaint.color = color
-            strokePaint.strokeWidth = 2.2f * s
+            strokePaint.strokeWidth = 2.6f * s
             path.reset()
             when (glyph) {
                 Glyph.BACK -> {
@@ -119,7 +116,7 @@ object FilePickerChrome {
                     path.lineTo(ox + 20f * s, oy + 6.5f * s)
                 }
                 Glyph.MULTI -> {
-                    
+
                     path.moveTo(ox + 8f * s, oy + 4f * s)
                     path.lineTo(ox + 17.5f * s, oy + 4f * s)
                     path.quadTo(ox + 20f * s, oy + 4f * s, ox + 20f * s, oy + 6.5f * s)
@@ -156,26 +153,24 @@ object FilePickerChrome {
         }
     }
 
-    
     fun buildBottomBackTray(
         ctx: Context,
         onBack: () -> Unit,
         onAction: () -> Unit,
         onMulti: () -> Unit,
     ): BottomTrayHandle {
-        val density = ctx.resources.displayMetrics.density
-        val buttonW = FilePickerScale.dp(ctx, 52f)
-        val buttonH = FilePickerScale.dp(ctx, 40f)
+
+        val buttonW = FilePickerScale.px(ctx, 120)
+        val buttonH = FilePickerScale.px(ctx, 92)
         val tray = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            setPadding(FilePickerScale.dp(ctx, 6f), FilePickerScale.dp(ctx, 4f), FilePickerScale.dp(ctx, 6f), FilePickerScale.dp(ctx, 4f))
+            setPadding(FilePickerScale.px(ctx, 12), FilePickerScale.px(ctx, 4), FilePickerScale.px(ctx, 12), FilePickerScale.px(ctx, 4))
             background = GradientDrawable().apply {
                 setColor(Color.WHITE)
-                setStroke(FilePickerScale.dp(ctx, 1f), 0xffcccccc.toInt())
-                cornerRadius = 28f * density
+                setStroke(FilePickerScale.px(ctx, 3), Color.BLACK)
+                cornerRadius = FilePickerScale.px(ctx, 60).toFloat()
             }
-            elevation = 4f * density
         }
         tray.addView(TrayIconButton(ctx, TrayIconButton.Glyph.BACK).apply {
             contentDescription = me.laumss.notipal.NativeLocale.t("picker_back")
@@ -193,10 +188,10 @@ object FilePickerChrome {
             setOnClickListener { onAction() }
         }
         val divider = View(ctx).apply {
-            setBackgroundColor(0xffcccccc.toInt())
-            layoutParams = LinearLayout.LayoutParams(FilePickerScale.dp(ctx, 1f), FilePickerScale.dp(ctx, 22f)).apply {
-                leftMargin = FilePickerScale.dp(ctx, 2f)
-                rightMargin = FilePickerScale.dp(ctx, 2f)
+            setBackgroundColor(Color.BLACK)
+            layoutParams = LinearLayout.LayoutParams(FilePickerScale.px(ctx, 2), FilePickerScale.px(ctx, 48)).apply {
+                leftMargin = FilePickerScale.px(ctx, 6)
+                rightMargin = FilePickerScale.px(ctx, 6)
             }
             visibility = View.GONE
         }

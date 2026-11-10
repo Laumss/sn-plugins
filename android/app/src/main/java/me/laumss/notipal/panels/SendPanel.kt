@@ -26,6 +26,8 @@ import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.modules.core.DeviceEventManagerModule
 import me.laumss.notipal.net.LocalSendDiscovery
+import me.laumss.notipal.net.PluginIdentity
+import me.laumss.notipal.relay.net.RawHttp
 import me.laumss.notipal.ui_common.PanelBase
 import me.laumss.notipal.ui_common.PanelScrollHost
 import me.laumss.notipal.ui_common.PanelWidgets
@@ -79,7 +81,6 @@ class SendPanel(
 
         @Volatile private var staged: Staged? = null
 
-        
         fun stageLassoData(text: String, images: List<String>, linked: List<Triple<String, Int, String>>) {
             staged = Staged(text, images, linked)
         }
@@ -91,7 +92,6 @@ class SendPanel(
         }
     }
 
-    
     private sealed class Item(val key: String) {
         class Text(val text: String) : Item("text")
         class Image(val path: String, val number: Int) : Item("image:$path")
@@ -112,6 +112,7 @@ class SendPanel(
     private var restoreNoteBubbles = false
     private var clipboardSyncMode = false
     private var allowAutoSend = true
+    private var tempDir: File? = null
 
     private var contentBox: LinearLayout? = null
     private var scrollHost: PanelScrollHost? = null
@@ -120,7 +121,6 @@ class SendPanel(
     private var scanLabel: TextView? = null
     private var statusView: TextView? = null
     private var sendBtn: TextView? = null
-
 
     private var sessionGen = 0
 
@@ -132,20 +132,18 @@ class SendPanel(
         onShowResult: ((Boolean) -> Unit)? = null
     ) {
 
-
         if (!LocalSendModule.isWifiConnectedStatic(reactContext)) {
             me.laumss.notipal.ui_common.Dialog.tip(reactContext, NativeLocale.t("no_wifi"))
             onShowResult?.invoke(false)
             return
         }
         currentInstance = this
+        deleteTempDir()
         sessionGen++
         pendingText = ""; pendingImages = emptyList(); pendingLinkedFiles = emptyList()
         dataReady = false; items = emptyList(); unchecked.clear()
         selectedPeer = null; sending = false
         cameFromBubble = fromBubble
-
-
 
         restoreNoteBubbles = fromBubble && FloatingToolbarModule.isInNoteApp()
         if (BuildConfig.ENABLE_DEBUG) {
@@ -154,16 +152,18 @@ class SendPanel(
         clipboardSyncMode = syncClipboard
         this.allowAutoSend = allowAutoSend
         autoSendArmed = false
-        
+
         val pre = takeStaged()?.takeIf { useStaged && !syncClipboard }
         showPanel { shown ->
             if (shown) {
 
-
                 if (!LocalSendModule.staticIsRunning) {
                     toolbarModule.emitEvent("startLocalSendFromNative", Arguments.createMap())
                 }
+                LocalSendModule.refreshPeers(reactContext)
                 startPeerPolling()
+
+                LocalSendDiscovery.setLocalSendAnnouncing(true)
                 pre?.let { updateLassoData(it.text, it.images, it.linked) }
             }
             onShowResult?.invoke(shown)
@@ -173,6 +173,7 @@ class SendPanel(
     override fun hide() {
         android.os.Handler(android.os.Looper.getMainLooper()).post {
             stopPeerPolling()
+            LocalSendDiscovery.setLocalSendAnnouncing(false)
             try { windowManager?.removeView(rootView) } catch (_: Exception) {}
             FloatingPenGuard.setFullScreenActive(false, PenGuardOwner.panel(panelName))
             rootView = null; windowManager = null
@@ -180,7 +181,17 @@ class SendPanel(
         }
     }
 
+    fun deleteOnClose(dir: File) {
+        tempDir = dir
+    }
+
+    private fun deleteTempDir() {
+        tempDir?.deleteRecursively()
+        tempDir = null
+    }
+
     override fun onHide() {
+        deleteTempDir()
         autoSendArmed = false
         contentBox = null; scrollHost = null; peerContainer = null; peerSignature = null
         scanLabel = null; statusView = null; sendBtn = null
@@ -217,7 +228,6 @@ class SendPanel(
             setStatus(null)
             updateSendBtnState()
 
-
             autoSendArmed = allowAutoSend && rootView != null && !clipboardSyncMode &&
                 LocalSendModule.getDefaultPeer(reactContext) != null
             maybeAutoSendToDefault()
@@ -237,10 +247,8 @@ class SendPanel(
 
     private fun selectedItems(): List<Item> = items.filter { it.key !in unchecked }
 
-
     private var autoSendArmed = false
 
-    
     private fun maybeAutoSendToDefault() {
         if (!autoSendArmed || sending || clipboardSyncMode) return
         val def = LocalSendModule.getDefaultPeer(reactContext) ?: run { autoSendArmed = false; return }
@@ -269,7 +277,7 @@ class SendPanel(
                         setPadding(host.dp(20), 0, host.dp(20), host.dp(8))
                     }
                     contentBox = box
-                    
+
                     addView(CappedScrollView(host.ctx, (screenH * 0.26f).toInt()).apply {
                         isVerticalScrollBarEnabled = false
                         addView(box)
@@ -349,18 +357,14 @@ class SendPanel(
     private fun rescan() {
         if (sending) return
         scanLabel?.apply { text = NativeLocale.t("peers_scanning_short"); isEnabled = false }
-        thread(isDaemon = true) {
-            LocalSendModule.probeDefaultPeer(reactContext)
-            LocalSendModule.reprobeKnownPeers()
-            LocalSendModule.triggerScan()
-            handler.postDelayed({
-                scanLabel?.apply { text = NativeLocale.t("rescan"); isEnabled = true }
-                refreshPeerList()
-            }, 1500)
-        }
+        LocalSendModule.probeDefaultPeer(reactContext)
+        LocalSendModule.reprobeKnownPeers()
+        LocalSendModule.triggerScan()
+        handler.postDelayed({
+            scanLabel?.apply { text = NativeLocale.t("rescan"); isEnabled = true }
+            refreshPeerList()
+        }, 1500)
     }
-
-    
 
     private fun rebuildContent() {
         val box = contentBox ?: return
@@ -520,8 +524,6 @@ class SendPanel(
         }
     }
 
-    
-
     private fun refreshPeerList() {
         android.os.Handler(android.os.Looper.getMainLooper()).post {
             val container = peerContainer ?: return@post
@@ -543,7 +545,6 @@ class SendPanel(
                 selectedPeer = null
             }
 
-            
             val signature = peers.joinToString("|") { "${it.fingerprint}@${it.ip}:${it.port}/${it.alias}" } +
                 "#${selectedPeer?.fingerprint}#${defaultPeer?.fingerprint}"
             if (signature != peerSignature) {
@@ -663,7 +664,6 @@ class SendPanel(
         return row
     }
 
-    
     private class RadioMark(ctx: Context, private val on: Boolean) : View(ctx) {
         private val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
         override fun onDraw(canvas: android.graphics.Canvas) {
@@ -681,14 +681,11 @@ class SendPanel(
         }
     }
 
-    
     private class CappedScrollView(ctx: Context, private val maxH: Int) : android.widget.ScrollView(ctx) {
         override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
             super.onMeasure(widthMeasureSpec, MeasureSpec.makeMeasureSpec(maxH, MeasureSpec.AT_MOST))
         }
     }
-
-    
 
     private fun withInternetPermission(onGranted: () -> Unit) {
         toolbar.requestPluginInternetPermission { granted ->
@@ -721,15 +718,15 @@ class SendPanel(
                 sending = false
                 setStatus(NativeLocale.t("file_read_permission_needed"))
                 updateSendBtnState()
-                toolbar.openPluginSettingsAfterFileReadDenied()
                 return@requestPluginFileReadPermission
             }
             go()
         }
     }
 
-    
     private fun runSend(peer: LocalSendModule.DiscoveredPeer, chosen: List<Item>) {
+
+        PluginIdentity.claim()
         val texts = chosen.mapNotNull {
             when (it) { is Item.Text -> it.text; is Item.Link -> it.url; else -> null }
         }
@@ -786,7 +783,6 @@ class SendPanel(
                 sending = false
                 setStatus(NativeLocale.t("file_read_permission_needed"))
                 updateSendBtnState()
-                toolbar.openPluginSettingsAfterFileReadDenied()
                 return@requestPluginFileReadPermission
             }
             toolbar.requestPluginFileWritePermission { writeGranted ->
@@ -794,13 +790,12 @@ class SendPanel(
                     sending = false
                     setStatus(NativeLocale.t("perm_required"))
                     updateSendBtnState()
-                    toolbar.openPluginSettingsAfterFileWriteDenied()
                     return@requestPluginFileWritePermission
                 }
                 withInternetPermission {
                 thread(isDaemon = true) {
                     try {
-                        val zipPath = packageClipboard()
+                        val zipPath = LocalSendModule.packageClipboardStatic(reactContext)
                         if (zipPath == null) {
                             handler.post {
                                 sending = false
@@ -834,52 +829,11 @@ class SendPanel(
         }
     }
 
-    private fun packageClipboard(): String? {
-        val prefs = reactContext.getSharedPreferences("quicktoolbar_presets", 0)
-        val clipsJson = prefs.getString("preset_99", null) ?: return null
-        if (BuildConfig.ENABLE_DEBUG) Log.i(tag, "[SYNC-DBG] packageClipboard raw preset_99: $clipsJson")
-        val clips = JSONObject(clipsJson)
-
-        val filteredClips = JSONObject()
-        val keys = clips.keys()
-        while (keys.hasNext()) {
-            val slot = keys.next()
-            val rawVal = clips.opt(slot)
-            val path = clips.optString(slot, "")
-            val fileExists = path.isNotEmpty() && File(path).exists()
-            if (BuildConfig.ENABLE_DEBUG) Log.i(tag, "[SYNC-DBG] packageClipboard slot=$slot raw=$rawVal path='$path' exists=$fileExists")
-            if (fileExists) {
-                filteredClips.put(slot, path)
-            }
-        }
-        if (BuildConfig.ENABLE_DEBUG) Log.i(tag, "[SYNC-DBG] packageClipboard filtered: $filteredClips (${filteredClips.length()} slots)")
-        if (filteredClips.length() == 0) return null
-
-        val cacheDir = reactContext.cacheDir
-        val zipFile = File(cacheDir, "clipboard_sync_${System.currentTimeMillis()}.zip")
-        ZipOutputStream(zipFile.outputStream().buffered()).use { zos ->
-
-            zos.putNextEntry(ZipEntry("clips.json"))
-            zos.write(filteredClips.toString().toByteArray(Charsets.UTF_8))
-            zos.closeEntry()
-
-            val keys2 = filteredClips.keys()
-            while (keys2.hasNext()) {
-                val slot = keys2.next()
-                val f = File(filteredClips.getString(slot))
-                zos.putNextEntry(ZipEntry("stickers/${f.name}"))
-                f.inputStream().buffered().use { it.copyTo(zos) }
-                zos.closeEntry()
-            }
-        }
-        return zipFile.absolutePath
-    }
-
     private fun startPeerPolling() {
         stopPeerPolling()
         peerPollRunnable = object : Runnable {
             override fun run() {
-                
+
                 refreshPeerList()
                 handler.postDelayed(this, 3000)
             }
@@ -891,7 +845,6 @@ class SendPanel(
         peerPollRunnable?.let { handler.removeCallbacks(it) }
         peerPollRunnable = null
     }
-
 
     private fun scheduleAutoClose() {
         val gen = sessionGen
@@ -921,14 +874,12 @@ class SendPanel(
         ScreenshotBubble.reshowIfPending()
         if (shouldRestoreNoteBubbles) {
 
-
             val gen = sessionGen
             handler.postDelayed({
                 if (gen != sessionGen) return@postDelayed
                 if (!FloatingToolbarModule.isInNoteApp()) return@postDelayed
                 toolbarModule.restoreToolbar()
                 FloatingBubbleModule.reshowLast(reactContext)
-                AiBubbleModule.reshowLast(reactContext)
                 PaletteBubbleModule.reshowLast(reactContext)
             }, 350)
         } else {
@@ -973,9 +924,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             }
 
             override fun onAvailable(network: Network) {
-                
-                
-                LocalSendDiscovery.restartForNetworkChange()
+
                 FloatingToolbarModule.currentInstance?.requestLocalSendForActiveSession("WiFi available")
             }
         }
@@ -997,8 +946,6 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
         networkCallback?.let { try { cm?.unregisterNetworkCallback(it) } catch (_: Exception) {} }
         networkCallback = null
 
-        
-        
         forceCloseAll()
         if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "invalidate: LocalSend server stopped")
         super.invalidate()
@@ -1014,7 +961,6 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
         @Volatile private var staticServerSocket: ServerSocket? = null
         @Volatile @JvmStatic var staticIsRunning = false
 
-        
         fun forceCloseAll() {
             staticIsRunning = false
             try { staticServerSocket?.close() } catch (_: Exception) {}
@@ -1059,6 +1005,10 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
 
         private const val PEER_TTL_MS = 15_000L
 
+        private const val PREPARE_UPLOAD_READ_TIMEOUT_MS = 75_000
+
+        @Volatile @JvmStatic var staticServerPort = DEFAULT_PORT
+
         data class StoredSecurityContext(
             val keyAlias: String,
             val privateKey: String,
@@ -1070,37 +1020,13 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
         private const val INBOX_DIR = "/sdcard/INBOX"
         private val IMAGE_EXTS_RECV = setOf("jpg", "jpeg", "png", "bmp", "gif", "webp")
 
-        private val sessionReceivedImages = mutableListOf<ReceivedFileInfo>()
-
         @JvmStatic
-        fun addSessionReceivedImage(info: ReceivedFileInfo) {
-            synchronized(sessionReceivedImages) { sessionReceivedImages.add(0, info) }
-        }
-
-        @JvmStatic
-        fun getReceivedImageFiles(): List<ReceivedFileInfo> {
-            val inboxImages = try {
-                val dir = File(INBOX_DIR)
-                if (dir.exists() && dir.isDirectory) {
-                    (dir.listFiles() ?: emptyArray())
-                        .filter { !it.isDirectory && !it.name.startsWith(".") }
-                        .filter { IMAGE_EXTS_RECV.contains(it.extension.lowercase()) }
-                        .map { ReceivedFileInfo(it.name, it.absolutePath, it.length(), it.lastModified(), true) }
-                } else emptyList()
-            } catch (_: Exception) { emptyList() }
-
-            val sessionImages = synchronized(sessionReceivedImages) {
-                sessionReceivedImages.filter { File(it.path).exists() }.toList()
-            }
-
-            val seen = mutableSetOf<String>()
-            val merged = mutableListOf<ReceivedFileInfo>()
-            for (f in inboxImages + sessionImages) {
-                if (seen.add(f.path)) merged.add(f)
-            }
-            merged.sortByDescending { it.modified }
-            return merged
-        }
+        fun getReceivedImageFiles(): List<ReceivedFileInfo> = try {
+            (File(INBOX_DIR).listFiles() ?: emptyArray())
+                .filter { it.isFile && !it.name.startsWith(".") && IMAGE_EXTS_RECV.contains(it.extension.lowercase()) }
+                .map { ReceivedFileInfo(it.name, it.absolutePath, it.length(), it.lastModified(), true) }
+                .sortedByDescending { it.modified }
+        } catch (_: Exception) { emptyList() }
 
         private var inboxObserver: FileObserver? = null
 
@@ -1109,12 +1035,13 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             if (inboxObserver != null) return
             File(INBOX_DIR).mkdirs()
             @Suppress("DEPRECATION")
-            inboxObserver = object : FileObserver(INBOX_DIR, CREATE or CLOSE_WRITE) {
+
+            inboxObserver = object : FileObserver(INBOX_DIR, CLOSE_WRITE or MOVED_TO) {
                 override fun onEvent(event: Int, path: String?) {
                     if (path == null) return
                     val ext = path.substringAfterLast('.', "").lowercase()
                     if (IMAGE_EXTS_RECV.contains(ext)) {
-                        ImagePanel.currentInstance?.onFileReceived()
+                        ImagePickerPanel.currentInstance?.onFileReceived()
                     }
                     if (DocLinkPanel.DOC_EXTS.contains(ext)) {
                         DocLinkPanel.currentInstance?.onFileReceived()
@@ -1130,19 +1057,18 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             val now = System.currentTimeMillis()
             staticDiscoveredPeers.entries.removeIf {
                 now - it.value.lastSeen > PEER_TTL_MS ||
-                    isLocalAddressStatic(it.value.ip) ||
+                    LocalSendDiscovery.isLocalAddress(it.value.ip) ||
                     it.value.fingerprint == staticDeviceFingerprint
             }
             return staticDiscoveredPeers.values.toList()
         }
 
-        
         private const val DEFAULT_PEER_KEY = "localsend_default_peer"
 
         @JvmStatic
         fun getDefaultPeer(ctx: Context): DiscoveredPeer? {
             return try {
-                val json = ctx.getSharedPreferences("quicktoolbar_presets", 0)
+                val json = ctx.getSharedPreferences(NotipalPrefs.PRESETS_FILE, 0)
                     .getString(DEFAULT_PEER_KEY, null) ?: return null
                 val o = JSONObject(json)
                 val fp = o.optString("fingerprint", "")
@@ -1159,7 +1085,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
 
         @JvmStatic
         fun setDefaultPeer(ctx: Context, peer: DiscoveredPeer?) {
-            val prefs = ctx.getSharedPreferences("quicktoolbar_presets", 0)
+            val prefs = ctx.getSharedPreferences(NotipalPrefs.PRESETS_FILE, 0)
             if (peer == null) {
                 prefs.edit().remove(DEFAULT_PEER_KEY).apply()
                 return
@@ -1186,8 +1112,8 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
 
         @JvmStatic
         fun packageClipboardStatic(ctx: Context): String? {
-            val prefs = ctx.getSharedPreferences("quicktoolbar_presets", 0)
-            val clipsJson = prefs.getString("preset_99", null) ?: return null
+            val prefs = ctx.getSharedPreferences(NotipalPrefs.PRESETS_FILE, 0)
+            val clipsJson = prefs.getString(NotipalPrefs.CLIP_SLOTS_KEY, null) ?: return null
             if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[SYNC-DBG] packageClipboard raw preset_99: $clipsJson")
             val clips = JSONObject(clipsJson)
 
@@ -1208,19 +1134,24 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                 zos.putNextEntry(ZipEntry("clips.json"))
                 zos.write(filteredClips.toString().toByteArray(Charsets.UTF_8))
                 zos.closeEntry()
+
+                val added = HashSet<String>()
                 val keys2 = filteredClips.keys()
                 while (keys2.hasNext()) {
-                    val slot = keys2.next()
-                    val f = File(filteredClips.getString(slot))
-                    zos.putNextEntry(ZipEntry("stickers/${f.name}"))
-                    f.inputStream().buffered().use { it.copyTo(zos) }
-                    zos.closeEntry()
+                    val sticker = File(filteredClips.getString(keys2.next()))
+                    val files = sticker.parentFile?.listFiles()?.filter { it.isFile && it.name.startsWith(sticker.name) }.orEmpty()
+                    for (f in files) {
+                        if (!added.add(f.name)) continue
+                        zos.putNextEntry(ZipEntry("stickers/${f.name}"))
+                        f.inputStream().buffered().use { it.copyTo(zos) }
+                        zos.closeEntry()
+                    }
                 }
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[SYNC-DBG] packageClipboard files=${added.size}")
             }
             return zipFile.absolutePath
         }
 
-        
         @JvmStatic
         fun probeDefaultPeer(ctx: Context) {
             val def = getDefaultPeer(ctx) ?: return
@@ -1233,9 +1164,22 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
         @Volatile private var reprobeRunning = false
 
         @JvmStatic
-        fun reprobeKnownPeers() {
-            if (reprobeRunning) return
+        fun refreshPeers(ctx: Context) {
             val known = staticDiscoveredPeers.values.map { it.ip to it.port }.distinct()
+            staticDiscoveredPeers.clear()
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "refreshPeers: cleared, reprobe ${known.size} known")
+            probeDefaultPeer(ctx)
+            reprobe(known)
+            triggerScan()
+        }
+
+        @JvmStatic
+        fun reprobeKnownPeers() {
+            reprobe(staticDiscoveredPeers.values.map { it.ip to it.port }.distinct())
+        }
+
+        private fun reprobe(known: List<Pair<String, Int>>) {
+            if (reprobeRunning) return
             if (known.isEmpty()) return
             kotlin.concurrent.thread(isDaemon = true, name = "NativePanel-Reprobe") {
                 reprobeRunning = true
@@ -1533,14 +1477,6 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             }
         }
 
-        
-        
-        
-        
-        
-        
-        
-        
         private class PrereadSocket(private val delegate: Socket, prefix: ByteArray) : Socket() {
             private val input: InputStream =
                 SequenceInputStream(ByteArrayInputStream(prefix), delegate.getInputStream())
@@ -1587,6 +1523,8 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
         }
 
         private fun staticOpenConn(url: String, connectTimeout: Int = 10000, readTimeout: Int = 30000): HttpURLConnection {
+
+            PluginIdentity.claim()
             val conn = URL(url).openConnection() as HttpURLConnection
             if (conn is HttpsURLConnection) {
                 conn.sslSocketFactory = staticTrustAllSsl.socketFactory
@@ -1597,52 +1535,68 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             return conn
         }
 
-        private fun staticHttpPostJson(url: String, jsonBody: String): String {
-            val conn = staticOpenConn(url)
-            conn.requestMethod = "POST"
-            conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
-            conn.doOutput = true
-            conn.outputStream.use { it.write(jsonBody.toByteArray(Charsets.UTF_8)) }
-            val code = conn.responseCode
-            val body = if (code in 200..299) {
-                conn.inputStream.bufferedReader().readText()
-            } else {
-                val err = try { conn.errorStream?.bufferedReader()?.readText() } catch (_: Exception) { null }
-                throw Exception("HTTP $code: ${err ?: "no body"}")
-            }
-            conn.disconnect()
-            return body
+        private class UploadBody(val length: Long, val open: () -> InputStream) {
+            constructor(bytes: ByteArray) : this(bytes.size.toLong(), { ByteArrayInputStream(bytes) })
+            constructor(file: File) : this(file.length(), { FileInputStream(file) })
         }
 
-        private fun staticHttpPostBinary(url: String, data: ByteArray) {
-            val conn = staticOpenConn(url, readTimeout = 60000)
-            conn.requestMethod = "POST"
-            conn.setRequestProperty("Content-Type", "application/octet-stream")
-            conn.setRequestProperty("Content-Length", data.size.toString())
-            conn.doOutput = true
-            conn.outputStream.use { os ->
-                var offset = 0
-                while (offset < data.size) {
-                    val len = minOf(65536, data.size - offset)
-                    os.write(data, offset, len)
-                    offset += len
+        private fun staticHttpPostJson(url: String, jsonBody: String, readTimeout: Int = 30000): String =
+            staticPost(url, "application/json; charset=utf-8", UploadBody(jsonBody.toByteArray(Charsets.UTF_8)), readTimeout)
+
+        private fun staticHttpPostBinary(url: String, data: UploadBody) {
+            staticPost(url, "application/octet-stream", data, 60000)
+        }
+
+        private fun staticPost(url: String, contentType: String, data: UploadBody, readTimeout: Int): String {
+            if (url.startsWith("http://")) {
+                return data.open().use { input ->
+                    RawHttp.request(
+                        "POST", url, mapOf("Content-Type" to contentType),
+                        connectTimeoutMs = 10000, readTimeoutMs = readTimeout,
+                        bodyStream = input, bodyLength = data.length,
+                    ).use { resp ->
+                        val text = resp.body.readBytes().toString(Charsets.UTF_8)
+                        if (!resp.isSuccess) throw IOException("HTTP ${resp.status}: ${text.ifEmpty { "no body" }}")
+                        text
+                    }
                 }
-                os.flush()
             }
-            val code = conn.responseCode
-            if (code !in 200..299) {
-                val err = try { conn.errorStream?.bufferedReader()?.readText() } catch (_: Exception) { null }
+            val conn = staticOpenConn(url, readTimeout = readTimeout)
+            try {
+                conn.requestMethod = "POST"
+                conn.setRequestProperty("Content-Type", contentType)
+                conn.setFixedLengthStreamingMode(data.length)
+                conn.doOutput = true
+                conn.outputStream.use { out -> data.open().use { it.copyTo(out) } }
+                val code = conn.responseCode
+                if (code !in 200..299) {
+                    val err = try { conn.errorStream?.bufferedReader()?.readText() } catch (_: Exception) { null }
+                    throw IOException("HTTP $code: ${err ?: "no body"}")
+                }
+                return conn.inputStream.bufferedReader().readText()
+            } finally {
                 conn.disconnect()
-                throw Exception("Upload HTTP $code: ${err ?: "no body"}")
             }
-            conn.disconnect()
         }
 
         private fun staticSha256Hex(data: ByteArray): String =
             MessageDigest.getInstance("SHA-256").digest(data).joinToString("") { "%02x".format(it) }
 
+        private fun staticSha256Hex(file: File): String {
+            val digest = MessageDigest.getInstance("SHA-256")
+            file.inputStream().use { input ->
+                val buffer = ByteArray(64 * 1024)
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read < 0) break
+                    digest.update(buffer, 0, read)
+                }
+            }
+            return digest.digest().joinToString("") { "%02x".format(it) }
+        }
+
         private fun buildSingleFileJson(
-            fileId: String, fileName: String, size: Int, fileType: String,
+            fileId: String, fileName: String, size: Long, fileType: String,
             sha: String, preview: String? = null
         ): JSONObject = JSONObject().apply {
             put(fileId, JSONObject().apply {
@@ -1670,10 +1624,10 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             val textBytes = text.toByteArray(Charsets.UTF_8)
             val fileId = "text-${UUID.randomUUID().toString().substring(0, 8)}"
             val filesJson = buildSingleFileJson(
-                fileId, "message.txt", textBytes.size, "text/plain",
+                fileId, "message.txt", textBytes.size.toLong(), "text/plain",
                 staticSha256Hex(textBytes), preview = text
             )
-            return doUploadDirect(ip, port, filesJson, mapOf(fileId to textBytes), useTls)
+            return doUploadDirect(ip, port, filesJson, mapOf(fileId to UploadBody(textBytes)), useTls)
         }
 
         @JvmStatic
@@ -1681,71 +1635,70 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
         fun sendFileDirect(ip: String, port: Int, filePath: String, useTls: Boolean = true): String {
             val file = File(filePath)
             if (!file.exists()) throw Exception("File not found: $filePath")
-            val fileBytes = file.readBytes()
+            val upload = UploadBody(file)
             val fileId = "file-${UUID.randomUUID().toString().substring(0, 8)}"
             val filesJson = buildSingleFileJson(
-                fileId, file.name, fileBytes.size, staticGuessMimeType(file.name),
-                staticSha256Hex(fileBytes)
+                fileId, file.name, upload.length, staticGuessMimeType(file.name),
+                staticSha256Hex(file)
             )
-            return doUploadDirect(ip, port, filesJson, mapOf(fileId to fileBytes), useTls)
+            return doUploadDirect(ip, port, filesJson, mapOf(fileId to upload), useTls)
         }
 
-        
         @JvmStatic
         @Throws(Exception::class)
         fun sendFilesDirect(ip: String, port: Int, filePaths: List<String>, useTls: Boolean = true): String {
             if (filePaths.size == 1) return sendFileDirect(ip, port, filePaths[0], useTls)
             val filesJson = JSONObject()
-            val data = LinkedHashMap<String, ByteArray>()
+            val data = LinkedHashMap<String, UploadBody>()
             for (path in filePaths) {
                 val file = File(path)
                 if (!file.exists()) throw FileNotFoundException("File not found: $path")
-                val bytes = file.readBytes()
+                val upload = UploadBody(file)
                 val fileId = "file-${UUID.randomUUID().toString().substring(0, 8)}"
                 val one = buildSingleFileJson(
-                    fileId, file.name, bytes.size, staticGuessMimeType(file.name), staticSha256Hex(bytes)
+                    fileId, file.name, upload.length, staticGuessMimeType(file.name), staticSha256Hex(file)
                 )
                 filesJson.put(fileId, one.getJSONObject(fileId))
-                data[fileId] = bytes
+                data[fileId] = upload
             }
             return doUploadDirect(ip, port, filesJson, data, useTls)
         }
 
+        private fun localSendInfo(alias: String, fingerprint: String, port: Int): JSONObject = JSONObject().apply {
+            put("alias", alias)
+            put("version", PROTOCOL_VERSION)
+            put("deviceModel", "Supernote")
+            put("deviceType", "mobile")
+            put("fingerprint", fingerprint)
+            put("port", port)
+            put("protocol", serverProtocol())
+            put("download", false)
+        }
+
         private fun doUploadDirect(
-            ip: String, port: Int, filesJson: JSONObject, fileData: Map<String, ByteArray>,
+            ip: String, port: Int, filesJson: JSONObject, fileData: Map<String, UploadBody>,
             useTls: Boolean = true
         ): String {
             val prepareBody = JSONObject().apply {
-                put("info", JSONObject().apply {
-                    put("alias", staticDeviceAlias); put("version", PROTOCOL_VERSION)
-                    put("deviceModel", "Supernote"); put("deviceType", "mobile")
-                    put("fingerprint", staticDeviceFingerprint)
-                    put("port", DEFAULT_PORT)
-                    put("protocol", serverProtocol())
-                    put("download", false)
-                })
+                put("info", localSendInfo(staticDeviceAlias, staticDeviceFingerprint, staticServerPort))
                 put("files", filesJson)
             }
             try {
-                val prepareResp: String
-                if (useTls) {
-                    val baseUrl = "https://$ip:$port$API_BASE"
-                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[SEND-DBG] doUploadDirect HTTPS baseUrl=$baseUrl")
-                    prepareResp = staticHttpPostJson("$baseUrl/prepare-upload", prepareBody.toString())
-                } else {
-                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[SEND-DBG] doUploadDirect raw-socket HTTP to $ip:$port")
-                    prepareResp = staticRawSocketPostJson(ip, port,
-                        "$API_BASE/prepare-upload", prepareBody.toString())
+
+                val scheme = if (useTls) "https" else "http"
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[SEND-DBG] doUploadDirect $scheme://$ip:$port")
+                val prepareStart = System.currentTimeMillis()
+                val prepareResp = staticHttpPostJson("$scheme://$ip:$port$API_BASE/prepare-upload",
+                    prepareBody.toString(), readTimeout = PREPARE_UPLOAD_READ_TIMEOUT_MS)
+                if (BuildConfig.ENABLE_DEBUG) {
+                    Log.i(TAG, "[SEND-DBG] prepare-upload in ${System.currentTimeMillis() - prepareStart}ms response: $prepareResp")
                 }
-                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[SEND-DBG] prepare-upload response: $prepareResp")
                 val prepareJson = JSONObject(prepareResp)
                 val sessionId = prepareJson.optString("sessionId", "")
                 val tokenMap = prepareJson.optJSONObject("files")
                 if (sessionId.isEmpty()) { if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[SEND-DBG] auto-accepted"); return "auto" }
                 if (tokenMap == null || tokenMap.length() == 0) {
-                    
-                    
-                    
+
                     if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[SEND-DBG] no tokens issued, consumed at prepare-upload; done")
                     return sessionId
                 }
@@ -1755,13 +1708,10 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                         throw IOException("prepare-upload returned no token for $fileId: $prepareResp")
                     }
                     val path = "$API_BASE/upload?sessionId=$sessionId&fileId=$fileId&token=$token"
-                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[SEND-DBG] uploading $fileId size=${data.size}")
-                    if (useTls) {
-                        staticHttpPostBinary("https://$ip:$port$path", data)
-                    } else {
-                        staticRawSocketPostBinary(ip, port, path, data)
-                    }
-                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[SEND-DBG] upload $fileId done")
+                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[SEND-DBG] uploading $fileId size=${data.length}")
+                    val uploadStart = System.currentTimeMillis()
+                    staticHttpPostBinary("$scheme://$ip:$port$path", data)
+                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[SEND-DBG] upload $fileId done in ${System.currentTimeMillis() - uploadStart}ms")
                 }
                 return sessionId
             } catch (e: Exception) {
@@ -1770,60 +1720,15 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             }
         }
 
-        private fun staticRawSocketPostJson(ip: String, port: Int, path: String, jsonBody: String): String {
-            val body = jsonBody.toByteArray(Charsets.UTF_8)
-            val sock = Socket()
-            sock.connect(InetSocketAddress(ip, port), 5000)
-            sock.soTimeout = 10000
-            val out = sock.getOutputStream()
-            val header = "POST $path HTTP/1.1\r\nHost: $ip:$port\r\nContent-Type: application/json\r\nContent-Length: ${body.size}\r\nConnection: keep-alive\r\n\r\n"
-            out.write(header.toByteArray(Charsets.UTF_8))
-            out.write(body)
-            out.flush()
-            val reader = sock.getInputStream().bufferedReader(Charsets.UTF_8)
-            val statusLine = reader.readLine() ?: throw IOException("No response")
-            if (!statusLine.contains("200")) { sock.close(); throw IOException("HTTP POST failed: $statusLine") }
-            var contentLen = -1
-            while (true) {
-                val h = reader.readLine() ?: break
-                if (h.isEmpty()) break
-                if (h.lowercase().startsWith("content-length:")) contentLen = h.substringAfter(":").trim().toIntOrNull() ?: -1
-            }
-            val respBody = if (contentLen > 0) {
-                val buf = CharArray(contentLen)
-                var read = 0
-                while (read < contentLen) { val r = reader.read(buf, read, contentLen - read); if (r < 0) break; read += r }
-                String(buf, 0, read)
-            } else reader.readText()
-            sock.close()
-            return respBody
-        }
-
-        private fun staticRawSocketPostBinary(ip: String, port: Int, path: String, data: ByteArray) {
-            val sock = Socket()
-            sock.connect(InetSocketAddress(ip, port), 5000)
-            sock.soTimeout = 30000
-            val out = sock.getOutputStream()
-            val header = "POST $path HTTP/1.1\r\nHost: $ip:$port\r\nContent-Type: application/octet-stream\r\nContent-Length: ${data.size}\r\nConnection: close\r\n\r\n"
-            out.write(header.toByteArray(Charsets.UTF_8))
-            out.write(data)
-            out.flush()
-            val reader = sock.getInputStream().bufferedReader(Charsets.UTF_8)
-            val statusLine = reader.readLine() ?: throw IOException("No response")
-            if (!statusLine.contains("200")) { sock.close(); throw IOException("HTTP POST failed: $statusLine") }
-            sock.close()
-        }
-
         @JvmStatic
         fun triggerScan() {
             if (scanRunningStatic) return
             thread(isDaemon = true, name = "NativePanel-Scan") {
                 scanRunningStatic = true
-                staticDiscoveredPeers.clear()
                 try {
                     val localIp = getLocalIpStatic()
                     if (localIp == "0.0.0.0") return@thread
-                    val localIps = getLocalIpsStatic()
+                    val localIps = LocalSendDiscovery.localIps()
                     val subnet = localIp.substringBeforeLast('.')
                     val executor = Executors.newFixedThreadPool(50)
                     for (i in 1..254) {
@@ -1843,77 +1748,31 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
 
         @Volatile private var scanRunningStatic = false
 
-        private fun getLocalIpsStatic(): Set<String> {
-            val result = linkedSetOf<String>()
-            try {
-                val interfaces = NetworkInterface.getNetworkInterfaces()
-                while (interfaces.hasMoreElements()) {
-                    val iface = interfaces.nextElement()
-                    if (iface.isLoopback || !iface.isUp) continue
-                    val addrs = iface.inetAddresses
-                    while (addrs.hasMoreElements()) {
-                        val addr = addrs.nextElement()
-                        if (addr is Inet4Address && !addr.isLoopbackAddress) {
-                            addr.hostAddress?.let { result.add(it) }
-                        }
-                    }
-                }
-            } catch (_: Exception) {}
-            return result
-        }
-
-        private fun isLocalAddressStatic(ip: String): Boolean = ip in getLocalIpsStatic()
-
-        private fun getLocalIpStatic(): String {
-            return try {
-                val interfaces = NetworkInterface.getNetworkInterfaces()
-                while (interfaces.hasMoreElements()) {
-                    val iface = interfaces.nextElement()
-                    if (iface.isLoopback || !iface.isUp) continue
-                    val addrs = iface.inetAddresses
-                    while (addrs.hasMoreElements()) {
-                        val addr = addrs.nextElement()
-                        if (addr is Inet4Address && !addr.isLoopbackAddress) return addr.hostAddress ?: "0.0.0.0"
-                    }
-                }
-                "0.0.0.0"
-            } catch (_: Exception) { "0.0.0.0" }
-        }
+        private fun getLocalIpStatic(): String = LocalSendDiscovery.localIps().firstOrNull() ?: "0.0.0.0"
 
         private fun probeHostStatic(ip: String, port: Int) {
-            if (isLocalAddressStatic(ip)) return
-            try {
-                val conn = staticOpenConn("https://$ip:$port$API_BASE/info", 1500, 1500)
-                conn.requestMethod = "GET"
-                if (conn.responseCode == 200) {
-                    val body = conn.inputStream.bufferedReader().readText()
-                    conn.disconnect()
-                    registerPeerFromJson(body, ip, port, useTls = true)
-                    return
-                }
-                conn.disconnect()
-            } catch (_: Exception) {}
-
-            try {
-                val sock = Socket()
-                sock.connect(InetSocketAddress(ip, port), 1500)
-                sock.soTimeout = 1500
-                val out = sock.getOutputStream()
-                val req = "GET $API_BASE/info HTTP/1.1\r\nHost: $ip:$port\r\nConnection: close\r\n\r\n"
-                out.write(req.toByteArray(Charsets.UTF_8))
-                out.flush()
-                val reader = sock.getInputStream().bufferedReader(Charsets.UTF_8)
-                val statusLine = reader.readLine() ?: ""
-                if (!statusLine.contains("200")) { sock.close(); return }
-                while (true) { if ((reader.readLine() ?: break).isEmpty()) break }
-                val body = reader.readText()
-                sock.close()
-                registerPeerFromJson(body, ip, port, useTls = false)
-            } catch (_: Exception) {}
+            if (LocalSendDiscovery.isLocalAddress(ip)) return
+            for (useTls in listOf(true, false)) {
+                try {
+                    val body = if (useTls) {
+                        val conn = staticOpenConn("https://$ip:$port$API_BASE/info", 1500, 1500)
+                        try {
+                            if (conn.responseCode == 200) conn.inputStream.bufferedReader().readText() else null
+                        } finally { conn.disconnect() }
+                    } else {
+                        RawHttp.request("GET", "http://$ip:$port$API_BASE/info", connectTimeoutMs = 1500, readTimeoutMs = 1500)
+                            .use { if (it.status == 200) it.body.readBytes().toString(Charsets.UTF_8) else null }
+                    }
+                    if (body != null) {
+                        registerPeerFromJson(body, ip, port, useTls)
+                        return
+                    }
+                } catch (_: Exception) {}
+            }
         }
 
         private fun registerPeerFromJson(body: String, ip: String, port: Int, useTls: Boolean = true) {
-            if (isLocalAddressStatic(ip)) return
+            if (LocalSendDiscovery.isLocalAddress(ip)) return
             val data = JSONObject(body)
             val fp = data.optString("fingerprint", "")
             if (fp.isNotEmpty() && fp != staticDeviceFingerprint) {
@@ -1940,7 +1799,6 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
 
     private val uploadSessions = ConcurrentHashMap<String, UploadSession>()
     private var activeUploadSession: String? = null
-    @Volatile private var serverStartError: Exception? = null
 
     data class DiscoveredPeer(
         val alias: String,
@@ -1951,14 +1809,9 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
         val lastSeen: Long = System.currentTimeMillis(),
         val useTls: Boolean = true
     )
-    
-    
+
     private val discoveredPeers: ConcurrentHashMap<String, DiscoveredPeer>
         get() = staticDiscoveredPeers
-
-    private val knownSenderIps = Collections.synchronizedSet(LinkedHashSet<String>())
-
-    @Volatile private var scanRunning = false
 
     override fun getName(): String = "LocalSendModule"
 
@@ -1987,40 +1840,22 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
 
             initServerTlsContext(reactApplicationContext)
 
+            val sock = bindServerSocket()
             isRunning = true
-            serverStartError = null
-            val serverReady = java.util.concurrent.CountDownLatch(1)
-
-            thread(isDaemon = true, name = "LocalSend-Server") {
-                runHttpServer(serverReady)
-            }
-
-            if (!serverReady.await(2, TimeUnit.SECONDS)) {
-                if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "startServer: HTTP bind did not report ready within 2s")
-            }
-            serverStartError?.let { throw it }
+            thread(isDaemon = true, name = "LocalSend-Server") { acceptLoop(sock) }
 
             if (BuildConfig.ENABLE_DEBUG) {
                 Log.i(TAG, "startServer: bound HTTP port=$serverPort, localIp=${getLocalIp()}, receiveDir=$receiveDir")
             }
 
-            
-            
-            
             LocalSendDiscovery.startLocalSendDiscovery(
                 reactApplicationContext,
                 announcementProvider = { buildLocalSendAnnouncement() },
                 onLocalSendAnnouncement = { senderIp, dto -> handleLocalSendAnnouncement(senderIp, dto) },
             )
-            LocalSendDiscovery.setLocalSendAnnouncing(true)
+            LocalSendDiscovery.requestLocalSendAnnounce("server start")
 
-            val localIp = getLocalIp()
-            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "LocalSend server started on $localIp:$serverPort")
-            sendEvent("onServerStarted", Arguments.createMap().apply {
-                putString("ip", localIp)
-                putInt("port", serverPort)
-                putString("alias", deviceAlias)
-            })
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "LocalSend server started on ${getLocalIp()}:$serverPort")
             promise.resolve("started")
         } catch (e: Exception) {
             if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "Failed to start server", e)
@@ -2033,22 +1868,15 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
     fun stopServer(promise: Promise) {
         forceCloseAll()
         serverPort = DEFAULT_PORT
+        staticServerPort = DEFAULT_PORT
         uploadSessions.clear()
         activeUploadSession = null
         discoveredPeers.clear()
-        sendEvent("onServerStopped", Arguments.createMap())
         promise.resolve("stopped")
     }
 
     @ReactMethod
-    fun isWifiConnected(promise: Promise) {
-        val cm = reactApplicationContext
-            .getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
-        if (cm == null) { promise.resolve(false); return }
-        val net = cm.activeNetwork
-        val caps = if (net != null) cm.getNetworkCapabilities(net) else null
-        promise.resolve(caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true)
-    }
+    fun isWifiConnected(promise: Promise) = promise.resolve(isWifiConnectedStatic(reactApplicationContext))
 
     @ReactMethod
     fun getServerStatus(promise: Promise) {
@@ -2063,226 +1891,10 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun getReceivedFiles(promise: Promise) {
-        try {
-            val dir = File(receiveDir)
-            val files = Arguments.createArray()
-            if (dir.exists()) {
-                dir.listFiles()
-                    ?.filter { it.isFile }
-                    ?.sortedByDescending { it.lastModified() }
-                    ?.forEach { file ->
-                        val fileMap = Arguments.createMap()
-                        fileMap.putString("name", file.name)
-                        fileMap.putString("path", file.absolutePath)
-                        fileMap.putDouble("size", file.length().toDouble())
-                        fileMap.putDouble("modified", file.lastModified().toDouble())
-                        fileMap.putBoolean("isImage", isImageFile(file.name))
-                        files.pushMap(fileMap)
-                    }
-            }
-            promise.resolve(files)
-        } catch (e: Exception) {
-            promise.reject("LIST_ERROR", e.message)
-        }
-    }
-
-    @ReactMethod
     fun addListener(eventName: String) {}
 
     @ReactMethod
     fun removeListeners(count: Int) {}
-
-    @ReactMethod
-    fun getDiscoveredPeers(promise: Promise) {
-        val now = System.currentTimeMillis()
-        discoveredPeers.entries.removeIf { now - it.value.lastSeen > PEER_TTL_MS || isLocalAddress(it.value.ip) || it.value.fingerprint == deviceFingerprint }
-
-        val arr = Arguments.createArray()
-        discoveredPeers.values.forEach { peer ->
-            arr.pushMap(Arguments.createMap().apply {
-                putString("alias", peer.alias)
-                putString("ip", peer.ip)
-                putInt("port", peer.port)
-                putString("deviceType", peer.deviceType)
-                putString("fingerprint", peer.fingerprint)
-            })
-        }
-        promise.resolve(arr)
-    }
-
-    @ReactMethod
-    fun scanForPeers(promise: Promise) {
-        if (scanRunning) {
-            if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "scanForPeers: already running, skipping")
-            promise.resolve("scan_already_running")
-            return
-        }
-        thread(isDaemon = true, name = "LocalSend-Scan") {
-            scanRunning = true
-            discoveredPeers.clear()
-            try {
-                val localIp = getLocalIp()
-                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "scanForPeers: localIp=$localIp")
-                if (localIp == "0.0.0.0") {
-                    if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "scanForPeers: no network, aborting")
-                    promise.resolve("no_network")
-                    return@thread
-                }
-
-                val subnet = localIp.substringBeforeLast('.')
-                val localSuffix = localIp.substringAfterLast('.').toIntOrNull() ?: 0
-                val executor = Executors.newFixedThreadPool(50)
-                val localIps = getLocalIpsStatic()
-
-                val knownCopy = synchronized(knownSenderIps) { knownSenderIps.toList() }
-                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "scanForPeers: phase1 known IPs: $knownCopy")
-                for (ip in knownCopy) {
-                    if (ip in localIps) continue
-                    executor.submit { probeHost(ip, DEFAULT_PORT) }
-                }
-
-                val skipIps = knownCopy.toSet() + localIps
-                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "scanForPeers: phase2 scanning subnet $subnet.1-254 (skipping ${skipIps.size} IPs)")
-                for (i in 1..254) {
-                    val ip = "$subnet.$i"
-                    if (ip in skipIps) continue
-                    executor.submit { probeHost(ip, DEFAULT_PORT) }
-                }
-
-                executor.shutdown()
-                val finished = executor.awaitTermination(6, TimeUnit.SECONDS)
-                if (!finished) {
-
-                    executor.awaitTermination(4, TimeUnit.SECONDS)
-                }
-                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "scanForPeers: done (allFinished=$finished), discovered ${discoveredPeers.size} peers total")
-                promise.resolve("scan_done")
-            } catch (e: Exception) {
-                if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "scanForPeers error", e)
-                promise.reject("SCAN_ERROR", e.message)
-            } finally {
-                scanRunning = false
-            }
-        }
-    }
-
-    private fun probeHost(ip: String, port: Int) {
-        if (isLocalAddress(ip)) return
-        try {
-            val url = "https://$ip:$port$API_BASE/info"
-            if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "probeHost: trying $url")
-            val conn = openConn(url, connectTimeout = 500, readTimeout = 500)
-            conn.requestMethod = "GET"
-            val code = conn.responseCode
-            if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "probeHost: $url -> HTTP $code")
-            if (code == 200) {
-                val body = conn.inputStream.bufferedReader().readText()
-                conn.disconnect()
-                registerPeerFromProbe(body, ip, port, useTls = true)
-                return
-            }
-            conn.disconnect()
-        } catch (e: Exception) {
-            if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "probeHost: https://$ip:$port failed: ${e.javaClass.simpleName}: ${e.message}")
-        }
-
-        try {
-            val sock = Socket()
-            sock.connect(InetSocketAddress(ip, port), 500)
-            sock.soTimeout = 500
-            val out = sock.getOutputStream()
-            val req = "GET $API_BASE/info HTTP/1.1\r\nHost: $ip:$port\r\nConnection: close\r\n\r\n"
-            if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "probeHost: trying http://$ip:$port$API_BASE/info (raw)")
-            out.write(req.toByteArray(Charsets.UTF_8))
-            out.flush()
-            val reader = sock.getInputStream().bufferedReader(Charsets.UTF_8)
-            val statusLine = reader.readLine() ?: ""
-            if (!statusLine.contains("200")) { sock.close(); return }
-            while (true) { if ((reader.readLine() ?: break).isEmpty()) break }
-            val body = reader.readText()
-            sock.close()
-            if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "probeHost: http://$ip:$port (raw) → 200")
-            registerPeerFromProbe(body, ip, port, useTls = false)
-        } catch (e: Exception) {
-            if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "probeHost: http://$ip:$port (raw) failed: ${e.javaClass.simpleName}: ${e.message}")
-        }
-    }
-
-    private fun registerPeerFromProbe(body: String, ip: String, port: Int, useTls: Boolean = true) {
-        if (isLocalAddress(ip)) return
-        if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "probeHost: $ip response body: $body")
-        val data = JSONObject(body)
-        val fp = data.optString("fingerprint", "")
-        if (fp.isNotEmpty() && fp != deviceFingerprint) {
-            val peerAlias = data.optString("alias", "Unknown")
-            val peerPort = data.optInt("port", port)
-            val peerDeviceType = data.optString("deviceType", "desktop")
-            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "probeHost: FOUND peer $peerAlias @ $ip:$peerPort (tls=$useTls)")
-            discoveredPeers[fp] = DiscoveredPeer(
-                alias = peerAlias, ip = ip, port = peerPort,
-                deviceType = peerDeviceType, fingerprint = fp,
-                useTls = useTls
-            )
-            sendEvent("onPeerFound", Arguments.createMap().apply {
-                putString("alias", peerAlias)
-                putString("ip", ip)
-                putString("deviceType", peerDeviceType)
-                putInt("port", peerPort)
-                putString("fingerprint", fp)
-            })
-        }
-    }
-
-    @ReactMethod
-    fun sendText(ip: String, port: Int, text: String, promise: Promise) {
-        thread(isDaemon = true, name = "LocalSend-SendText") {
-            try {
-                val textBytes = text.toByteArray(Charsets.UTF_8)
-                val fileId = "text-${UUID.randomUUID().toString().substring(0, 8)}"
-                val filesJson = buildSingleFileJson(
-                    fileId, "message.txt", textBytes.size, "text/plain",
-                    sha256Hex(textBytes), preview = text
-                )
-                val result = doLocalSendUpload(ip, port, filesJson, mapOf(fileId to textBytes))
-                promise.resolve(result)
-            } catch (e: Exception) {
-                if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "sendText failed", e)
-                sendEvent("onSendError", Arguments.createMap().apply {
-                    putString("error", e.message ?: "Unknown error")
-                })
-                promise.reject("SEND_FAILED", e.message)
-            }
-        }
-    }
-
-    @ReactMethod
-    fun sendFile(ip: String, port: Int, filePath: String, promise: Promise) {
-        thread(isDaemon = true, name = "LocalSend-SendFile") {
-            try {
-                val file = File(filePath)
-                if (!file.exists()) {
-                    promise.reject("FILE_NOT_FOUND", "File not found: $filePath")
-                    return@thread
-                }
-
-                val fileBytes = file.readBytes()
-                val fileId = "file-${UUID.randomUUID().toString().substring(0, 8)}"
-                val filesJson = buildSingleFileJson(
-                    fileId, file.name, fileBytes.size, guessMimeType(file.name),
-                    sha256Hex(fileBytes)
-                )
-                val result = doLocalSendUpload(ip, port, filesJson, mapOf(fileId to fileBytes))
-                promise.resolve(result)
-            } catch (e: Exception) {
-                if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "sendFile failed", e)
-                sendEvent("onSendError", Arguments.createMap().apply {
-                    putString("error", e.message ?: "Unknown error")
-                })
-                promise.reject("SEND_FAILED", e.message)
-            }
-        }
-    }
 
     @ReactMethod
     fun flushPendingTexts(promise: Promise) {
@@ -2305,145 +1917,40 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
         if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "ackPendingText: id=$id, remaining=${pendingTexts.size}")
     }
 
-    private fun doLocalSendUpload(
-        ip: String,
-        port: Int,
-        filesJson: JSONObject,
-        fileData: Map<String, ByteArray>
-    ): String {
-        val peer = discoveredPeers.values.find { it.ip == ip && it.port == port }
-        val scheme = if (peer?.useTls != false) "https" else "http"
-        val baseUrl = "$scheme://$ip:$port$API_BASE"
-
-        val prepareBody = JSONObject().apply {
-            put("info", JSONObject().apply {
-                put("alias", deviceAlias)
-                put("version", PROTOCOL_VERSION)
-                put("deviceModel", "Supernote")
-                put("deviceType", "mobile")
-                put("fingerprint", deviceFingerprint)
-                put("port", serverPort)
-                put("protocol", serverProtocol())
-                put("download", false)
-            })
-            put("files", filesJson)
-        }
-
-        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "doLocalSendUpload: target=$baseUrl")
-        if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "doLocalSendUpload: prepareBody=${prepareBody.toString().take(500)}")
-        val prepareResp = httpPostJson("$baseUrl/prepare-upload", prepareBody.toString())
-        if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "doLocalSendUpload: prepareResp=$prepareResp")
-        val prepareJson = JSONObject(prepareResp)
-
-        val sessionId = prepareJson.optString("sessionId", "")
-        val tokenMap = prepareJson.optJSONObject("files")
-
-        if (sessionId.isEmpty()) {
-            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "doLocalSendUpload: receiver auto-accepted (no sessionId), transfer complete")
-            sendEvent("onSendComplete", Arguments.createMap().apply {
-                putString("sessionId", "auto")
-            })
-            return "auto"
-        }
-
-        if (tokenMap == null || tokenMap.length() == 0) {
-            
-            
-            
-            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "doLocalSendUpload: no tokens issued, consumed at prepare-upload; done")
-            sendEvent("onSendComplete", Arguments.createMap().apply {
-                putString("sessionId", sessionId)
-            })
-            return sessionId
-        }
-
-        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Got sessionId=$sessionId, uploading ${fileData.size} file(s)")
-        sendEvent("onSendStarted", Arguments.createMap().apply {
-            putString("sessionId", sessionId)
-            putInt("fileCount", fileData.size)
-            putString("targetIp", ip)
-        })
-
-        for ((fileId, data) in fileData) {
-            val token = tokenMap?.optString(fileId, "") ?: ""
-            if (token.isEmpty()) {
-                throw IOException("prepare-upload returned no token for $fileId: $prepareResp")
+    private fun bindServerSocket(): ServerSocket {
+        val sock = ServerSocket()
+        sock.reuseAddress = true
+        for (attempt in 0..9) {
+            val tryPort = serverPort + attempt
+            try {
+                sock.bind(InetSocketAddress(tryPort))
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[LS-DIAG] bind OK on tcp/$tryPort")
+                serverPort = tryPort
+                staticServerPort = tryPort
+                serverSocket = sock
+                return sock
+            } catch (e: java.net.BindException) {
+                if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "[LS-DIAG] bind failed on tcp/$tryPort (${e.message}), trying next")
             }
-
-            val uploadUrl = "$baseUrl/upload?sessionId=$sessionId&fileId=$fileId&token=$token"
-            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Uploading fileId=$fileId (${data.size} bytes)")
-            httpPostBinary(uploadUrl, data)
-
-            val fileInfo = filesJson.optJSONObject(fileId)
-            sendEvent("onSendProgress", Arguments.createMap().apply {
-                putString("fileId", fileId)
-                putString("fileName", fileInfo?.optString("fileName") ?: "")
-                putInt("percent", 100)
-            })
         }
-
-        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Send complete for session $sessionId")
-        sendEvent("onSendComplete", Arguments.createMap().apply {
-            putString("sessionId", sessionId)
-        })
-        return sessionId
+        sock.close()
+        throw java.net.BindException("No available port in range $serverPort..${serverPort + 9}")
     }
 
-    private fun httpPostJson(url: String, jsonBody: String): String = staticHttpPostJson(url, jsonBody)
+    private fun acceptLoop(sock: ServerSocket) {
 
-    private fun httpPostBinary(url: String, data: ByteArray) = staticHttpPostBinary(url, data)
-
-    private fun sha256Hex(data: ByteArray): String = staticSha256Hex(data)
-
-    private fun guessMimeType(name: String): String = staticGuessMimeType(name)
-
-    private fun runHttpServer(ready: java.util.concurrent.CountDownLatch? = null) {
-        try {
-            val sock = ServerSocket()
-            sock.reuseAddress = true
-            var boundPort = serverPort
-            var bindOk = false
-            for (attempt in 0..9) {
-                val tryPort = serverPort + attempt
-                try {
-                    sock.bind(InetSocketAddress(tryPort))
-                    boundPort = tryPort
-                    bindOk = true
-                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[LS-DIAG] bind OK on tcp/$tryPort")
-                    break
-                } catch (e: java.net.BindException) {
-                    if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "[LS-DIAG] bind failed on tcp/$tryPort (${e.message}), trying next")
+        PluginIdentity.claim()
+        while (isRunning) {
+            try {
+                val client = sock.accept()
+                if (BuildConfig.ENABLE_DEBUG) {
+                    Log.i(TAG, "[LS-DIAG] accepted tcp connection from ${client.remoteSocketAddress} on local=${client.localSocketAddress}")
                 }
+                thread(isDaemon = true) { handleClient(client) }
+            } catch (e: IOException) {
+                if (isRunning && BuildConfig.ENABLE_DEBUG) Log.e(TAG, "Socket accept error", e)
+                if (sock.isClosed) break
             }
-            if (!bindOk) {
-                sock.close()
-                throw java.net.BindException("No available port in range $serverPort..${serverPort+9}")
-            }
-            serverPort = boundPort
-            serverSocket = sock
-            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "HTTP server listening on port $serverPort")
-            ready?.countDown()
-
-            while (isRunning) {
-                try {
-                    val client = serverSocket?.accept() ?: break
-                    if (BuildConfig.ENABLE_DEBUG) {
-                        Log.i(TAG, "[LS-DIAG] accepted tcp connection from ${client.remoteSocketAddress} on local=${client.localSocketAddress}")
-                    }
-                    thread(isDaemon = true) {
-                        handleClient(client)
-                    }
-                } catch (e: SocketException) {
-                    if (isRunning) if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "Socket accept error", e)
-                }
-            }
-        } catch (e: Exception) {
-            serverStartError = e
-            ready?.countDown()
-            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "HTTP server error", e)
-            sendEvent("onServerError", Arguments.createMap().apply {
-                putString("error", e.message ?: "Unknown error")
-            })
         }
     }
 
@@ -2453,7 +1960,6 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             socket.soTimeout = 30000
             val remoteIp = (socket.remoteSocketAddress as? InetSocketAddress)?.address?.hostAddress ?: "0.0.0.0"
 
-            
             val raw = socket.getInputStream()
             val firstByte = raw.read()
             if (firstByte < 0) return
@@ -2469,8 +1975,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                     return
                 }
                 val sslSocket = try {
-                    
-                    
+
                     (wrapServerTlsSocket(tls, socket, byteArrayOf(0x16))).apply {
                         useClientMode = false
                         startHandshake()
@@ -2519,9 +2024,6 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             val queryString = if (qIdx >= 0) rawPath.substring(qIdx + 1) else ""
             val queryParams = parseQuery(queryString)
 
-            
-            
-            
             val apiPath = when {
                 path.startsWith("$API_BASE/") -> path.removePrefix(API_BASE)
                 path.startsWith("$API_BASE_V1/") -> path.removePrefix(API_BASE_V1)
@@ -2553,6 +2055,9 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             }
         } catch (e: SSLException) {
             if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "[RECV-DBG] TLS error from client, ignoring: ${e.message}")
+        } catch (e: java.net.SocketTimeoutException) {
+
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[RECV-DBG] idle connection from ${socket.inetAddress?.hostAddress} closed after read timeout")
         } catch (e: Exception) {
             if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "Client handler error", e)
         } finally {
@@ -2562,17 +2067,12 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
     }
 
     private fun handleInfo(output: BufferedOutputStream) {
-        val info = JSONObject().apply {
-            put("alias", deviceAlias)
-            put("version", PROTOCOL_VERSION)
-            put("deviceModel", "Supernote")
-            put("deviceType", "mobile")
-            put("fingerprint", deviceFingerprint)
-            put("download", false)
-        }
-        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[LS-DIAG] /info response port=$serverPort protocol=${serverProtocol()} body=$info")
+        val info = deviceInfoJson()
+        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[LS-DIAG] /info response body=$info")
         sendHttpResponse(output, 200, info.toString())
     }
+
+    private fun deviceInfoJson() = localSendInfo(deviceAlias, deviceFingerprint, serverPort)
 
     private fun handleRegister(output: BufferedOutputStream, body: String, remoteIp: String) {
         try {
@@ -2584,16 +2084,6 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             val peerFingerprint = data.optString("fingerprint", remoteIp)
             val peerProtocol = data.optString("protocol", "https")
 
-            knownSenderIps.add(remoteIp)
-
-            val existing = discoveredPeers[peerFingerprint]
-            val isNew     = existing == null
-            val isChanged = existing != null && (
-                existing.alias != peerAlias ||
-                existing.ip    != remoteIp  ||
-                existing.port  != peerPort
-            )
-
             discoveredPeers[peerFingerprint] = DiscoveredPeer(
                 alias = peerAlias,
                 ip = remoteIp,
@@ -2603,29 +2093,9 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                 useTls = peerProtocol != "http"
             )
 
-            if (isNew || isChanged) {
-                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Device registered: $peerAlias from $remoteIp")
-                sendEvent("onPeerFound", Arguments.createMap().apply {
-                    putString("alias", peerAlias)
-                    putString("ip", remoteIp)
-                    putString("deviceType", peerDeviceType)
-                    putInt("port", peerPort)
-                    putString("fingerprint", peerFingerprint)
-                })
-            } else {
-                if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "Device re-registered (no change): $peerAlias from $remoteIp")
-            }
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Device registered: $peerAlias from $remoteIp")
 
-            val response = JSONObject().apply {
-                put("alias", deviceAlias)
-                put("version", PROTOCOL_VERSION)
-                put("deviceModel", "Supernote")
-                put("deviceType", "mobile")
-                put("fingerprint", deviceFingerprint)
-                put("port", serverPort)
-                put("protocol", serverProtocol())
-                put("download", false)
-            }
+            val response = deviceInfoJson()
             sendHttpResponse(output, 200, response.toString())
         } catch (e: Exception) {
             sendHttpResponse(output, 400, """{"error":"Invalid body"}""")
@@ -2668,48 +2138,19 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
 
             val senderAlias = info?.optString("alias", "Unknown") ?: "Unknown"
 
-            knownSenderIps.add(remoteIp)
-
             val allPreviews = mutableListOf<String>()
-            var allFilesAreText = true
             val keys0 = files.keys()
             while (keys0.hasNext()) {
                 val fileId = keys0.next()
                 val fileData = files.getJSONObject(fileId)
                 val preview = fileData.optString("preview", "")
                 val fileType = fileData.optString("fileType", "")
-                val fileName = fileData.optString("fileName", "")
                 if (preview.isNotEmpty() && fileType.startsWith("text/")) {
                     allPreviews.add(preview)
                 }
-                if (!fileType.startsWith("text/") && !isTextFile(fileName)) {
-                    allFilesAreText = false
-                }
             }
-            
-            val insertPanelShowing = ImagePanel.currentInstance?.isShowing == true ||
-                DocScreenshotPanel.currentInstance?.isShowing == true
-            if (allFilesAreText && insertPanelShowing) {
-                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Text receive rejected from [$senderAlias]: insert panel showing")
-                me.laumss.notipal.ui_common.Dialog.tip(
-                    reactApplicationContext, NativeLocale.t("text_recv_panel_unsupported"))
-                sendHttpResponse(output, 403, """{"error":"Text receiver is unavailable while inserting images"}""")
-                return
-            }
-            if (allFilesAreText && FloatingToolbarModule.isDocumentContext()) {
-                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Text receive rejected from [$senderAlias]: document foreground")
-                me.laumss.notipal.ui_common.Dialog.tip(
-                    reactApplicationContext, NativeLocale.t("text_recv_doc_unsupported"))
-                sendHttpResponse(output, 403, """{"error":"Text receiver is unavailable in documents"}""")
-                return
-            }
-            if (allFilesAreText && !FloatingBubbleModule.isTextReceiverShowing() &&
-                !FloatingToolbarModule.isTextReceiveModeActive()) {
-                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Text receive rejected from [$senderAlias]: receiver bubble closed")
-                notifyTextReceiverClosed()
-                sendHttpResponse(output, 403, """{"error":"Text receiver is closed"}""")
-                return
-            }
+
+            val insertPanelShowing = ImagePickerPanel.currentInstance?.isShowing == true
             if (allPreviews.isNotEmpty() && allPreviews.size == files.length()) {
                 if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Text message(s) from [$senderAlias] via preview field: ${allPreviews.size}")
                 val combined = allPreviews.joinToString("\n")
@@ -2759,11 +2200,12 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                 val msg = NativeLocale.t("sync_clipboard_ask").replace("%s", senderAlias)
                 if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[SYNC-DBG] confirm for prepare-upload")
                 me.laumss.notipal.ui_common.Dialog.confirmResult(reactApplicationContext, msg) { ok ->
+
+                    if (latch.count == 0L) return@confirmResult
                     accepted = ok
                     latch.countDown()
                 }
-                
-                latch.await(30, TimeUnit.SECONDS)
+                if (!latch.await(30, TimeUnit.SECONDS)) latch.countDown()
                 if (!accepted) {
                     if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Clipboard sync rejected by user from [$senderAlias]")
                     sendHttpResponse(output, 403, """{"error":"Rejected by user"}""")
@@ -2772,10 +2214,8 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             }
 
             if (isSingleImage) {
-                
-                
-                if (!FloatingToolbarModule.isInNoteApp() || FloatingToolbarModule.isDocumentContext() ||
-                    insertPanelShowing) {
+
+                if (FloatingToolbarModule.currentInstance?.canPromptReceivedImage() != true) {
                     if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Image from [$senderAlias] accepted to inbox " +
                         "(inNote=${FloatingToolbarModule.isInNoteApp()} doc=${FloatingToolbarModule.isDocumentContext()} " +
                         "panel=$insertPanelShowing)")
@@ -2789,9 +2229,10 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                         choice = me.laumss.notipal.ui_common.Dialog.ImageReceiveChoice.KEEP
                         latch.countDown()
                     } else toolbar.prepareForImageReceive { ready ->
-                        if (ready) {
+                        if (ready && toolbar.canPromptReceivedImage()) {
                             Log.i(TAG, "[INSERT-DBG/Kt] lasso settled; showing image receive dialog")
                             me.laumss.notipal.ui_common.Dialog.chooseImageReceive(reactApplicationContext, msg) {
+                                if (latch.count == 0L) return@chooseImageReceive
                                 choice = it
                                 latch.countDown()
                             }
@@ -2800,7 +2241,11 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                             latch.countDown()
                         }
                     }
-                    latch.await(60, TimeUnit.SECONDS)
+                    if (!latch.await(60, TimeUnit.SECONDS)) {
+
+                        latch.countDown()
+                        choice = me.laumss.notipal.ui_common.Dialog.ImageReceiveChoice.REJECT
+                    }
                     if (choice == me.laumss.notipal.ui_common.Dialog.ImageReceiveChoice.REJECT) {
                         sendHttpResponse(output, 403, """{"error":"Image rejected by user"}""")
                         return
@@ -2815,15 +2260,6 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
 
             if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Accepted transfer from [$senderAlias]: ${fileNames.size} files")
             fileNames.forEach { if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "  - $it") }
-
-            sendEvent("onTransferStarted", Arguments.createMap().apply {
-                putString("sender", senderAlias)
-                putInt("fileCount", fileNames.size)
-                putString("sessionId", sessionId)
-                val arr = Arguments.createArray()
-                fileNames.forEach { arr.pushString(it) }
-                putArray("fileNames", arr)
-            })
 
             val response = JSONObject().apply {
                 put("sessionId", sessionId)
@@ -2870,7 +2306,12 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
         }
 
         val ext = fileInfo.fileName.substringAfterLast('.', "").lowercase()
-        val saveDir = if (ext == "snplg") File("/sdcard/MyStyle") else File(receiveDir)
+
+        val saveDir = when {
+            isClipboardSyncFile(fileInfo.fileName) -> File(reactApplicationContext.cacheDir, "clipboard-sync")
+            ext == "snplg" -> File("/sdcard/MyStyle")
+            else -> File(receiveDir)
+        }
         saveDir.mkdirs()
         val destFile = safeFileName(fileInfo.fileName, saveDir)
 
@@ -2882,29 +2323,21 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
         try {
             var received = 0L
             val sha = MessageDigest.getInstance("SHA-256")
-            val fos = FileOutputStream(destFile)
             val buf = ByteArray(65536)
             val total = if (contentLength > 0) contentLength.toLong() else fileInfo.size
 
-            while (received < total) {
-                val toRead = minOf(buf.size.toLong(), total - received).toInt()
-                val n = input.read(buf, 0, toRead)
-                if (n <= 0) break
-                fos.write(buf, 0, n)
-                sha.update(buf, 0, n)
-                received += n
-
-                if (received % 262144 < n.toLong()) {
-                    val pct = if (total > 0) (received * 100 / total).toInt() else 0
-                    sendEvent("onTransferProgress", Arguments.createMap().apply {
-                        putString("fileName", fileInfo.fileName)
-                        putDouble("received", received.toDouble())
-                        putDouble("total", total.toDouble())
-                        putInt("percent", pct)
-                    })
+            FileOutputStream(destFile).use { fos ->
+                while (received < total) {
+                    val toRead = minOf(buf.size.toLong(), total - received).toInt()
+                    val n = input.read(buf, 0, toRead)
+                    if (n <= 0) break
+                    fos.write(buf, 0, n)
+                    sha.update(buf, 0, n)
+                    received += n
                 }
             }
-            fos.close()
+
+            if (received < total) throw IOException("short read: $received of $total bytes")
 
             if (fileInfo.sha256.isNotEmpty()) {
                 val computed = sha.digest().joinToString("") { "%02x".format(it) }
@@ -2916,57 +2349,42 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             session.received[fileId] = true
             if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "File received: ${fileInfo.fileName} -> $destFile ($received bytes)")
 
-            if (fileInfo.fileName.startsWith("clipboard_sync_") && fileInfo.fileName.endsWith(".zip")) {
+            if (isClipboardSyncFile(fileInfo.fileName)) {
                 handleClipboardSyncReceive(destFile, session.senderAlias ?: remoteIp)
-            } else if (isTextFile(fileInfo.fileName)) {
+            } else if (isTextFile(fileInfo.fileName) || fileInfo.fileType.startsWith("text/")) {
+
                 val textContent = destFile.readText(Charsets.UTF_8)
                 deliverLocalSendText(textContent, fileInfo.fileName)
             } else {
+
                 if (isImageFile(fileInfo.fileName)) {
-                    addSessionReceivedImage(ReceivedFileInfo(
-                        fileInfo.fileName, destFile.absolutePath,
-                        received, destFile.lastModified(), true
-                    ))
-                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Added to session received: ${destFile.absolutePath}, total=${getReceivedImageFiles().size}")
-                    ImagePanel.currentInstance?.onFileReceived()
-                    if (session.insertImagesImmediately && FloatingToolbarModule.isInNoteApp() &&
-                        !FloatingToolbarModule.isDocumentContext()) {
-                        synchronized(ImagePanel::class.java) {
-                            ImagePanel.pendingReceivedDeletes.add(destFile.absolutePath)
-                        }
+                    if (session.insertImagesImmediately &&
+                        (MosaicLink.isBoardVisible() ||
+                            (FloatingToolbarModule.isInNoteApp() && !FloatingToolbarModule.isDocumentContext()))) {
                         val toolbar = FloatingToolbarModule.currentInstance
                         if (toolbar != null) {
                             Handler(Looper.getMainLooper()).post {
                                 Handler(Looper.getMainLooper()).postDelayed({
-                                    toolbar.requestInsertImage(destFile.absolutePath)
+                                    toolbar.requestInsertImage(destFile.absolutePath, deleteAfterInsert = destFile.absolutePath)
                                 }, 300)
                             }
                         }
                     }
                 }
-                if (DocLinkPanel.DOC_EXTS.contains(fileInfo.fileName.substringAfterLast('.', "").lowercase())) {
-                    DocLinkPanel.currentInstance?.onFileReceived()
-                }
-                sendEvent("onFileReceived", Arguments.createMap().apply {
-                    putString("fileName", fileInfo.fileName)
-                    putString("path", destFile.absolutePath)
-                    putDouble("size", received.toDouble())
-                    putBoolean("isImage", isImageFile(fileInfo.fileName))
-                })
             }
 
             if (session.received.values.all { it }) {
                 if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Session $sessionId complete!")
                 activeUploadSession = null
-                sendEvent("onTransferComplete", Arguments.createMap().apply {
-                    putString("sessionId", sessionId)
-                })
             }
 
             sendHttpResponse(output, 200, "")
         } catch (e: Exception) {
             if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "File receive error", e)
             if (destFile.exists()) destFile.delete()
+
+            uploadSessions.remove(sessionId)
+            if (activeUploadSession == sessionId) activeUploadSession = null
             sendHttpResponse(output, 500, """{"error":"Unknown error by receiver"}""")
         }
     }
@@ -2983,20 +2401,8 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
         sendHttpResponse(output, 200, "")
     }
 
-    
-    private fun buildLocalSendAnnouncement(): JSONObject = JSONObject().apply {
-        put("alias", deviceAlias)
-        put("version", PROTOCOL_VERSION)
-        put("deviceModel", "Supernote")
-        put("deviceType", "mobile")
-        put("fingerprint", deviceFingerprint)
-        put("port", serverPort)
-        put("protocol", serverProtocol())
-        put("download", false)
-        put("announce", true)
-    }
+    private fun buildLocalSendAnnouncement(): JSONObject = deviceInfoJson().put("announce", true)
 
-    
     private fun handleLocalSendAnnouncement(senderIp: String, dto: JSONObject) {
         try {
             val fp = dto.optString("fingerprint", "")
@@ -3007,25 +2413,15 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             val peerProtocol = dto.optString("protocol", "https")
             val isAnnounce = dto.optBoolean("announce", dto.optBoolean("announcement", false))
 
-            val existing = discoveredPeers[fp]
-            
+            if (BuildConfig.ENABLE_DEBUG && discoveredPeers[fp] == null) {
+                Log.i(TAG, "[LS-DIAG] multicast discovered peer $peerAlias @ $senderIp:$peerPort protocol=$peerProtocol announce=$isAnnounce")
+            }
+
             discoveredPeers[fp] = DiscoveredPeer(
                 alias = peerAlias, ip = senderIp, port = peerPort,
                 deviceType = peerDeviceType, fingerprint = fp,
                 useTls = peerProtocol != "http"
             )
-            if (existing == null) {
-                if (BuildConfig.ENABLE_DEBUG) {
-                    Log.i(TAG, "[LS-DIAG] multicast discovered peer $peerAlias @ $senderIp:$peerPort protocol=$peerProtocol announce=$isAnnounce")
-                }
-                sendEvent("onPeerFound", Arguments.createMap().apply {
-                    putString("alias", peerAlias)
-                    putString("ip", senderIp)
-                    putString("deviceType", peerDeviceType)
-                    putInt("port", peerPort)
-                    putString("fingerprint", fp)
-                })
-            }
             if (isAnnounce) {
                 thread(isDaemon = true, name = "LocalSend-AnnounceReply") {
                     respondToAnnouncement(senderIp, peerPort, peerProtocol)
@@ -3034,24 +2430,11 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
         } catch (_: Exception) {}
     }
 
-    
     private fun respondToAnnouncement(ip: String, port: Int, peerProtocol: String) {
-        val body = JSONObject().apply {
-            put("alias", deviceAlias)
-            put("version", PROTOCOL_VERSION)
-            put("deviceModel", "Supernote")
-            put("deviceType", "mobile")
-            put("fingerprint", deviceFingerprint)
-            put("port", serverPort)
-            put("protocol", serverProtocol())
-            put("download", false)
-        }
+        val body = deviceInfoJson()
         try {
-            if (peerProtocol == "http") {
-                staticRawSocketPostJson(ip, port, "$API_BASE/register", body.toString())
-            } else {
-                staticHttpPostJson("https://$ip:$port$API_BASE/register", body.toString())
-            }
+            val scheme = if (peerProtocol == "http") "http" else "https"
+            staticHttpPostJson("$scheme://$ip:$port$API_BASE/register", body.toString())
             if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[LS-DIAG] register response sent to $peerProtocol://$ip:$port")
         } catch (e: Exception) {
             try {
@@ -3064,21 +2447,59 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    private fun deliverLocalSendText(text: String, fileName: String) {
-        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "deliverLocalSendText: file=$fileName len=${text.length}")
-        sendEvent("onTextReceived", Arguments.createMap().apply {
-            putString("text", text)
-            putString("fileName", fileName)
-        })
+    private fun textGoesToClipboard(): Boolean =
+        FloatingToolbarModule.isDocumentContext() ||
+            (!FloatingToolbarModule.isInNoteApp() && !MosaicLink.isBoardVisible()) ||
+            ImagePickerPanel.currentInstance?.isShowing == true
+
+    @ReactMethod
+    fun copyTextToClipboard(text: String) {
+        Handler(Looper.getMainLooper()).post {
+            try {
+                val cm = reactApplicationContext.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                cm.setPrimaryClip(android.content.ClipData.newPlainText("Notipal", text))
+            } catch (e: Exception) {
+                Log.w(TAG, "copyTextToClipboard failed: ${e.message}")
+            }
+        }
     }
 
-    private fun notifyTextReceiverClosed() {
+    private fun deliverLocalSendText(text: String, fileName: String) {
+        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "deliverLocalSendText: file=$fileName len=${text.length}")
+
+        val onCanvas = FloatingToolbarModule.currentInstance?.isReceivedTextPromptSurface() == true
+        Handler(Looper.getMainLooper()).post {
+            when {
+                textGoesToClipboard() -> {
+                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "deliverLocalSendText: to clipboard " +
+                        "(inNote=${FloatingToolbarModule.isInNoteApp()} doc=${FloatingToolbarModule.isDocumentContext()})")
+                    copyTextToClipboard(text)
+                }
+                FloatingBubbleModule.isTextReceiverShowing() || FloatingToolbarModule.isTextReceiveModeActive() ->
+                    sendEvent("onTextReceived", Arguments.createMap().apply {
+                        putString("text", text)
+                        putString("fileName", fileName)
+                    })
+                onCanvas && !FloatingToolbarModule.anyOtherNotipalUiShowing() -> {
+
+                    copyTextToClipboard(text)
+                    promptOpenTextReceiver(text)
+                }
+                else -> {
+                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "deliverLocalSendText: to clipboard (other UI or not on canvas)")
+                    copyTextToClipboard(text)
+                }
+            }
+        }
+    }
+
+    private fun promptOpenTextReceiver(text: String) {
         me.laumss.notipal.ui_common.Dialog.confirmResult(
-            reactApplicationContext, NativeLocale.t("text_recv_closed")
+            reactApplicationContext, NativeLocale.t("text_recv_ask")
         ) { confirmed ->
             if (confirmed) {
-                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "text_recv_closed confirmed: requesting text receiver bubble")
-                sendEvent("onOpenTextReceiverRequested", Arguments.createMap())
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "text_recv_ask confirmed: requesting text receiver bubble")
+                sendEvent("onOpenTextReceiverRequested", Arguments.createMap().apply { putString("text", text) })
             }
         }
     }
@@ -3109,12 +2530,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
 
     }
 
-    private fun openConn(url: String, connectTimeout: Int = 10_000, readTimeout: Int = 30_000): HttpURLConnection =
-        staticOpenConn(url, connectTimeout, readTimeout)
-
     private fun getLocalIp(): String = getLocalIpStatic()
-
-    private fun isLocalAddress(ip: String): Boolean = isLocalAddressStatic(ip)
 
     private fun readLine(input: InputStream): String? {
         val sb = StringBuilder()
@@ -3183,7 +2599,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
     }
 
     private fun safeFileName(name: String, dir: File): File {
-        var target = File(dir, name)
+        var target = File(dir, File(name).name)
         if (!target.exists()) return target
         val dotIdx = name.lastIndexOf('.')
         val stem = if (dotIdx > 0) name.substring(0, dotIdx) else name
@@ -3207,12 +2623,13 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
         thread(isDaemon = true) { doImportClipboardSync(zipFile) }
     }
 
+    private fun isClipboardSyncFile(name: String): Boolean = name.startsWith("clipboard_sync_") && name.endsWith(".zip")
+
     private fun doImportClipboardSync(zipFile: File) {
+        val stage = File(reactApplicationContext.cacheDir, "clipboard-sync-${System.nanoTime()}")
         try {
-            val stickerDir = File("/sdcard/MyStyle/Sticker")
-            stickerDir.mkdirs()
+            stage.mkdirs()
             var clipsJson: String? = null
-            val extractedFiles = mutableListOf<String>()
             ZipInputStream(zipFile.inputStream().buffered()).use { zis ->
                 var entry = zis.nextEntry
                 while (entry != null) {
@@ -3220,58 +2637,58 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                         clipsJson = zis.readBytes().toString(Charsets.UTF_8)
                         if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[SYNC-DBG] clips.json raw: $clipsJson")
                     } else if (entry.name.startsWith("stickers/")) {
-                        val name = entry.name.removePrefix("stickers/")
-                        if (name.isNotEmpty()) {
-                            val dest = File(stickerDir, name)
-                            dest.outputStream().buffered().use { out -> zis.copyTo(out) }
-                            extractedFiles.add(dest.absolutePath)
-                            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[SYNC-DBG] extracted: ${dest.absolutePath} (${dest.length()} bytes)")
-                        }
+                        val name = File(entry.name.removePrefix("stickers/")).name
+                        if (name.isNotEmpty()) File(stage, name).outputStream().buffered().use { out -> zis.copyTo(out) }
                     }
                     zis.closeEntry()
                     entry = zis.nextEntry
                 }
             }
-            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[SYNC-DBG] extracted ${extractedFiles.size} sticker files")
+            val sent = JSONObject(clipsJson ?: error("clips.json missing"))
+            val clipDir = File(NotipalDirs.CLIPBOARD).apply { mkdirs() }
 
-            if (clipsJson != null) {
-                val parsed = JSONObject(clipsJson!!)
-                for (i in 1..FloatingToolbarModule.CLIP_SLOT_COUNT) {
-                    val slotKey = i.toString()
-                    val raw = parsed.opt(slotKey)
-                    val path = parsed.optString(slotKey, "")
-                    val exists = path.isNotEmpty() && File(path).exists()
-                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[SYNC-DBG] slot $i: raw=$raw path='$path' exists=$exists")
-                }
-
-                reactApplicationContext.getSharedPreferences("quicktoolbar_presets", 0)
-                    .edit().putString("preset_99", clipsJson).apply()
-                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Clipboard sync imported, clips updated")
+            val next = JSONObject()
+            for (i in 1..FloatingToolbarModule.CLIP_SLOT_COUNT) {
+                val key = i.toString()
+                val name = sent.optString(key, "").takeIf { it.isNotEmpty() && it != "null" }?.let { File(it).name }
+                next.put(key, if (name != null && File(stage, name).isFile) File(clipDir, name).absolutePath else JSONObject.NULL)
             }
-            sendEvent("nativeDeleteFile", Arguments.createMap().apply {
-                putString("path", zipFile.absolutePath)
-            })
+
+            val prefs = reactApplicationContext.getSharedPreferences(NotipalPrefs.PRESETS_FILE, 0)
+            val old = prefs.getString(NotipalPrefs.CLIP_SLOTS_KEY, null)?.let { runCatching { JSONObject(it) }.getOrNull() }
+            var removed = 0
+            for (i in 1..FloatingToolbarModule.CLIP_SLOT_COUNT) {
+                val path = old?.optString(i.toString(), "")?.takeIf { it.startsWith("/") } ?: continue
+                removed += deleteClipFiles(File(path))
+            }
+            var moved = 0
+            for (file in stage.listFiles().orEmpty()) {
+                if (NotipalDirs.move(file, File(clipDir, file.name))) moved++
+                else Log.w(TAG, "[SYNC-DBG] clip file not moved: ${file.name}")
+            }
+            prefs.edit().putString(NotipalPrefs.CLIP_SLOTS_KEY, next.toString()).apply()
+            Log.i(TAG, "Clipboard sync imported slots=$next filesIn=$moved oldFilesDeleted=$removed")
             Handler(Looper.getMainLooper()).post {
-                try {
-                    com.ratta.supernote.pluginlib.api.HostUIAPI.getInstance().showTipDialog(
-                        reactApplicationContext.currentActivity, true, NativeLocale.t("sync_clipboard_ok"),
-                        object : com.ratta.supernote.pluginlib.callback.RattaDialogListener {
-                            override fun onConfirm() {}
-                            override fun onCancel() {}
-                        }
-                    )
-                } catch (_: Exception) {}
+                me.laumss.notipal.ui_common.Dialog.tip(
+                    reactApplicationContext, NativeLocale.t("sync_clipboard_ok"), isSuccess = true,
+                )
                 refreshToolbarClipIcons()
                 sendEvent("clipsChanged", Arguments.createMap())
             }
         } catch (e: Exception) {
-            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "doImportClipboardSync failed", e)
+            Log.e(TAG, "doImportClipboardSync failed, clipboard unchanged", e)
+        } finally {
+            zipFile.delete()
+            stage.deleteRecursively()
         }
     }
 
+    private fun deleteClipFiles(sticker: File): Int =
+        sticker.parentFile?.listFiles()?.count { it.isFile && it.name.startsWith(sticker.name) && it.delete() } ?: 0
+
     private fun refreshToolbarClipIcons() {
-        val prefs = reactApplicationContext.getSharedPreferences("quicktoolbar_presets", 0)
-        val clipsJson = prefs.getString("preset_99", null) ?: return
+        val prefs = reactApplicationContext.getSharedPreferences(NotipalPrefs.PRESETS_FILE, 0)
+        val clipsJson = prefs.getString(NotipalPrefs.CLIP_SLOTS_KEY, null) ?: return
         try {
             val obj = JSONObject(clipsJson)
             val filled = JSONArray()
@@ -3285,58 +2702,6 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             FloatingToolbarModule.currentInstance?.updateTitleClips(filled.toString())
         } catch (e: Exception) {
             if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "refreshToolbarClipIcons: ${e.message}")
-        }
-    }
-
-    @ReactMethod
-    fun importClipboardSync(zipPath: String, promise: Promise) {
-        thread(isDaemon = true) {
-            try {
-                val zipFile = File(zipPath)
-                if (!zipFile.exists()) { promise.resolve(false); return@thread }
-                val stickerDir = File("/sdcard/MyStyle/Sticker")
-                stickerDir.mkdirs()
-
-                var clipsJson: String? = null
-                ZipInputStream(zipFile.inputStream().buffered()).use { zis ->
-                    var entry = zis.nextEntry
-                    while (entry != null) {
-                        if (entry.name == "clips.json") {
-                            clipsJson = zis.readBytes().toString(Charsets.UTF_8)
-                            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[SYNC-DBG] importClipboardSync clips.json: $clipsJson")
-                        } else if (entry.name.startsWith("stickers/")) {
-                            val name = entry.name.removePrefix("stickers/")
-                            if (name.isNotEmpty()) {
-                                val dest = File(stickerDir, name)
-                                dest.outputStream().buffered().use { out -> zis.copyTo(out) }
-                                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[SYNC-DBG] importClipboardSync extracted: ${dest.absolutePath}")
-                            }
-                        }
-                        zis.closeEntry()
-                        entry = zis.nextEntry
-                    }
-                }
-
-                if (clipsJson != null) {
-                    val prefs = reactApplicationContext.getSharedPreferences("quicktoolbar_presets", 0)
-                    prefs.edit().putString("preset_99", clipsJson).apply()
-                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Clipboard sync imported, clips updated")
-                }
-
-                try {
-                    if (!zipFile.delete() && BuildConfig.ENABLE_DEBUG) {
-                        Log.w(TAG, "[SYNC-DBG] importClipboardSync temp delete skipped: ${zipFile.absolutePath}")
-                    }
-                } catch (e: Exception) {
-                    if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "[SYNC-DBG] importClipboardSync temp delete failed: ${e.message}")
-                }
-                refreshToolbarClipIcons()
-                sendEvent("clipsChanged", Arguments.createMap())
-                promise.resolve(true)
-            } catch (e: Exception) {
-                if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "importClipboardSync failed", e)
-                promise.resolve(false)
-            }
         }
     }
 

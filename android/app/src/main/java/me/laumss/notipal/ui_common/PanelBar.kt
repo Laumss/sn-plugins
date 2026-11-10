@@ -11,7 +11,8 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.facebook.react.bridge.ReactApplicationContext
-import kotlin.math.roundToInt
+import me.laumss.notipal.ui_common.snux.LineIcon
+import me.laumss.notipal.ui_common.snux.TopBar
 
 object PanelBar {
 
@@ -19,11 +20,16 @@ object PanelBar {
 
     class TextBtn(val label: String, val onClick: () -> Unit) : Cell()
 
-    class Action(val iconAsset: String, val label: String, val onClick: () -> Unit) : Cell()
+    class Action(val iconAsset: String, val label: String, val onClick: () -> Unit) : Cell() {
+        internal var view: LinearLayout? = null
+        internal var shownIcon: String = iconAsset
+    }
 
     class Check(val label: String, val onToggle: () -> Unit) : Cell()
 
     class IconBtn(val iconAsset: String, val onClick: () -> Unit) : Cell()
+
+    class GlyphBtn(val glyph: LineIcon.Glyph, val label: String, val onClick: () -> Unit) : Cell()
 
     class OutlineBtn(val label: String, val onClick: () -> Unit) : Cell()
 
@@ -51,21 +57,14 @@ object PanelBar {
         val iconSize: Number = 56,
         val labelGap: Number = 4,
         val actionPad: Number = 44,
-        val btnBold: Boolean = false,
-        val divider: Boolean = false,
-        val rightAlign: Boolean = false
+        val divider: Boolean = false
     ) {
         companion object {
 
             val INBOX = Style(
                 bg = Color.BLACK, fg = Color.WHITE, absolutePx = true,
                 height = 135, leftCol = 220, rightCol = 228, leftPadStart = 51.5,
-                btnSize = 40, labelSize = 30, iconSize = 56, labelGap = 4, actionPad = 44,
-                btnBold = false
-            )
-
-            val INBOX_LIGHT = INBOX.copy(
-                bg = Color.WHITE, fg = Color.BLACK, divider = true
+                btnSize = 40, labelSize = 30, iconSize = 56, labelGap = 4, actionPad = 44
             )
 
             val PAGE_HEADER = Style(
@@ -74,7 +73,6 @@ object PanelBar {
                 divider = true, horizontalPad = 20
             )
 
-            
             val PAGE_HEADER_ALIGNED = PAGE_HEADER.copy(
                 horizontalPad = 0, btnPadH = 52, btnPadV = 24
             )
@@ -87,9 +85,7 @@ object PanelBar {
         private val ctx: ReactApplicationContext,
         private val style: Style,
         private val checkIcon: ImageView?,
-        val outlineBtns: List<TextView> = emptyList(),
         private val titles: List<TextView> = emptyList(),
-        private val tabUnderlines: List<View> = emptyList()
     ) {
         var isChecked: Boolean = false
             private set
@@ -99,33 +95,26 @@ object PanelBar {
             val icon = checkIcon ?: return
             val iconPx = measurePx(ctx, style, style.iconSize)
             val asset = if (checked) "icons/ic_check_on.xml" else "icons/ic_check_off.xml"
-            icon.setImageDrawable(UiUtils.loadAssetIcon(ctx, asset, iconPx, style.fg, strokeWidth = 2.0f))
-        }
-
-        fun setOutlineBtnEnabled(index: Int, enabled: Boolean) {
-            val tv = outlineBtns.getOrNull(index) ?: return
-            tv.alpha = if (enabled) 1f else 0.4f
-            tv.isEnabled = enabled
-            (tv.parent as? View)?.isEnabled = enabled
-        }
-
-        fun setOutlineBtnVisible(index: Int, visible: Boolean) {
-            val container = outlineBtns.getOrNull(index)?.parent as? View ?: return
-            container.visibility = if (visible) View.VISIBLE else View.GONE
-        }
-
-        fun setOutlineBtnLabel(index: Int, label: String) {
-            outlineBtns.getOrNull(index)?.text = label
+            icon.setImageDrawable(UiUtils.loadAssetIcon(ctx, asset, iconPx, style.fg))
         }
 
         fun setTitleLabel(index: Int, label: String) {
             titles.getOrNull(index)?.text = label
         }
 
-        fun setActiveTab(index: Int) {
-            tabUnderlines.forEachIndexed { i, v ->
-                v.visibility = if (i == index) View.VISIBLE else View.INVISIBLE
+        fun updateAction(action: Action, enabled: Boolean, iconAsset: String = action.shownIcon, label: String? = null) {
+            val view = action.view ?: return
+            if (view.isEnabled != enabled) {
+                view.isEnabled = enabled
+                view.alpha = if (enabled) 1f else 0.4f
             }
+            if (iconAsset != action.shownIcon) {
+                action.shownIcon = iconAsset
+                (view.getChildAt(0) as? ImageView)?.setImageDrawable(
+                    UiUtils.loadAssetIcon(ctx, iconAsset, measurePx(ctx, style, style.iconSize), style.fg))
+            }
+            val text = view.getChildAt(1) as? TextView
+            if (label != null && text?.text?.toString() != label) text?.text = label
         }
     }
 
@@ -140,18 +129,20 @@ object PanelBar {
 
         val barHeight = u(style.height)
         var checkIcon: ImageView? = null
-        val outlineBtnList = mutableListOf<TextView>()
         val titleList = mutableListOf<TextView>()
-        val tabUnderlineList = mutableListOf<View>()
 
         fun render(cell: Cell, inWeightCenter: Boolean): View = when (cell) {
             is TextBtn -> makeTextBtn(ctx, style, cell)
             is Action -> makeAction(ctx, style, cell, inWeightCenter)
             is Check -> makeCheck(ctx, style, cell).also { (_, icon) -> checkIcon = icon }.first
             is IconBtn -> makeIconBtn(ctx, style, cell, barHeight)
-            is OutlineBtn -> makeOutlineBtn(ctx, style, cell).also { outlineBtnList.add(it.second) }.first
+
+            is GlyphBtn -> TopBar.iconCell(ctx, cell.glyph, cell.label, cell.onClick).also { c ->
+                (c.getChildAt(0) as? LineIcon)?.color = style.fg
+            }
+            is OutlineBtn -> makeOutlineBtn(ctx, style, cell).first
             is Title -> makeTitle(ctx, style, cell).also { titleList.add(it) }
-            is TabPair -> makeTabPair(ctx, style, cell).also { tabUnderlineList.addAll(it.second) }.first
+            is TabPair -> makeTabPair(ctx, style, cell).first
         }
 
         val bar: View
@@ -182,8 +173,7 @@ object PanelBar {
 
             linearBar.addView(LinearLayout(ctx).apply {
                 orientation = LinearLayout.HORIZONTAL
-                gravity = if (style.rightAlign) Gravity.CENTER_VERTICAL or Gravity.END else Gravity.CENTER
-                setPadding(0, 0, if (style.rightAlign) u(style.leftPadStart) else 0, 0)
+                gravity = Gravity.CENTER
                 layoutParams = LinearLayout.LayoutParams(u(style.rightCol), LinearLayout.LayoutParams.MATCH_PARENT)
                 right.forEach { addView(render(it, false)) }
             })
@@ -247,9 +237,7 @@ object PanelBar {
             ctx,
             style,
             checkIcon,
-            outlineBtnList,
             titleList,
-            tabUnderlineList,
         )
         if (checkIcon != null) handle.setChecked(false)
         return handle
@@ -259,7 +247,6 @@ object PanelBar {
         TextView(ctx).apply {
             text = cell.label; setTextColor(style.fg)
             applyTextSize(ctx, style, this, style.btnSize)
-            if (style.btnBold) typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
             gravity = Gravity.CENTER_VERTICAL
             val ph = measurePx(ctx, style, style.btnPadH)
             val pv = measurePx(ctx, style, style.btnPadV)
@@ -282,7 +269,7 @@ object PanelBar {
             }
             addView(ImageView(ctx).apply {
                 layoutParams = LinearLayout.LayoutParams(iconPx, iconPx)
-                setImageDrawable(UiUtils.loadAssetIcon(ctx, cell.iconAsset, iconPx, style.fg, strokeWidth = 2.0f))
+                setImageDrawable(UiUtils.loadAssetIcon(ctx, cell.iconAsset, iconPx, style.fg))
             })
             addView(TextView(ctx).apply {
                 text = cell.label; setTextColor(style.fg)
@@ -291,6 +278,7 @@ object PanelBar {
                 setPadding(0, measurePx(ctx, style, style.labelGap), 0, 0)
             })
             setOnClickListener { cell.onClick() }
+            cell.view = this
         }
     }
 
@@ -303,12 +291,16 @@ object PanelBar {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
             addView(icon)
+
             addView(TextView(ctx).apply {
                 text = cell.label; setTextColor(style.fg)
                 applyTextSize(ctx, style, this, style.labelSize)
                 gravity = Gravity.CENTER
+                maxLines = 1
                 setPadding(0, measurePx(ctx, style, style.labelGap), 0, 0)
-            })
+            }, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            ))
             setOnClickListener { cell.onToggle() }
         }
         return col to icon
@@ -336,7 +328,7 @@ object PanelBar {
             layoutParams = LinearLayout.LayoutParams(barHeight, LinearLayout.LayoutParams.MATCH_PARENT)
             addView(ImageView(ctx).apply {
                 layoutParams = LinearLayout.LayoutParams(iconPx, iconPx)
-                setImageDrawable(UiUtils.loadAssetIcon(ctx, cell.iconAsset, iconPx, style.fg, strokeWidth = 2.0f))
+                setImageDrawable(UiUtils.loadAssetIcon(ctx, cell.iconAsset, iconPx, style.fg))
             })
             setOnClickListener { cell.onClick() }
         }

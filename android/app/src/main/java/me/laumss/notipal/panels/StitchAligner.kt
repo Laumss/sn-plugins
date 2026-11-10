@@ -8,7 +8,6 @@ import me.laumss.notipal.panels.DocScreenshotService.StitchImage
 import kotlin.math.abs
 import kotlin.math.max
 
-
 object StitchAligner {
 
     private const val TAG = "StitchAligner"
@@ -26,7 +25,6 @@ object StitchAligner {
     private const val MIN_OVERLAP = 0.05f
     private const val KEEP_BEST = 0.85f
 
-    
     fun align(prev: StitchImage, next: StitchImage): Seam? {
         if (prev.width != next.width || prev.height != next.height) return null
         return try {
@@ -92,8 +90,6 @@ object StitchAligner {
         return if (bestShift > 0 && best <= MATCH_MAX) Seam(head, n - head - bestShift) else Seam(head, foot)
     }
 
-    
-    
     private fun edgeBand(a: Rows, b: Rows, blankA: BooleanArray, fromTop: Boolean): Int {
         val n = a.n
         val limit = (n * EDGE_MAX).toInt()
@@ -112,7 +108,6 @@ object StitchAligner {
         return band
     }
 
-    
     private fun score(
         a: Rows, b: Rows, blankA: BooleanArray, blankB: BooleanArray,
         shift: Int, c0: Int, c1: Int, minRows: Int, buf: FloatArray
@@ -138,7 +133,7 @@ object StitchAligner {
         try {
             val w = bmp.width
             val h = bmp.height
-            
+
             val x0 = (w * 0.04f).toInt()
             val x1 = (w * 0.96f).toInt()
             val edges = IntArray(COLS + 1) { x0 + (x1 - x0) * it / COLS }
@@ -190,7 +185,6 @@ object StitchAligner {
             block(lo, hi, sum / COLS)
         }
 
-        
         fun background(): Float {
             val means = ArrayList<Float>()
             for (y in 0 until n) rowStats(y) { lo, hi, mean -> if (hi - lo < FLAT_ROW) means.add(mean) }
@@ -199,7 +193,6 @@ object StitchAligner {
             return means[means.size / 2]
         }
 
-        
         fun blanks(bg: Float): BooleanArray = BooleanArray(n) { y ->
             var blank = false
             rowStats(y) { lo, hi, mean -> blank = hi - lo < FLAT_ROW && abs(mean - bg) < BG_TOL }

@@ -1,15 +1,22 @@
 import {
-  PluginCommAPI, PluginFileAPI, PluginNoteAPI, PluginManager, NativeUIUtils, FileUtils, PointUtils,
+  PluginCommAPI, PluginDocAPI, PluginFileAPI, PluginNoteAPI, PluginManager, FileUtils, PointUtils,
 } from 'sn-plugin-lib';
-import { NativeModules, EmitterSubscription } from 'react-native';
-import { loadClips, saveClips, loadSnapshots, saveSnapshots } from './ToolPresets';
+import HostDialog from './HostDialog';
+import { NativeModules } from 'react-native';
+import { loadClips, saveClips, CLIP_SLOT_COUNT } from './ToolPresets';
+import { refreshTitleClips, withClipSlot } from './TitleClips';
 import { t } from './i18n';
-import { toggleMode, handleAiSend, getLastMode, stopAiMode } from './BackgroundService';
+import { toggleMode, getLastMode, stopAiMode, startLocalSend } from './BackgroundService';
 import { getRNFS } from './rnfs';
-import FloatingToolbarBridge from './FloatingToolbarBridge';
+import FloatingToolbarBridge, { type Subscription } from './FloatingToolbarBridge';
+import type { ExtractProgress } from './LassoExtractor';
+import { isHostNoPageError } from './PenTools';
 import FloatingBubbleBridge from './BubbleBridges';
 import { layerIdOf, saveCurrentPage } from './ElementOps';
-import { reselectLasso } from './LassoTxn';
+import { reloadForLasso, reselectLasso, type LassoRect } from './LassoTxn';
+import {
+  startOccupiedCapture, relocatedRect, relocateFloatingStickerIfOccupied, type OccupiedCapture,
+} from './InsertPlacement';
 import { TOOL_IDS } from './ToolIdentifiers';
 
 const { FloatingToolbar } = NativeModules;
@@ -17,22 +24,16 @@ const { FloatingToolbar } = NativeModules;
 let _filePath: string | null = null;
 let _pageNum: number | null = null;
 
-
 let _clipBusy = false;
 
-const STICKER_DIR = '/sdcard/MyStyle/Sticker';
+const STICKER_DIR = '/sdcard/EXPORT/Notipal/clipboard';
+const LEGACY_STICKER_DIR = '/sdcard/MyStyle/Sticker';
 
 async function ensureStickerDir(): Promise<void> {
   const RNFS = getRNFS();
   if (!RNFS) return;
   try {
-    const parentExists = await RNFS.exists('/sdcard/MyStyle');
-    if (!parentExists) {
-      await RNFS.mkdir('/sdcard/MyStyle');
-      console.log('[CLIP-DBG] created /sdcard/MyStyle');
-    }
-    const exists = await RNFS.exists(STICKER_DIR);
-    if (!exists) {
+    if (!(await RNFS.exists(STICKER_DIR))) {
       await RNFS.mkdir(STICKER_DIR);
       console.log('[CLIP-DBG] created', STICKER_DIR);
     }
@@ -41,7 +42,35 @@ async function ensureStickerDir(): Promise<void> {
   }
 }
 
-export const OPEN_SEND_SCREEN = '__open_send_screen__';
+export async function purgeLegacyClips(): Promise<void> {
+  const RNFS = getRNFS();
+  if (!RNFS) return;
+  const clips = await loadClips();
+  const stale = Object.keys(clips).filter(slot => {
+    const stored = clips[slot];
+    return !!stored && (!stored.startsWith('/') || stored.startsWith(`${LEGACY_STICKER_DIR}/`));
+  });
+  if (stale.length > 0) {
+    for (const slot of stale) clips[slot] = null;
+    await saveClips(clips);
+  }
+  let deleted = 0;
+  try {
+    if (await RNFS.exists(LEGACY_STICKER_DIR)) {
+      for (const entry of await RNFS.readDir(LEGACY_STICKER_DIR)) {
+        if (!entry.isFile() || !/^(quickbar_clip_|pending_clip_)/.test(entry.name)) continue;
+        try { await RNFS.unlink(entry.path); deleted++; } catch (_) {}
+      }
+    }
+  } catch (error) {
+    console.warn('[CLIP-DBG] legacy clip purge failed', error);
+  }
+  if (stale.length > 0 || deleted > 0) {
+    console.log('[CLIP-DBG] legacy clips dropped slots=', stale.length, 'filesDeleted=', deleted);
+  }
+}
+
+const OPEN_SEND_SCREEN = '__open_send_screen__';
 
 async function ctx(): Promise<boolean> {
   try {
@@ -72,10 +101,10 @@ export async function executeAction(action: string): Promise<string> {
   }
 
   if (action === TOOL_IDS.AI_RELAY) {
-    
+
     const { startAiReceiveMode } = require('./BackgroundService');
     await startAiReceiveMode();
-    return 'Opened AI bubble';
+    return 'Opened AIRelay window';
   }
 
   if (action === 'lasso_ai') {
@@ -86,21 +115,31 @@ export async function executeAction(action: string): Promise<string> {
   }
 
   if (action === TOOL_IDS.SMART_LASSO) {
-    
-    
-    if (isMosaicBoardSurface()) {
+
+    if (isMosaicSurface()) {
+      const sent = await sendMosaicSelection();
+      if (sent) return sent;
       FloatingToolbarBridge.showSmartLassoCapture();
       return 'Smart lasso capture opened';
     }
+
+    if (FloatingToolbarBridge.isDocTextSelected()) {
+      const sent = await sendDocSelectedText();
+      if (sent !== 'no_text') return `Doc text send: ${sent}`;
+    }
     if (!await ctx()) return 'Smart lasso: no current page';
-    
-    
+
     if (await hasLassoSelection()) {
-      const { LassoExtractor } = require('./LassoExtractor');
-      const { markLassoDataPrePopulated } = require('../App');
+
+      if (!FloatingToolbarBridge.isDocumentMode() && await lassoHasPicture()) {
+        HostDialog.tip(t('smart_lasso_picture_blocked'));
+        return 'Send aborted: lasso contains picture';
+      }
+      const { LassoExtractor, markLassoDataPrePopulated } = require('./LassoExtractor');
       const extracted = await LassoExtractor.extract();
+      if (extracted.noPage) return 'Send aborted: host last-page limit';
       if (!extracted.text && extracted.imagePaths.length === 0 && extracted.linkedFiles.length === 0) {
-        NativeUIUtils.showErrorTipDialog(t('lasso_send_ocr_failed'));
+        HostDialog.tip(t('lasso_send_ocr_failed'));
         return 'Send aborted: nothing to send';
       }
       FloatingToolbarBridge.setLassoData(
@@ -128,7 +167,7 @@ export async function executeAction(action: string): Promise<string> {
 
   if (action === 'open_copilot' || action === TOOL_IDS.INK_PALETTE) {
     try {
-      await NativeModules.AIRelayModule?.openRelayMain?.('AIRelay');
+      await NativeModules.AIRelayModule.openRelayMain();
       return 'Opened AIRelay';
     } catch (e: any) {
       console.warn('[ToolActions]: open AIRelay failed:', e);
@@ -155,7 +194,7 @@ export async function executeAction(action: string): Promise<string> {
         const currentLayerId = currentLayer?.layerId ?? currentLayer?.layerNum;
         if (currentLayerId !== undefined && currentLayerId !== 0) {
           console.warn('[ToolActions] insert_link blocked on non-main layer:', currentLayerId);
-          NativeUIUtils.showErrorTipDialog(t('doc_link_main_only'));
+          HostDialog.tip(t('doc_link_main_only'));
           return 'Document links require the main layer';
         }
       } catch (e) {
@@ -175,18 +214,12 @@ export async function executeAction(action: string): Promise<string> {
     return mode ? `Switched to ${mode}` : 'Mode toggled off';
   }
 
-  if (action === 'insert_image') {
-    FloatingToolbarBridge.showImagePanel();
-    return 'Image panel opened';
-  }
-
   if (action === 'insert_doc_screenshot') {
     FloatingToolbarBridge.handleDocScreenshot();
     return 'Doc screenshot: delegated to native';
   }
 
-  
-  if (!action.startsWith('clip_save_') && !isMosaicInkSurface()) {
+  if (!action.startsWith('clip_save_') && !isMosaicSurface()) {
     if (!await ctx()) return 'No file context';
   }
 
@@ -199,23 +232,20 @@ export async function executeAction(action: string): Promise<string> {
     }
     if (action.startsWith('clip_save_clear_')) {
       const slot = clipSlotOf(action);
-      
-      if (isMosaicInkSurface()) return await mosaicClipSave(slot, { deleteAfter: true });
-      const saved = await clipSave(slot);
-      if (!saved.startsWith('Saved to clip')) return saved;
-      const removed: any = await PluginCommAPI.deleteLassoElements();
-      console.log('[CLIP-DBG] delete selected after save:', JSON.stringify(removed));
-      return removed?.success === false ? `${saved}; clear selection failed` : `${saved}; selected strokes cleared`;
+
+      if (isMosaicSurface()) return await mosaicClipSave(slot, { deleteAfter: true });
+      return showUseLassoMenuTip();
     }
     if (action.startsWith('clip_save_')) {
       const slot = clipSlotOf(action);
-      if (isMosaicInkSurface()) return await mosaicClipSave(slot);
-      return await clipSave(slot);
+      if (isMosaicSurface()) return await mosaicClipSave(slot);
+      return showUseLassoMenuTip();
     }
     if (action.startsWith('clip_clear_')) {
       const slot = clipSlotOf(action);
       return await clipClear(slot);
     }
+    if (action === 'manage_clips') return await openClipManager();
 
     return `Unknown: ${action}`;
   } catch (e) {
@@ -224,17 +254,12 @@ export async function executeAction(action: string): Promise<string> {
   }
 }
 
-
-
-
-
-
 function clipSlotOf(action: string): string {
   return action.slice(action.lastIndexOf('_') + 1);
 }
 
 const CLIP_CONVERTIBLE_TYPES = new Set([0, 700, 800]);
-type ClipboardSkipKind = 'title' | 'image' | 'link' | 'textbox' | 'other';
+type ClipboardSkipKind = 'title' | 'image' | 'link' | 'textbox' | 'card' | 'other';
 
 function clipboardSkipLabels(kinds: ClipboardSkipKind[]): string {
   const labels: Record<ClipboardSkipKind, string> = {
@@ -242,6 +267,7 @@ function clipboardSkipLabels(kinds: ClipboardSkipKind[]): string {
     image: t('clip_skip_image'),
     link: t('clip_skip_link'),
     textbox: t('clip_skip_textbox'),
+    card: t('clip_skip_card'),
     other: t('clip_skip_other'),
   };
   return Array.from(new Set(kinds)).map(kind => labels[kind]).join(t('clip_skip_separator'));
@@ -253,6 +279,7 @@ function clipboardSkipError(kind: ClipboardSkipKind): string {
     case 'image': return t('clip_err_image');
     case 'link': return t('clip_err_link');
     case 'textbox': return t('clip_err_textbox');
+    case 'card': return t('clip_err_card');
     default: return t('clip_err_unsupported', { types: t('clip_skip_other') });
   }
 }
@@ -287,9 +314,78 @@ function clipboardSkipKindForElement(element: any): ClipboardSkipKind {
   }
 }
 
-function recycleClipboardElements(elements: any[]): void {
+function recycleElements(elements: any[]): void {
   for (const element of elements) {
-    try { element?.recycle?.(); } catch (_) {}
+    element?.recycle?.();
+  }
+}
+
+let _paletteLassoNoPage = false;
+
+export function paletteLassoHitNoPage(): boolean {
+  return _paletteLassoNoPage;
+}
+
+let docTextSendBusy = false;
+
+export async function sendDocSelectedText(): Promise<'opened' | 'busy' | 'no_text' | 'localsend_off' | 'failed'> {
+  if (docTextSendBusy) return 'busy';
+  docTextSendBusy = true;
+  try {
+    const selection: any = await PluginDocAPI.getLastSelectedText();
+    const text = selection?.success && typeof selection.result === 'string' ? selection.result : '';
+    console.log('[ToolActions] doc selected text length=', text.length);
+    if (!text.trim()) return 'no_text';
+    if (!await startLocalSend()) return 'localsend_off';
+    FloatingToolbarBridge.showDocTextSendPanel(text);
+    return 'opened';
+  } catch (error) {
+    console.warn('[ToolActions]: document text send failed:', error);
+    return 'failed';
+  } finally {
+    docTextSendBusy = false;
+  }
+}
+
+const PICTURE_ELEMENT_TYPE = 200;
+const LASSO_SETTLE_AFTER_SEND_MS = 600;
+
+export async function releaseLassoIfGoneAfterSend(): Promise<void> {
+  if (FloatingToolbarBridge.isDocumentMode()) return;
+  if (!FloatingToolbarBridge.isHostLassoMenuOpen()) return;
+  await new Promise<void>(resolve => setTimeout(resolve, LASSO_SETTLE_AFTER_SEND_MS));
+  if (!FloatingToolbarBridge.isHostLassoMenuOpen()) return;
+
+  let gone = false;
+  try {
+    const r: any = await PluginCommAPI.getLassoRect();
+    gone = r?.success === true && r.result == null;
+  } catch (_) {}
+  if (!gone) return;
+
+  let elements: any[] | null = null;
+  try {
+    const res: any = await PluginCommAPI.getLassoElements();
+    if (res?.success === true && Array.isArray(res.result)) elements = res.result;
+  } catch (_) {}
+  const empty = elements !== null && elements.length === 0;
+  for (const el of elements ?? []) el?.recycle?.();
+  if (!empty) return;
+  console.log('[ToolActions] lasso gone after send but menu still marked open; releasing');
+  FloatingToolbarBridge.releaseStaleLassoMenu('send closed, no lasso selection');
+}
+
+async function lassoHasPicture(): Promise<boolean> {
+  let elements: any[] = [];
+  try {
+    const res: any = await PluginCommAPI.getLassoElements();
+    if (!res?.success || !Array.isArray(res.result)) return false;
+    elements = res.result;
+    return elements.some(el => el?.type === PICTURE_ELEMENT_TYPE);
+  } catch (_) {
+    return false;
+  } finally {
+    for (const el of elements) el?.recycle?.();
   }
 }
 
@@ -309,53 +405,47 @@ async function hasLassoSelection(): Promise<boolean> {
   }
 }
 
+export async function lassoSelectionSendsText(): Promise<boolean> {
+  try {
+    const r: any = await PluginCommAPI.getLassoElementTypeCounts();
+    if (r?.success !== true || !r.result) return false;
+    const count = (key: string) => Number(r.result[key]) || 0;
+    const textOrLinks = count('normalTextBoxNum') + count('digestTextBoxNum') +
+      count('digestTextBoxEditableNum') + count('textLinkNum');
+    return textOrLinks > 0 && count('trailNum') === 0 && count('trailLinkNum') === 0;
+  } catch (_) {
+    return false;
+  }
+}
 
+const MOSAIC_HANDOFF_DIR = '/sdcard/EXPORT/Notipal/mosaic';
+const MOSAIC_LASSO_FILE = `${MOSAIC_HANDOFF_DIR}/clip_lasso.json`;
+const MOSAIC_PASTE_FILE = `${MOSAIC_HANDOFF_DIR}/paste_strokes.json`;
 
-
-
-
-
-const MOSAIC_CLIP_DIR = '/sdcard/EXPORT/mosaic';
-const MOSAIC_LASSO_FILE = `${MOSAIC_CLIP_DIR}/clip_lasso.json`;
-const MOSAIC_PASTE_FILE = `${MOSAIC_CLIP_DIR}/paste_strokes.json`;
-
-
-
+const MOSAIC_SKETCH_LASSO_FILE = `${MOSAIC_HANDOFF_DIR}/sketch_lasso.json`;
+const MOSAIC_SKETCH_PASTE_FILE = `${MOSAIC_HANDOFF_DIR}/sketch_paste.json`;
 
 const pendingMosaicSidecars = new Map<string, Promise<void>>();
 
-const SIDE_MARGIN = 100;          
-
+const SIDE_MARGIN = 100;
 
 const NOTE_PRESSURE_MAX = 4095;
 const NOTE_DEFAULT_THICKNESS = 1000;
 const CLIP_PASTE_CONCURRENCY = 8;
 
-
 const MOSAIC_THICK_FACTOR = 100;
 const MOSAIC_THICK_MIN = 100;
 const MOSAIC_THICK_MAX = 4000;
 
-
-function isMosaicBoardSurface(): boolean {
-  return FloatingToolbarBridge.isMosaicBoardSurface();
+function isMosaicSurface(): boolean {
+  return FloatingToolbarBridge.isMosaicBoardVisible();
 }
-
-
-function isMosaicInkSurface(): boolean {
-  return isMosaicBoardSurface() ||
-    (FloatingToolbarBridge.isMosaicBoardVisible() && FloatingToolbarBridge.getMosaicSurface() === 'note');
-}
-
-
 
 function notifyStickerInserted(): void {
-  try { (FloatingToolbar as any)?.notifyStickerInserted?.(); } catch (_) {}
+  try { FloatingToolbar?.notifyStickerInserted?.(); } catch (_) {}
 }
 
-
 const SUPPORTED_PEN_TYPES = new Set([10, 16, 15, 11]);
-
 
 function sdkPenToMosaic(penType: number): number {
   switch (penType) {
@@ -368,7 +458,7 @@ function sdkPenToMosaic(penType: number): number {
 
 function rawElementThickness(element: any): number | null {
   if (typeof element?.thickness !== 'number' || !Number.isFinite(element.thickness)) return null;
-  
+
   return element.thickness;
 }
 
@@ -378,17 +468,25 @@ type MosaicSidecar = {
   pageSize: { width: number; height: number } | null;
   coordinateSpace: ClipboardCoordinateSpace;
   screenShortPx: number | null;
+
+  skippedCards: number;
 };
 
-
 async function readMosaicSidecar(path: string): Promise<MosaicSidecar | null> {
-  const RNFS = getRNFS();
-  if (!RNFS) return null;
   try {
-    if (!(await RNFS.exists(path))) return null;
-    const json = JSON.parse(await RNFS.readFile(path, 'utf8'));
+
+    let text = await FloatingToolbarBridge.readTextFile(path);
+    if (text === undefined) {
+      const RNFS = getRNFS();
+      if (!RNFS) return null;
+      text = (await RNFS.exists(path)) ? await RNFS.readFile(path, 'utf8') : null;
+    }
+    if (text == null) return null;
+    const json = JSON.parse(text);
     const strokes = Array.isArray(json?.strokes) ? json.strokes : null;
-    if (!strokes || strokes.length === 0) return null;
+
+    const skippedCards = Math.max(0, Number(json?.skippedCards) || 0);
+    if (!strokes || (strokes.length === 0 && skippedCards === 0)) return null;
     const width = Number(json?.pageSize?.width);
     const height = Number(json?.pageSize?.height);
     const coordinateSpace: ClipboardCoordinateSpace = json.coordinateSpace === 'note-page-px'
@@ -399,13 +497,13 @@ async function readMosaicSidecar(path: string): Promise<MosaicSidecar | null> {
     return {
       strokes, pageSize: width > 0 && height > 0 ? { width, height } : null,
       coordinateSpace, screenShortPx: Number.isFinite(screenShortPx) && screenShortPx > 0 ? screenShortPx : null,
+      skippedCards,
     };
   } catch (e) {
     console.warn('[MOSAIC-CLIP] read strokes failed', path, e);
     return null;
   }
 }
-
 
 async function restoreClipboardAngles(el: any, stroke: any): Promise<boolean> {
   const values = stroke.angles ?? stroke.tilt;
@@ -425,11 +523,9 @@ async function readMosaicStrokesFile(path: string): Promise<any[] | null> {
   return (await readMosaicSidecar(path))?.strokes ?? null;
 }
 
-
 async function currentNotePageSize(): Promise<{ width: number; height: number } | null> {
   try {
-    
-    
+
     if (_filePath && _pageNum !== null) {
       const cachedPageSize: any = await PluginFileAPI.getPageSize(_filePath, _pageNum);
       const cachedWidth = cachedPageSize?.result?.width;
@@ -472,9 +568,6 @@ async function stickerTargetPageSize(
   const cachedPageSize = await currentNotePageSize();
   if (cachedPageSize) return cachedPageSize;
 
-  
-  
-  
   console.log('[CLIP-DBG] sticker target pageSize fallback=source',
     `${sourcePageSize.width}x${sourcePageSize.height}`);
   return sourcePageSize;
@@ -483,12 +576,9 @@ async function stickerTargetPageSize(
 function resolveElementPageSize(
   reported: { width: number; height: number },
 ): { width: number; height: number } {
-  
-  
-  
+
   return reported;
 }
-
 
 async function writeMosaicSidecar(
   stickerPath: string, strokes: any[], pageSize?: { width: number; height: number },
@@ -528,16 +618,16 @@ function sidecarStrokeRect(
   };
 }
 
-
 async function pasteNoteFromMosaicSidecar(
   stickerPath: string,
-): Promise<'handled' | 'unavailable' | 'failed'> {
+  occupied: OccupiedCapture | null,
+): Promise<'selected' | 'pasted-no-selection' | 'unavailable' | 'failed'> {
   const RNFS = getRNFS();
   if (!RNFS) return 'unavailable';
   const pending = pendingMosaicSidecars.get(stickerPath);
-  if (pending) {
-    try { await pending; } catch (_) {}
-  }
+  if (pending) await pending;
+
+  if (await isHostLassoClip(stickerPath)) return 'unavailable';
 
   let payload: any;
   let metadata: StickerPlacementMetadata;
@@ -614,7 +704,7 @@ async function pasteNoteFromMosaicSidecar(
   if (!filePath || pageNum === null) return 'failed';
   let targetMachineType: number | null = null;
   try {
-    const machine: any = await (PluginFileAPI as any).getFileMachineType?.(filePath);
+    const machine: any = await PluginFileAPI.getFileMachineType?.(filePath);
     if (machine?.success && Number.isInteger(machine.result)) targetMachineType = machine.result;
   } catch (_) {}
   const targetSize = await currentNotePageSize();
@@ -622,14 +712,7 @@ async function pasteNoteFromMosaicSidecar(
   console.log('[CLIP-DBG] direct note paste target context file=', filePath,
     'page=', pageNum, 'machineType=', targetMachineType,
     'pageSize=', `${targetSize.width}x${targetSize.height}`);
-  
-  
-  
-  
-  
-  
-  
-  
+
   let targetLayerId = 0;
   try {
     const layersRes: any = await PluginFileAPI.getLayers(filePath, pageNum);
@@ -644,11 +727,20 @@ async function pasteNoteFromMosaicSidecar(
   console.log('[CLIP-DBG] direct note paste target layer=', targetLayerId);
   const sx = targetSize.width / metadata.sourcePageSize.width;
   const sy = targetSize.height / metadata.sourcePageSize.height;
+  const sourceTargetRect = {
+    left: Math.max(0, Math.min(targetSize.width, Math.round(metadata.sourceRect.left * sx))),
+    top: Math.max(0, Math.min(targetSize.height, Math.round(metadata.sourceRect.top * sy))),
+    right: Math.max(0, Math.min(targetSize.width, Math.round(metadata.sourceRect.right * sx))),
+    bottom: Math.max(0, Math.min(targetSize.height, Math.round(metadata.sourceRect.bottom * sy))),
+  };
+
+  const relocatedTarget = occupied ? relocatedRect(sourceTargetRect, await occupied.snapshot) : null;
+  const dx = relocatedTarget ? relocatedTarget.left - sourceTargetRect.left : 0;
+  const dy = relocatedTarget ? relocatedTarget.top - sourceTargetRect.top : 0;
+  console.log('[CLIP-DBG] direct note paste placement rect=', JSON.stringify(sourceTargetRect), 'offset=', dx, dy);
   const elements: any[] = [];
   try {
-    
-    
-    
+
     const prepared = new Array<any>(strokes.length);
     let next = 0;
     let skipped = 0;
@@ -660,21 +752,21 @@ async function pasteNoteFromMosaicSidecar(
           const stroke = strokes[index];
           const points = Array.isArray(stroke?.pts) ? stroke.pts : [];
           if (points.length < 6) { skipped++; continue; }
-          const created: any = await (PluginCommAPI as any).createElement(0);
+          const created: any = await PluginCommAPI.createElement(0);
           if (!created?.success || !created.result?.stroke) { skipped++; continue; }
           const el: any = created.result;
           const pagePoints: { x: number; y: number }[] = [];
           const pressures: number[] = [];
           for (let i = 0; i + 2 < points.length; i += 3) {
             pagePoints.push({
-              x: Math.round(Number(points[i]) * sx),
-              y: Math.round(Number(points[i + 1]) * sy),
+              x: Math.round(Number(points[i]) * sx) + dx,
+              y: Math.round(Number(points[i + 1]) * sy) + dy,
             });
             pressures.push(Math.max(1, Math.min(NOTE_PRESSURE_MAX,
               Math.round(Number(points[i + 2]) * NOTE_PRESSURE_MAX))));
           }
           if (pagePoints.length < 2) {
-            try { el.recycle?.(); } catch (_) {}
+            el?.recycle?.();
             skipped++;
             continue;
           }
@@ -684,9 +776,7 @@ async function pasteNoteFromMosaicSidecar(
               Math.min(MOSAIC_THICK_MAX, Math.round(Number(stroke.width ?? 2) * MOSAIC_THICK_FACTOR)));
           const sourceFactor = Number(stroke.sdkFactorResize);
           const factor = Number.isFinite(sourceFactor) && sourceFactor > 0 ? sourceFactor : 1;
-          
-          
-          
+
           el.factorResize = factor;
           el.thickness = Math.max(MOSAIC_THICK_MIN,
             Math.min(MOSAIC_THICK_MAX, Math.round(sourceThickness / factor)));
@@ -697,7 +787,7 @@ async function pasteNoteFromMosaicSidecar(
           const okPrs = await el.stroke.pressures.setRange(0, pressures.length - 1, pressures);
           const okAngles = await restoreClipboardAngles(el, stroke);
           if (!okPts || !okPrs || !okAngles) {
-            try { el.recycle?.(); } catch (_) {}
+            el?.recycle?.();
             skipped++;
             continue;
           }
@@ -737,24 +827,20 @@ async function pasteNoteFromMosaicSidecar(
     console.log('[CLIP-DBG] direct note sidecar insertElements=', JSON.stringify(inserted),
       'elements=', elements.length, 'pageSize=', `${targetSize.width}x${targetSize.height}`);
     if (!inserted?.success) return 'failed';
-    try { await (PluginCommAPI as any).reloadFile?.(); } catch (error) {
-      console.warn('[CLIP-DBG] direct note sidecar reload failed', error);
-    }
+    await reloadForLasso('clip/paste');
     const targetRect = {
-      left: Math.max(0, Math.min(targetSize.width, Math.round(metadata.sourceRect.left * sx))),
-      top: Math.max(0, Math.min(targetSize.height, Math.round(metadata.sourceRect.top * sy))),
-      right: Math.max(0, Math.min(targetSize.width, Math.round(metadata.sourceRect.right * sx))),
-      bottom: Math.max(0, Math.min(targetSize.height, Math.round(metadata.sourceRect.bottom * sy))),
+      left: sourceTargetRect.left + dx, top: sourceTargetRect.top + dy,
+      right: sourceTargetRect.right + dx, bottom: sourceTargetRect.bottom + dy,
     };
-    const selected = await reselectLasso(targetRect, 'clip/paste', 8, 250);
+    const selected = await reselectLasso(targetRect, 'clip/paste', 8, 250, { filePath, pageNum });
     console.log('[CLIP-DBG] direct note sidecar lasso=', JSON.stringify(targetRect),
       'selected=', selected);
-    return 'handled';
+    return selected ? 'selected' : 'pasted-no-selection';
   } catch (error) {
     console.warn('[CLIP-DBG] direct note sidecar paste failed', error);
     return 'failed';
   } finally {
-    for (const el of elements) { try { el?.recycle?.(); } catch (_) {} }
+    recycleElements(elements);
   }
 }
 
@@ -788,39 +874,35 @@ async function writeStickerPlacementMetadata(
   }
 }
 
-async function restoreInsertedStickerPlacement(stickerPath: string): Promise<boolean> {
-  const RNFS = getRNFS();
-  if (!RNFS) {
-    console.warn('[CLIP-DBG] restore sticker placement skipped: RNFS unavailable');
+async function restoreInsertedStickerPlacement(
+  stickerPath: string,
+  occupied: OccupiedCapture | null = null,
+): Promise<boolean> {
+  const parsed = await readClipMeta(stickerPath);
+  const hostClip = parsed?.source === HOST_LASSO_CLIP_SOURCE;
+
+  if (hostClip && !validStickerPlacementRect(parsed?.sourceRect)) {
+    return relocateFloatingStickerIfOccupied(occupied, 'clip-paste');
+  }
+  if (!parsed?.sourcePageSize || !validStickerPlacementRect(parsed.sourceRect)) {
+    console.warn('[CLIP-DBG] restore sticker placement skipped: metadata invalid', stickerPath);
     return false;
   }
-  let metadata: StickerPlacementMetadata;
-  try {
-    const raw = await RNFS.readFile(`${stickerPath}.meta.json`, 'utf8');
-    const parsed = JSON.parse(raw);
-    if (!parsed?.sourcePageSize || !validStickerPlacementRect(parsed.sourceRect)) {
-      console.warn('[CLIP-DBG] restore sticker placement skipped: metadata invalid', stickerPath);
-      return false;
-    }
-    const sourceWidth = Number(parsed.sourcePageSize.width);
-    const sourceHeight = Number(parsed.sourcePageSize.height);
-    if (!(sourceWidth > 0) || !(sourceHeight > 0)) {
-      console.warn('[CLIP-DBG] restore sticker placement skipped: source pageSize invalid',
-        JSON.stringify(parsed.sourcePageSize));
-      return false;
-    }
-    metadata = {
-      v: 1,
-      sourcePageSize: { width: sourceWidth, height: sourceHeight },
-      sourceRect: {
-        left: Number(parsed.sourceRect.left), top: Number(parsed.sourceRect.top),
-        right: Number(parsed.sourceRect.right), bottom: Number(parsed.sourceRect.bottom),
-      },
-    };
-  } catch (error) {
-    console.warn('[CLIP-DBG] restore sticker placement metadata read failed', stickerPath, error);
+  const sourceWidth = Number(parsed.sourcePageSize.width);
+  const sourceHeight = Number(parsed.sourcePageSize.height);
+  if (!(sourceWidth > 0) || !(sourceHeight > 0)) {
+    console.warn('[CLIP-DBG] restore sticker placement skipped: source pageSize invalid',
+      JSON.stringify(parsed.sourcePageSize));
     return false;
   }
+  const metadata: StickerPlacementMetadata = {
+    v: 1,
+    sourcePageSize: { width: sourceWidth, height: sourceHeight },
+    sourceRect: {
+      left: Number(parsed.sourceRect.left), top: Number(parsed.sourceRect.top),
+      right: Number(parsed.sourceRect.right), bottom: Number(parsed.sourceRect.bottom),
+    },
+  };
 
   const targetPageSize = await stickerTargetPageSize(metadata.sourcePageSize);
   const sx = targetPageSize.width / metadata.sourcePageSize.width;
@@ -841,10 +923,19 @@ async function restoreInsertedStickerPlacement(stickerPath: string): Promise<boo
     return false;
   }
 
+  const relocated = occupied ? relocatedRect(targetRect, await occupied.snapshot) : null;
+  if (relocated) {
+    console.log('[CLIP-DBG] sticker placement occupied; moved', JSON.stringify(targetRect), '→', JSON.stringify(relocated));
+  } else if (hostClip) {
+    console.log('[CLIP-DBG] host sticker placement kept', JSON.stringify(targetRect));
+    return false;
+  }
+  const finalRect = relocated ?? targetRect;
+
   try {
-    const nativeResult = await (FloatingToolbar as any).resizeInsertedSticker(targetRect);
+    const nativeResult = await FloatingToolbar.resizeInsertedSticker(finalRect);
     console.log('[CLIP-DBG] native sticker placement result=', nativeResult,
-      'targetRect=', JSON.stringify(targetRect));
+      'targetRect=', JSON.stringify(finalRect));
     return nativeResult === true;
   } catch (error) {
     console.warn('[CLIP-DBG] native sticker placement failed', error);
@@ -852,15 +943,12 @@ async function restoreInsertedStickerPlacement(stickerPath: string): Promise<boo
   }
 }
 
-
 async function getLassoElementsForSidecar(): Promise<any> {
-  
   const result: any = await PluginCommAPI.getLassoElements();
   console.log('[MOSAIC-CLIP] lasso source=SDK Android elements=',
     result?.result?.length ?? 0);
   return result;
 }
-
 
 function normalizeStickerElementCoordinateMetadata(
   elements: any[],
@@ -884,7 +972,6 @@ function normalizeStickerElementCoordinateMetadata(
   }
 }
 
-
 async function elementsToMosaicStrokes(
   elements: any[], pageSize: { width: number; height: number },
   sourceRect?: StickerPlacementMetadata['sourceRect'] | null,
@@ -903,8 +990,7 @@ async function elementsToMosaicStrokes(
   const unsupportedPenTypes = new Map<number, number>();
   const unsupportedPenNums: number[] = [];
   let next = 0;
-  
-  
+
   const worker = async () => {
     while (true) {
       const index = next++;
@@ -965,13 +1051,11 @@ async function elementsToMosaicStrokes(
             sdkPenType,
             ...(Number.isInteger(el.layerNum) ? { layerNum: el.layerNum } : {}),
             penColor: Number(stroke.penColor),
-            
+
             ...(angles.length ? { angles: angles.flatMap((angle: any) => [angle.x, angle.y]) } : {}),
             ...(downTilt && Number.isFinite(downTilt.x) && Number.isFinite(downTilt.y)
               ? { tilt: [downTilt.x, downTilt.y] } : {}),
-            
-            
-            
+
             sdkThickness: typeof el.thickness === 'number' && Number.isFinite(el.thickness)
               ? Math.max(1, Math.round(el.thickness))
               : NOTE_DEFAULT_THICKNESS,
@@ -1030,18 +1114,14 @@ async function elementsToMosaicStrokes(
   return strokes;
 }
 
-
-
 function requestMosaicClearSelection(deleteAfter: boolean): void {
-  try { (FloatingToolbar as any)?.requestMosaicClearSelection?.(deleteAfter); }
+  try { FloatingToolbar?.requestMosaicClearSelection?.(deleteAfter); }
   catch (e) { console.warn('[MOSAIC-CLIP] clear-selection broadcast failed', e); }
 }
-
 
 export function clearMosaicLassoSelection(): void {
   requestMosaicClearSelection(false);
 }
-
 
 async function mosaicStrokesToElements(
   strokes: any[], pageSize: { width: number; height: number },
@@ -1066,12 +1146,14 @@ async function mosaicStrokesToElements(
     'sourceSize=', `${bw}x${bh}`, 'pageScale=', pageScale, 'fit=', fit,
     'resizeFactor=', resizeFactor);
 
-  const elements: any[] = [];
-  for (const s of strokes) {
-    const createRes: any = await (PluginCommAPI as any).createElement(0);
+  const prepared = new Array<any>(strokes.length);
+  let failed = false;
+  let next = 0;
+  const build = async (s: any): Promise<any | 'skip' | null> => {
+    const createRes: any = await PluginCommAPI.createElement(0);
     if (!createRes?.success || !createRes.result) { console.warn('[MOSAIC-CLIP] createElement failed'); return null; }
     const el: any = createRes.result;
-    const androidPoints: any[] = []; const pressures: number[] = [];
+    const androidPoints: { x: number; y: number }[] = []; const pressures: number[] = [];
     const p = s.pts ?? [];
     for (let i = 0; i + 2 < p.length; i += 3) {
       const pageX = SIDE_MARGIN + (p[i] - minX) * pageScale * fit;
@@ -1079,39 +1161,49 @@ async function mosaicStrokesToElements(
       androidPoints.push({ x: Math.round(pageX), y: Math.round(pageY) });
       pressures.push(Math.max(1, Math.min(NOTE_PRESSURE_MAX, Math.round((p[i + 2] ?? 1) * NOTE_PRESSURE_MAX))));
     }
-    if (androidPoints.length < 2 || !el.stroke) continue;
-    
-    
-    
+    if (androidPoints.length < 2 || !el.stroke) return 'skip';
+
     const tierThickness = Math.max(MOSAIC_THICK_MIN,
       Math.min(MOSAIC_THICK_MAX, Math.round((s.width ?? 2) * MOSAIC_THICK_FACTOR)));
     el.factorResize = resizeFactor;
     el.thickness = Math.max(MOSAIC_THICK_MIN, Math.round(tierThickness / resizeFactor));
     el.stroke.penType = Number(s.sdkPenType);
-    
+
     el.stroke.penColor = el.stroke.penType === 11
       ? Number(s.penColor)
       : (Number(s.penColor) === 0xFE ? 0xFE : 0);
-    const okPts = await el.stroke.points.setRange(0, androidPoints.length - 1, androidPoints);
-    const okPrs = await el.stroke.pressures.setRange(0, pressures.length - 1, pressures);
-    const okAngles = await restoreClipboardAngles(el, s);
+    const [okPts, okPrs, okAngles] = await Promise.all([
+      el.stroke.points.setRange(0, androidPoints.length - 1, androidPoints),
+      el.stroke.pressures.setRange(0, pressures.length - 1, pressures),
+      restoreClipboardAngles(el, s),
+    ]);
     if (!okPts || !okPrs || !okAngles) { console.warn('[MOSAIC-CLIP] setRange failed'); return null; }
-    elements.push(el);
-  }
-  return elements;
+    return el;
+  };
+  const worker = async () => {
+    while (!failed) {
+      const index = next++;
+      if (index >= strokes.length) return;
+      const el = await build(strokes[index]);
+      if (el === null) failed = true;
+      else prepared[index] = el;
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(CLIP_PASTE_CONCURRENCY, strokes.length) }, () => worker()));
+  if (failed) return null;
+  return prepared.filter((el) => el && el !== 'skip');
 }
 
-
 export async function extractMosaicLassoText(
-  onProgress?: (stage: 'recognizing' | 'done') => void,
+  onProgress?: ExtractProgress,
 ): Promise<string | null> {
-  if (!isMosaicBoardSurface()) return null;
+  if (!isMosaicSurface()) return null;
   const selection = await readMosaicSidecar(MOSAIC_LASSO_FILE);
   const strokes = selection?.strokes;
-  if (!strokes) return null;
+  if (!strokes || strokes.length === 0) return null;
   const canWrite = await FloatingToolbarBridge.requestFileWritePermission();
   if (!canWrite) {
-    try { NativeUIUtils.showErrorTipDialog(t('perm_required')); } catch (_) {}
+    try { HostDialog.tip(t('perm_required')); } catch (_) {}
     return null;
   }
   const pageSize = await currentNotePageSize();
@@ -1121,7 +1213,7 @@ export async function extractMosaicLassoText(
   }
   const elements = await mosaicStrokesToElements(strokes, pageSize, selection?.screenShortPx);
   if (!elements || elements.length === 0) return null;
-  try { onProgress?.('recognizing'); } catch (_) {}
+  onProgress?.('recognizing');
   try {
     const res: any = await PluginCommAPI.recognizeElements(elements, pageSize);
     if (res?.success && typeof res.result === 'string' && res.result.trim()) return res.result.trim();
@@ -1131,10 +1223,48 @@ export async function extractMosaicLassoText(
     console.warn('[MOSAIC-OCR] recognizeElements threw:', e);
     return null;
   } finally {
-    try { onProgress?.('done'); } catch (_) {}
+    onProgress?.('done');
   }
 }
 
+async function sendMosaicSelection(): Promise<string | null> {
+  let selection: any = null;
+  try {
+    const text = await FloatingToolbarBridge.readTextFile(MOSAIC_LASSO_FILE);
+    selection = text ? JSON.parse(text) : null;
+  } catch (error) {
+    console.warn('[MOSAIC-SEND] read selection failed', error);
+  }
+  const strokes: any[] = Array.isArray(selection?.strokes) ? selection.strokes : [];
+  const cards: { text: string; top: number }[] = (Array.isArray(selection?.textCards) ? selection.textCards : [])
+    .filter((card: any) => typeof card?.text === 'string' && card.text.trim())
+    .map((card: any) => ({ text: card.text.trim(), top: Number(card.top) || 0 }));
+  console.log('[MOSAIC-SEND] selection strokes=', strokes.length, 'textCards=', cards.length);
+  if (strokes.length === 0 && cards.length === 0) return null;
+
+  const parts = [...cards];
+  if (strokes.length > 0) {
+    const recognized = await extractMosaicLassoText();
+    if (recognized) {
+      let top = Infinity;
+      for (const stroke of strokes) {
+        const pts = Array.isArray(stroke?.pts) ? stroke.pts : [];
+        for (let i = 1; i < pts.length; i += 3) if (Number.isFinite(pts[i])) top = Math.min(top, pts[i]);
+      }
+      parts.push({ text: recognized, top: Number.isFinite(top) ? top : 0 });
+    }
+  }
+  if (parts.length === 0) {
+    HostDialog.tip(t('lasso_send_ocr_failed'));
+    return 'Send aborted: nothing to send';
+  }
+  parts.sort((a, b) => a.top - b.top);
+  const { markLassoDataPrePopulated } = require('./LassoExtractor');
+  FloatingToolbarBridge.setLassoData(parts.map(part => part.text).join('\n'), '[]', '[]');
+  markLassoDataPrePopulated();
+  FloatingToolbarBridge.showSendPanelFromBubble();
+  return 'Send panel opened (Mosaic selection)';
+}
 
 async function convertStickerWithPreparedContours(elements: any[], context: {
   path: string; pageWidth: number; pageHeight: number;
@@ -1180,11 +1310,19 @@ async function convertStickerWithPreparedContours(elements: any[], context: {
   }
 }
 
-async function mosaicClipSave(slot: string, opts: { deleteAfter?: boolean } = {}): Promise<string> {
-  if (!isMosaicInkSurface()) return 'Mosaic clip deferred: Mosaic surface is not active';
-  const selection = await readMosaicSidecar(MOSAIC_LASSO_FILE);
+async function mosaicClipSave(
+  slot: string, opts: { deleteAfter?: boolean; sketch?: boolean } = {},
+): Promise<string> {
+  const sketch = opts.sketch === true;
+  if (!sketch && !isMosaicSurface()) return 'Mosaic clip deferred: Mosaic surface is not active';
+  const selection = await readMosaicSidecar(sketch ? MOSAIC_SKETCH_LASSO_FILE : MOSAIC_LASSO_FILE);
   const strokes = selection?.strokes;
-  if (!strokes) { NativeUIUtils.showErrorTipDialog(t('clip_err_read_failed')); return 'Mosaic clip empty'; }
+  if (!strokes) { HostDialog.tip(t('clip_err_read_failed')); return 'Mosaic clip empty'; }
+  const skippedCards = selection?.skippedCards ?? 0;
+  if (strokes.length === 0) {
+    HostDialog.tip(t('clip_err_card'));
+    return `Save clip ${slot} failed: only Mosaic cards selected`;
+  }
   await ensureStickerDir();
 
   const existingClips = await loadClips();
@@ -1192,15 +1330,16 @@ async function mosaicClipSave(slot: string, opts: { deleteAfter?: boolean } = {}
   const path = `${STICKER_DIR}/quickbar_clip_${slot}_${Date.now()}.sticker`;
 
   if (oldPath && await getRNFS()?.exists(oldPath).catch(() => false)) {
-    const confirmed = await NativeUIUtils.showRattaDialog(
+    const confirmed = await HostDialog.confirm(
       t('clip_overwrite'), t('btn_cancel'), t('btn_confirm'), false,
     ).catch(() => true);
     if (!confirmed) return `Clip ${slot} overwrite cancelled`;
   }
 
-  const pageSize = await currentNotePageSize();
+  const pageSize = await currentNotePageSize()
+    ?? (sketch ? sketchFallbackPageSize(selection?.screenShortPx) : null);
   if (!pageSize) {
-    NativeUIUtils.showErrorTipDialog(t('clip_save_failed'));
+    HostDialog.tip(t('clip_save_failed'));
     return `Save clip ${slot} failed (page size unavailable)`;
   }
   const runtimeDeviceType = await PluginManager.getDeviceType();
@@ -1213,98 +1352,116 @@ async function mosaicClipSave(slot: string, opts: { deleteAfter?: boolean } = {}
     'runtimeDeviceType=', runtimeDeviceType,
     'source pageSize=', `${pageSize.width}x${pageSize.height}`);
 
-  
-  
   const convertRes: any = await convertStickerWithPreparedContours(elements, {
     path, pageWidth: pageSize.width, pageHeight: pageSize.height,
     machineType: deviceType, runtimeDeviceType,
   });
   if (!convertRes?.success || convertRes.result === false) {
-    NativeUIUtils.showErrorTipDialog(t('clip_save_failed'));
+    HostDialog.tip(t('clip_save_failed'));
     return `Save clip ${slot} failed`;
   }
 
-  
   await writeMosaicSidecar(path, strokes, pageSize, 'mosaic-px', selection?.screenShortPx);
-  if (oldPath) {
-    try { await FileUtils.deleteFile(oldPath); } catch (_) {}
-    try { await FileUtils.deleteFile(oldPath + '.mosaic.json'); } catch (_) {}
-    try { await FileUtils.deleteFile(oldPath + '.meta.json'); } catch (_) {}
-  }
+  if (oldPath) await deleteClipFiles(oldPath);
   const clips = await loadClips(); clips[slot] = path; await saveClips(clips);
-  if (isMosaicInkSurface()) requestMosaicClearSelection(opts.deleteAfter === true);
+
+  if (!sketch && isMosaicSurface()) requestMosaicClearSelection(opts.deleteAfter === true);
+  if (skippedCards > 0) {
+    HostDialog.tip(t('clip_saved_with_skipped', { skipped: clipboardSkipLabels(['card']) }));
+  }
   return `Saved to clip ${slot}`;
 }
 
-
-async function mosaicClipPaste(slot: string): Promise<string> {
-  if (!isMosaicInkSurface()) return 'Mosaic paste deferred: Mosaic surface is not active';
+async function mosaicClipPaste(slot: string, opts: { sketch?: boolean } = {}): Promise<string> {
+  const sketch = opts.sketch === true;
+  if (!sketch && !isMosaicSurface()) return 'Mosaic paste deferred: Mosaic surface is not active';
   const clips = await loadClips();
   const stored = clips[slot];
   if (!stored) {
     console.warn('[MOSAIC-CLIP] paste slot=', slot, 'empty clips=', JSON.stringify(clips));
-    NativeUIUtils.showErrorTipDialog(t('clip_empty_hint'));
+    HostDialog.tip(t('clip_empty_hint'));
     return 'Clip empty';
   }
   const stickerPath = stored.startsWith('/') ? stored : `${STICKER_DIR}/${stored}`;
   const RNFS = getRNFS();
   if (!RNFS) return `Paste clip ${slot} failed (no fs)`;
 
+  if ((await readClipMeta(stickerPath))?.hasLinks === true) {
+    HostDialog.tip(t('clip_links_note_only'));
+    return `Paste clip ${slot} refused: links paste into notes only`;
+  }
+
   const pending = pendingMosaicSidecars.get(stickerPath);
-  if (pending) await pending.catch(() => {});
+  if (pending) await pending;
 
   const sidecarPath = `${stickerPath}.mosaic.json`;
   const sidecar = await readMosaicSidecar(sidecarPath);
-  const strokes = sidecar?.strokes;
+  const strokes = sidecar?.strokes?.length ? sidecar.strokes : null;
+  const clipCards = await readClipCards(stickerPath);
+  const cards = clipCards?.cards ?? [];
   console.log('[MOSAIC-CLIP] paste slot=', slot, 'sticker=', stickerPath,
     'stickerExists=', await RNFS.exists(stickerPath).catch(() => false),
     'sidecarExists=', await RNFS.exists(sidecarPath).catch(() => false),
     'waitedPending=', !!pending, 'strokes=', strokes?.length ?? 0,
+    'cards=', cards.length,
     'coordinateSpace=', sidecar?.coordinateSpace ?? null,
     'sdkPenTypes=', JSON.stringify(Object.fromEntries((strokes ?? []).reduce((m: Map<number, number>, s: any) =>
       m.set(Number(s?.sdkPenType), (m.get(Number(s?.sdkPenType)) ?? 0) + 1), new Map<number, number>()))));
-  if (!sidecar || !strokes) {
-    NativeUIUtils.showErrorTipDialog(t('clip_err_read_failed'));
+  if ((!sidecar || !strokes) && cards.length === 0) {
+    HostDialog.tip(t('clip_err_read_failed'));
     return `Paste clip ${slot} failed (no mosaic sidecar)`;
   }
   try {
-    await RNFS.mkdir(MOSAIC_CLIP_DIR).catch(() => {});
-    
-    const pageSize = sidecar?.pageSize;
-    await RNFS.writeFile(MOSAIC_PASTE_FILE, JSON.stringify({
-      v: 2, ...(pageSize ? { pageSize } : {}), coordinateSpace: sidecar.coordinateSpace,
-      ...(sidecar.screenShortPx ? { screenShortPx: sidecar.screenShortPx } : {}), strokes,
+    await RNFS.mkdir(MOSAIC_HANDOFF_DIR).catch(() => {});
+
+    const pageSize = sidecar?.pageSize ?? clipCards?.pageSize;
+    const coordinateSpace = sidecar?.coordinateSpace ?? 'note-page-px';
+    if (cards.length > 0 && coordinateSpace !== 'note-page-px') {
+      console.warn('[MOSAIC-CLIP] clip cards dropped: strokes are not in note page pixels', coordinateSpace);
+    }
+    const pasteCards = coordinateSpace === 'note-page-px'
+      ? cards.map(card => card.kind === 'image'
+        ? { kind: 'image', left: card.left, top: card.top, right: card.right, bottom: card.bottom,
+          path: `${stickerPath}${card.file}` }
+        : card)
+      : [];
+    await RNFS.writeFile(sketch ? MOSAIC_SKETCH_PASTE_FILE : MOSAIC_PASTE_FILE, JSON.stringify({
+      v: 3, ...(pageSize ? { pageSize } : {}), coordinateSpace,
+      ...(sidecar?.screenShortPx ? { screenShortPx: sidecar.screenShortPx } : {}),
+      strokes: strokes ?? [], cards: pasteCards,
     }), 'utf8');
   } catch (e) {
     console.warn('[MOSAIC-CLIP] write paste file failed', e);
     return `Paste clip ${slot} failed`;
   }
-  if (!isMosaicInkSurface()) return `Paste clip ${slot} deferred: Mosaic surface is not active`;
-  try { (FloatingToolbar as any)?.requestMosaicPasteStrokes?.(); } catch (e) { console.warn('[MOSAIC-CLIP] broadcast failed', e); }
+  if (sketch) return `Pasted clip ${slot} to Mosaic`;
+  if (!isMosaicSurface()) return `Paste clip ${slot} deferred: Mosaic surface is not active`;
+  try { FloatingToolbar?.requestMosaicPasteStrokes?.(); } catch (e) { console.warn('[MOSAIC-CLIP] broadcast failed', e); }
   return `Pasted clip ${slot} to Mosaic`;
+}
+
+function showUseLassoMenuTip(): string {
+  HostDialog.tip(t('clip_use_lasso_menu'));
+  return 'Clip save moved to lasso menu';
 }
 
 async function clipSmartAction(slot: string): Promise<string> {
   if (_clipBusy) return 'Clip busy';
   _clipBusy = true;
   try {
-    
-    if (isMosaicInkSurface()) {
+
+    if (isMosaicSurface()) {
       const hasSel = (await readMosaicStrokesFile(MOSAIC_LASSO_FILE)) != null;
       console.log('[MOSAIC-CLIP] smart action slot=', slot, 'surface=', FloatingToolbarBridge.getMosaicSurface(),
         'lassoFile=', hasSel ? 'present' : 'absent', '=>', hasSel ? 'save' : 'paste');
       return hasSel ? await mosaicClipSave(slot) : await mosaicClipPaste(slot);
     }
 
-    
-    
-    const hasHostLasso = await (FloatingToolbar as any).hasHostLasso();
+    const hasHostLasso = await FloatingToolbar.hasHostLasso();
     if (!hasHostLasso) return await clipPasteSticker(slot);
 
-    
-    const saveResult = await clipSave(slot);
-    if (saveResult === '__NO_LASSO__') return await clipPasteSticker(slot);
-    return saveResult;
+    if (!await hasLassoSelection()) return await clipPasteSticker(slot);
+    return showUseLassoMenuTip();
   } finally {
     _clipBusy = false;
   }
@@ -1327,7 +1484,447 @@ async function saveNoteClipboardSticker(elements: any[], context: {
   }
 }
 
-async function clipSave(slot: string): Promise<string> {
+const HOST_LASSO_CLIP_SOURCE = 'host-lasso';
+let lassoMenuClipBusy = false;
+
+function clipFiles(stickerPath: string): string[] {
+  return [stickerPath, `${stickerPath}.meta.json`, `${stickerPath}.mosaic.json`, `${stickerPath}.png`,
+    `${stickerPath}${CLIP_CARDS_SUFFIX}`];
+}
+
+async function deleteClipFiles(stickerPath: string): Promise<void> {
+  const cards = await readClipCards(stickerPath);
+  const images = (cards?.cards ?? []).flatMap(card => card.kind === 'image' ? [`${stickerPath}${card.file}`] : []);
+  for (const file of [...images, ...clipFiles(stickerPath)]) {
+    try { await FileUtils.deleteFile(file); } catch (_) {}
+  }
+}
+
+const CLIP_CARDS_SUFFIX = '.cards.json';
+type ClipCardRect = { left: number; top: number; right: number; bottom: number };
+type ClipCard =
+  | (ClipCardRect & { kind: 'text'; text: string; fontSize: number; bold: boolean; italic: boolean })
+  | (ClipCardRect & { kind: 'image'; file: string });
+type ClipCards = { pageSize: { width: number; height: number } | null; cards: ClipCard[] };
+
+function clipCardRect(rect: any): ClipCardRect | null {
+  const left = Number(rect?.left); const top = Number(rect?.top);
+  const right = Number(rect?.right); const bottom = Number(rect?.bottom);
+  if (![left, top, right, bottom].every(Number.isFinite) || right <= left || bottom <= top) return null;
+  return { left, top, right, bottom };
+}
+
+async function readClipCards(stickerPath: string): Promise<ClipCards | null> {
+  try {
+    const RNFS = getRNFS();
+    const path = `${stickerPath}${CLIP_CARDS_SUFFIX}`;
+    if (!RNFS || !(await RNFS.exists(path))) return null;
+    const json = JSON.parse(await RNFS.readFile(path, 'utf8'));
+    const cards: ClipCard[] = [];
+    for (const card of Array.isArray(json?.cards) ? json.cards : []) {
+      const rect = clipCardRect(card);
+      if (!rect) continue;
+      if (card.kind === 'text' && typeof card.text === 'string' && card.text) {
+        cards.push({ ...rect, kind: 'text', text: card.text, fontSize: Number(card.fontSize) || 0,
+          bold: card.bold === true, italic: card.italic === true });
+      } else if (card.kind === 'image' && typeof card.file === 'string' && card.file) {
+        cards.push({ ...rect, kind: 'image', file: card.file });
+      }
+    }
+    const width = Number(json?.pageSize?.width); const height = Number(json?.pageSize?.height);
+    return { pageSize: width > 0 && height > 0 ? { width, height } : null, cards };
+  } catch (error) {
+    console.warn('[MOSAIC-CLIP] read clip cards failed', stickerPath, error);
+    return null;
+  }
+}
+
+async function exportClipCards(
+  stickerPath: string, elements: any[], pageSize: { width: number; height: number } | null,
+): Promise<void> {
+  const RNFS = getRNFS();
+  if (!RNFS) return;
+
+  const ordered: (ClipCard | null)[] = [];
+  const uncopied: { index: number; rect: ClipCardRect }[] = [];
+  let images = 0;
+  for (const el of elements) {
+    const type = Number(el?.type);
+    if (type === PICTURE_ELEMENT_TYPE) {
+      const source = el.picture?.picturePath;
+      const rect = clipCardRect(el.picture?.rect);
+      if (!rect) {
+        console.warn('[MOSAIC-CLIP] clip picture skipped path=', source, 'rect=', JSON.stringify(el.picture?.rect));
+        continue;
+      }
+      const ext = typeof source === 'string' ? /\.(png|jpe?g)$/i.exec(source)?.[0]?.toLowerCase() ?? '.png' : '.png';
+      const file = `.img${images++}${ext}`;
+      try {
+        if (typeof source !== 'string' || !source) throw new Error('no picturePath');
+        await RNFS.copyFile(source, `${stickerPath}${file}`);
+        ordered.push({ ...rect, kind: 'image', file });
+      } catch (error) {
+
+        console.warn('[MOSAIC-CLIP] copy clip picture failed', source, error);
+        uncopied.push({ index: ordered.length, rect });
+        ordered.push(null);
+      }
+    } else if (type === 500 || type === 501 || type === 502) {
+      const box = el.textBox;
+      const label = box?.textContentFull;
+      const rect = clipCardRect(box?.textRect);
+      if (typeof label !== 'string' || !label.trim() || !rect) continue;
+
+      const text = type === 502 ? `[ ${label} ]` : label;
+      const fontSize = Number(box.fontSize);
+      ordered.push({ ...rect, kind: 'text', text, fontSize: Number.isFinite(fontSize) && fontSize > 0 ? fontSize : 0,
+        bold: box.textBold === 1, italic: box.textItalics === 1 });
+    }
+  }
+  if (uncopied.length > 0) {
+    const files = await cropClipPictures(stickerPath, elements, uncopied.map(u => u.rect));
+    uncopied.forEach((u, i) => {
+      const file = files[i];
+      if (file) ordered[u.index] = { ...u.rect, kind: 'image', file };
+    });
+  }
+  const cards = ordered.filter((card): card is ClipCard => card !== null);
+  console.log('[MOSAIC-CLIP] clip cards=', cards.length,
+    'rects=', JSON.stringify(cards.map(card => [card.kind, card.left, card.top, card.right, card.bottom])),
+    'pageSize=', pageSize ? `${pageSize.width}x${pageSize.height}` : null);
+  if (cards.length === 0) return;
+  await RNFS.writeFile(`${stickerPath}${CLIP_CARDS_SUFFIX}`, JSON.stringify({ v: 1, pageSize, cards }), 'utf8');
+}
+
+async function cropClipPictures(stickerPath: string, elements: any[], rects: ClipCardRect[]): Promise<(string | null)[]> {
+  const none = rects.map(() => null);
+  const crop = NativeModules.InklingImageUtil?.cropRegion;
+  if (typeof crop !== 'function') return none;
+  let sw = 0; let sh = 0;
+  try {
+    const size: any = await PluginCommAPI.getStickerSize(stickerPath);
+    sw = Number(size?.result?.width); sh = Number(size?.result?.height);
+  } catch (error) {
+    console.warn('[MOSAIC-CLIP] sticker size for picture crop failed', error);
+  }
+  if (!(sw > 0) || !(sh > 0)) return none;
+
+  const frames: { name: string; rect: ClipCardRect }[] = [];
+  const boxes = elements.flatMap(el => {
+    const type = Number(el?.type);
+    if (type === PICTURE_ELEMENT_TYPE) return [clipCardRect(el.picture?.rect)];
+    if (type === 500 || type === 501 || type === 502) return [clipCardRect(el.textBox?.textRect)];
+    return [undefined];
+  });
+  if (boxes.length > 0 && boxes.every(Boolean)) {
+    const all = boxes as ClipCardRect[];
+    frames.push({ name: 'cards', rect: {
+      left: Math.min(...all.map(r => r.left)), top: Math.min(...all.map(r => r.top)),
+      right: Math.max(...all.map(r => r.right)), bottom: Math.max(...all.map(r => r.bottom)),
+    } });
+  }
+  try {
+    const lasso = clipCardRect((await PluginCommAPI.getLassoRect() as any)?.result);
+    if (lasso) frames.push({ name: 'lasso', rect: lasso });
+  } catch (_) {}
+  const aspect = sw / sh;
+  const frame = frames.find(f => {
+    const ratio = ((f.rect.right - f.rect.left) / (f.rect.bottom - f.rect.top)) / aspect;
+    return Math.abs(ratio - 1) < 0.03;
+  });
+  if (!frame) {
+    console.warn('[MOSAIC-CLIP] clip picture crop skipped: no frame matches sticker', `${sw}x${sh}`,
+      'frames=', JSON.stringify(frames));
+    return none;
+  }
+
+  const render = `${stickerPath}.render.png`;
+  try {
+    const res: any = await PluginCommAPI.generateStickerThumbnail(stickerPath, render, { width: sw, height: sh });
+    if (!res?.success || res.result === false) {
+      console.warn('[MOSAIC-CLIP] clip picture crop skipped: sticker render failed', JSON.stringify(res?.error ?? null));
+      return none;
+    }
+    const fw = frame.rect.right - frame.rect.left;
+    const fh = frame.rect.bottom - frame.rect.top;
+    const files: (string | null)[] = [];
+    for (let i = 0; i < rects.length; i++) {
+      const rect = rects[i];
+      const file = `.crop${i}.png`;
+      try {
+        await crop(render, fw, fh, rect.left - frame.rect.left, rect.top - frame.rect.top,
+          rect.right - frame.rect.left, rect.bottom - frame.rect.top, `${stickerPath}${file}`);
+        files.push(file);
+      } catch (error) {
+        console.warn('[MOSAIC-CLIP] clip picture crop failed rect=', JSON.stringify(rect), error);
+        files.push(null);
+      }
+    }
+    console.log('[MOSAIC-CLIP] clip pictures cropped from sticker frame=', frame.name, JSON.stringify(frame.rect),
+      'sticker=', `${sw}x${sh}`, 'ok=', files.filter(Boolean).length, '/', rects.length);
+    return files;
+  } catch (error) {
+    console.warn('[MOSAIC-CLIP] clip picture crop failed', error);
+    return none;
+  } finally {
+    try { await FileUtils.deleteFile(render); } catch (_) {}
+  }
+}
+
+async function readClipMeta(stickerPath: string): Promise<any | null> {
+  try {
+    let text = await FloatingToolbarBridge.readTextFile(`${stickerPath}.meta.json`);
+    if (text === undefined) {
+      const RNFS = getRNFS();
+      const metaPath = `${stickerPath}.meta.json`;
+      text = RNFS && await RNFS.exists(metaPath) ? await RNFS.readFile(metaPath, 'utf8') : null;
+    }
+    return text ? JSON.parse(text) : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function isHostLassoClip(stickerPath: string): Promise<boolean> {
+  return (await readClipMeta(stickerPath))?.source === HOST_LASSO_CLIP_SOURCE;
+}
+
+async function ensureClipThumbnail(stickerPath: string): Promise<string | null> {
+  const thumb = `${stickerPath}.png`;
+  const RNFS = getRNFS();
+  try {
+    if (RNFS && await RNFS.exists(thumb)) return thumb;
+    if (RNFS && !(await RNFS.exists(stickerPath))) return null;
+    const size: any = await PluginCommAPI.getStickerSize(stickerPath);
+    const width = Number(size?.result?.width);
+    const height = Number(size?.result?.height);
+    if (!size?.success || !(width > 0) || !(height > 0)) return null;
+    const res: any = await PluginCommAPI.generateStickerThumbnail(stickerPath, thumb, { width, height });
+    return res?.success && res.result !== false ? thumb : null;
+  } catch (error) {
+    console.warn('[CLIP-DBG] clip thumbnail failed', stickerPath, error);
+    return null;
+  }
+}
+
+async function exportHostClipSidecar(stickerPath: string): Promise<void> {
+  let elements: any[] = [];
+  try {
+    const res: any = await PluginCommAPI.getLassoElements();
+    elements = res?.success && Array.isArray(res.result) ? res.result : [];
+    const pageSize = await currentNotePageSize();
+    await exportClipCards(stickerPath, elements, pageSize).catch(error => {
+      console.warn('[MOSAIC-CLIP] clip cards export failed', error);
+    });
+    const strokes = elements.filter(el => Number(el?.type) === 0);
+    const uuids = strokes.map(el => el?.uuid).filter((u: any) => typeof u === 'string' && u.length > 0);
+    if (!pageSize || uuids.length === 0 || uuids.length !== strokes.length) {
+      console.log('[MOSAIC-CLIP] host clip sidecar skipped strokes=', strokes.length, 'uuids=', uuids.length);
+      return;
+    }
+    const result: any = await FloatingToolbar.exportClipboardSidecar(
+      stickerPath, uuids, pageSize.width, pageSize.height, null, null,
+    );
+    if (Number(result?.count) !== strokes.length) {
+      console.warn('[MOSAIC-CLIP] host clip sidecar incomplete expected=', strokes.length, 'actual=', result?.count);
+      try { await FileUtils.deleteFile(`${stickerPath}.mosaic.json`); } catch (_) {}
+    }
+  } catch (error) {
+    console.warn('[MOSAIC-CLIP] host clip sidecar failed', error);
+    try { await FileUtils.deleteFile(`${stickerPath}.mosaic.json`); } catch (_) {}
+  } finally {
+    recycleElements(elements);
+  }
+}
+
+type HostClipPlacement = {
+  pageSize: { width: number; height: number };
+  rect: StickerPlacementMetadata['sourceRect'];
+};
+
+async function captureHostClipPlacement(): Promise<HostClipPlacement | null> {
+  try {
+    const pageSize = await currentNotePageSize();
+    if (!pageSize) return null;
+    const lr: any = await PluginCommAPI.getLassoRect();
+    const r = lr?.success ? lr.result : null;
+    if (!validStickerPlacementRect(r)) return null;
+    const rect = { left: Number(r.left), top: Number(r.top), right: Number(r.right), bottom: Number(r.bottom) };
+    console.log('[CLIP-DBG] host clip placement', `${pageSize.width}x${pageSize.height}`, JSON.stringify(rect));
+    return { pageSize, rect };
+  } catch (error) {
+    console.warn('[CLIP-DBG] host clip placement unavailable', error);
+    return null;
+  }
+}
+
+async function commitHostClip(
+  slot: string, pendingPath: string,
+  content: { inkOnly: boolean | null; hasLinks: boolean | null },
+  placement: HostClipPlacement | null,
+): Promise<boolean> {
+  const RNFS = getRNFS();
+  if (!RNFS) return false;
+  const finalPath = `${STICKER_DIR}/quickbar_clip_${slot}_${Date.now()}.sticker`;
+  await RNFS.moveFile(pendingPath, finalPath);
+  if (await RNFS.exists(`${pendingPath}.mosaic.json`)) {
+    await RNFS.moveFile(`${pendingPath}.mosaic.json`, `${finalPath}.mosaic.json`);
+  }
+  const cards = await readClipCards(pendingPath);
+  if (cards) {
+    for (const card of cards.cards) {
+      if (card.kind === 'image') await RNFS.moveFile(`${pendingPath}${card.file}`, `${finalPath}${card.file}`);
+    }
+    await RNFS.moveFile(`${pendingPath}${CLIP_CARDS_SUFFIX}`, `${finalPath}${CLIP_CARDS_SUFFIX}`);
+  }
+
+  try { await FileUtils.deleteFile(`${pendingPath}.meta.json`); } catch (_) {}
+
+  const { inkOnly, hasLinks } = content;
+  await RNFS.writeFile(`${finalPath}.meta.json`, JSON.stringify({
+    v: 2, source: HOST_LASSO_CLIP_SOURCE, ...(inkOnly === null ? {} : { inkOnly }),
+    ...(hasLinks === null ? {} : { hasLinks }),
+    ...(placement ? { sourcePageSize: placement.pageSize, sourceRect: placement.rect } : {}),
+  }), 'utf8');
+  const clips = await loadClips();
+  const oldPath = clips[slot];
+  if (oldPath && oldPath !== finalPath) await deleteClipFiles(oldPath);
+  clips[slot] = finalPath;
+  await saveClips(clips);
+  await ensureClipThumbnail(finalPath);
+  console.log('[CLIP-DBG] host lasso clip committed slot=', slot, 'path=', finalPath);
+  return true;
+}
+
+export async function saveClipFromLassoMenu(): Promise<string> {
+  if (lassoMenuClipBusy) return 'Clip busy';
+  lassoMenuClipBusy = true;
+  const pendingPath = `${STICKER_DIR}/pending_clip_${Date.now()}.sticker`;
+  let pendingUsed = false;
+  try {
+    await ensureStickerDir();
+    const startedAt = Date.now();
+    let hostSaved = false;
+    try {
+      const res: any = await PluginCommAPI.saveStickerByLasso(pendingPath);
+      hostSaved = res?.success === true && res.result === true;
+      console.log('[CLIP-DBG] lasso menu saveStickerByLasso success=', res?.success, 'result=', res?.result,
+        'error=', JSON.stringify(res?.error ?? null), 'elapsedMs=', Date.now() - startedAt);
+    } catch (error) {
+      console.warn('[CLIP-DBG] lasso menu saveStickerByLasso threw', error);
+    }
+
+    let inkOnly: boolean | null = null;
+    let hasLinks: boolean | null = null;
+    let placement: HostClipPlacement | null = null;
+    if (hostSaved) {
+      placement = await captureHostClipPlacement();
+      let kinds: ClipboardSkipKind[] | null = null;
+      try {
+        const counts: any = await PluginCommAPI.getLassoElementTypeCounts?.();
+        if (counts?.success !== false && counts?.result) kinds = clipboardSkipKindsFromCounts(counts.result);
+      } catch (error) {
+        console.warn('[CLIP-DBG] lasso menu type counts unavailable', error);
+      }
+      console.log('[CLIP-DBG] lasso menu clip kinds=', JSON.stringify(kinds));
+      if (kinds?.includes('title')) {
+        HostDialog.tip(clipboardSkipError('title'));
+        return 'Clip save refused: titles selected';
+      }
+      if (kinds) {
+        inkOnly = !kinds.includes('textbox') && !kinds.includes('image');
+        hasLinks = kinds.includes('link');
+      }
+    }
+    const sidecar = hostSaved ? exportHostClipSidecar(pendingPath) : Promise.resolve();
+
+    const slot = await pickClipSlot('save');
+    await sidecar;
+    if (!slot) return 'Clip save cancelled';
+
+    const result = await withClipSlot(slot, async () => {
+      if (hostSaved) {
+        pendingUsed = await commitHostClip(slot, pendingPath, { inkOnly, hasLinks }, placement).catch(error => {
+          console.warn('[CLIP-DBG] host lasso clip commit failed', error);
+          return false;
+        });
+        if (!pendingUsed) {
+          HostDialog.tip(t('clip_save_failed'));
+          return `Save clip ${slot} failed`;
+        }
+        try { await PluginCommAPI.setLassoBoxState(2); } catch (_) {}
+        return `Saved to clip ${slot}`;
+      }
+      const legacy = await clipSave(slot, { confirmOverwrite: false });
+      if (legacy === '__NO_LASSO__' || legacy === '__HOST_NO_PAGE__') {
+        if (legacy === '__NO_LASSO__') HostDialog.tip(t('clip_save_failed'));
+        return `Save clip ${slot} failed`;
+      }
+      return legacy;
+    });
+    await refreshTitleClips();
+    return result;
+  } finally {
+    if (!pendingUsed) await deleteClipFiles(pendingPath);
+    lassoMenuClipBusy = false;
+  }
+}
+
+async function pickClipSlot(mode: 'save' | 'paste'): Promise<string | null> {
+  const clips = await loadClips();
+  const slots = [];
+  for (let n = 1; n <= CLIP_SLOT_COUNT; n++) {
+    const path = clips[String(n)];
+    slots.push({ slot: String(n), filled: !!path, thumb: path ? await ensureClipThumbnail(path) : null });
+  }
+  return FloatingToolbar.showClipSlotPicker(JSON.stringify(slots), mode);
+}
+
+async function openClipManager(): Promise<string> {
+
+  if (isMosaicSurface()) {
+    const hasSel = (await readMosaicStrokesFile(MOSAIC_LASSO_FILE)) != null;
+    console.log('[MOSAIC-CLIP] clip manager selection=', hasSel);
+    const slot = await pickClipSlot(hasSel ? 'save' : 'paste');
+    if (!slot) return hasSel ? 'Clip save cancelled' : 'Clip paste cancelled';
+    return withClipSlot(slot, () => (hasSel ? mosaicClipSave(slot) : mosaicClipPaste(slot)));
+  }
+  const selected = await FloatingToolbar.hasHostLasso() && await hasLassoSelection();
+  console.log('[ToolActions]: clip manager selection=', selected);
+  if (selected) return showUseLassoMenuTip();
+  const slot = await pickClipSlot('paste');
+  if (!slot) return 'Clip paste cancelled';
+  return withClipSlot(slot, () => clipPasteSticker(slot));
+}
+
+function sketchFallbackPageSize(screenShortPx?: number | null): { width: number; height: number } {
+  return screenShortPx && screenShortPx >= 1900 ? { width: 1920, height: 2560 } : { width: 1404, height: 1872 };
+}
+
+export async function openSketchClipManager(selection: boolean): Promise<string> {
+  let outcome = 'none';
+  try {
+    const slot = await pickClipSlot(selection ? 'save' : 'paste');
+    if (slot) {
+      const result = await withClipSlot(slot, () => (selection
+        ? mosaicClipSave(slot, { sketch: true })
+        : mosaicClipPaste(slot, { sketch: true })));
+      console.log('[MOSAIC-CLIP] sketch clip manager selection=', selection, 'slot=', slot, 'result=', result);
+      if (result === `Saved to clip ${slot}`) outcome = 'saved';
+      else if (result === `Pasted clip ${slot} to Mosaic`) outcome = 'paste';
+    }
+  } catch (e) {
+    console.warn('[MOSAIC-CLIP] sketch clip manager failed', e);
+  } finally {
+    try { FloatingToolbar?.finishMosaicSketchClipboard?.(outcome); }
+    catch (e) { console.warn('[MOSAIC-CLIP] sketch clip result not sent', e); }
+  }
+  return outcome;
+}
+
+async function clipSave(
+  slot: string, opts: { confirmOverwrite?: boolean } = {},
+): Promise<string> {
   await ensureStickerDir();
 
   const existingClips = await loadClips();
@@ -1338,11 +1935,7 @@ async function clipSave(slot: string): Promise<string> {
   console.log('[ToolActions]: clipSave slot=', slot, 'path=', path);
 
   const commitSave = async (): Promise<string> => {
-    if (oldPath) {
-      try { await FileUtils.deleteFile(oldPath); } catch (_) {}
-      try { await FileUtils.deleteFile(oldPath + '.meta.json'); } catch (_) {}
-      try { await FileUtils.deleteFile(oldPath + '.mosaic.json'); } catch (_) {}
-    }
+    if (oldPath) await deleteClipFiles(oldPath);
     await PluginCommAPI.setLassoBoxState(2);
     const clips = await loadClips();
     clips[slot] = path;
@@ -1371,6 +1964,12 @@ async function clipSave(slot: string): Promise<string> {
     console.warn('[CLIP-DBG] lasso element read failed', error);
     return null;
   });
+  if (isHostNoPageError(snapshot)) {
+
+    console.warn('[CLIP-DBG] lasso read blocked by host last-page NO_PAGE');
+    HostDialog.tip(t('doc_last_page_lasso'));
+    return '__HOST_NO_PAGE__';
+  }
   if (!snapshot?.success || !Array.isArray(snapshot.result) || snapshot.result.length === 0) {
     return '__NO_LASSO__';
   }
@@ -1378,7 +1977,7 @@ async function clipSave(slot: string): Promise<string> {
   const selectedElements: any[] = snapshot.result;
   let typeCounts: any = null;
   try {
-    const countResponse: any = await (PluginCommAPI as any).getLassoElementTypeCounts?.();
+    const countResponse: any = await PluginCommAPI.getLassoElementTypeCounts?.();
     if (countResponse?.success !== false) typeCounts = countResponse?.result ?? null;
   } catch (error) {
     console.warn('[CLIP-DBG] lasso type counts unavailable', error);
@@ -1397,9 +1996,9 @@ async function clipSave(slot: string): Promise<string> {
     'skipped=', clipboardSkipLabels(allSkippedKinds));
 
   if (convertibleElements.length === 0) {
-    recycleClipboardElements(selectedElements);
+    recycleElements(selectedElements);
     const firstKind = allSkippedKinds[0] ?? 'other';
-    NativeUIUtils.showErrorTipDialog(
+    HostDialog.tip(
       allSkippedKinds.length === 1
         ? clipboardSkipError(firstKind)
         : t('clip_err_unsupported', { types: clipboardSkipLabels(allSkippedKinds) }),
@@ -1408,7 +2007,7 @@ async function clipSave(slot: string): Promise<string> {
   }
 
   if (convertibleElements.length !== selectedElements.length) {
-    recycleClipboardElements(selectedElements.filter(element =>
+    recycleElements(selectedElements.filter(element =>
       !CLIP_CONVERTIBLE_TYPES.has(Number(element?.type)),
     ));
     snapshot.result = convertibleElements;
@@ -1419,7 +2018,7 @@ async function clipSave(slot: string): Promise<string> {
 
   const sourcePageSize = await currentNotePageSize();
   if (!sourcePageSize) {
-    NativeUIUtils.showErrorTipDialog(t('clip_save_failed'));
+    HostDialog.tip(t('clip_save_failed'));
     return `Save clip ${slot} failed (page size unavailable)`;
   }
 
@@ -1446,18 +2045,15 @@ async function clipSave(slot: string): Promise<string> {
     console.warn('[CLIP-DBG] sticker save threw API=', saveApi, error);
   }
   if (!nativeSaved) {
-    NativeUIUtils.showErrorTipDialog(t('clip_save_failed'));
+    HostDialog.tip(t('clip_save_failed'));
     return `Save clip ${slot} failed`;
   }
 
   await writeStickerPlacementMetadata(path, sourcePageSize, sourceLassoRect);
 
-  
-  
-  
   let placementRect = sourceLassoRect;
   try {
-    const observed = await (FloatingToolbar as any)?.getObservedLassoPageRect?.(
+    const observed = await FloatingToolbar?.getObservedLassoPageRect?.(
       sourcePageSize.width, sourcePageSize.height,
     );
     if (validStickerPlacementRect(observed)) {
@@ -1471,10 +2067,8 @@ async function clipSave(slot: string): Promise<string> {
     console.warn('[CLIP-DBG] live resized lasso rect unavailable', error);
   }
 
-  
-  
-  if (oldPath && await getRNFS()?.exists(oldPath).catch(() => false)) {
-    const confirmed = await NativeUIUtils.showRattaDialog(
+  if (opts.confirmOverwrite !== false && oldPath && await getRNFS()?.exists(oldPath).catch(() => false)) {
+    const confirmed = await HostDialog.confirm(
       t('clip_overwrite'), t('btn_cancel'), t('btn_confirm'), false
     ).catch(() => true);
     if (!confirmed) {
@@ -1484,8 +2078,6 @@ async function clipSave(slot: string): Promise<string> {
     }
   }
 
-  
-  
   const sidecarPromise = (async () => {
     if (snapshot?.success && snapshot.result?.length) {
       const reported = await currentNotePageSize();
@@ -1509,18 +2101,16 @@ async function clipSave(slot: string): Promise<string> {
         console.warn('[MOSAIC-CLIP] sidecar discarded path=', path, 'expectedStrokes=', expectedSidecarStrokes,
           '— this clip cannot be pasted into Mosaic');
         await FileUtils.deleteFile(`${path}.mosaic.json`);
-        
-        
+
         await writeStickerPlacementMetadata(path, pageSize, placementRect);
       };
       if (uuids.length === snapshot.result.length) {
         try {
-          const nativeResult = await (FloatingToolbar as any).exportClipboardSidecar(
+          const nativeResult = await FloatingToolbar.exportClipboardSidecar(
             path, uuids, pageSize.width, pageSize.height, sourceLassoRect, placementRect,
           );
           console.log('[CLIP-DBG] native sidecar export=', JSON.stringify(nativeResult));
-          
-          
+
           if (nativeResult?.success !== false &&
               Number(nativeResult?.count) === expectedSidecarStrokes) {
             return;
@@ -1542,9 +2132,7 @@ async function clipSave(slot: string): Promise<string> {
       }
       if (strokes.length) {
         await writeMosaicSidecar(path, strokes, pageSize);
-        
-        
-        
+
         const elementRect = sidecarStrokeRect(strokes, pageSize);
         if (elementRect) {
           await writeStickerPlacementMetadata(path, pageSize, elementRect);
@@ -1563,65 +2151,19 @@ async function clipSave(slot: string): Promise<string> {
   const result = await commitSave();
   console.log('[CLIP-DBG] native sticker committed elapsedMs=', Date.now() - startedAt);
   if (allSkippedKinds.length > 0) {
-    NativeUIUtils.showErrorTipDialog(t('clip_saved_with_skipped', {
+    HostDialog.tip(t('clip_saved_with_skipped', {
       skipped: clipboardSkipLabels(allSkippedKinds),
     }));
   }
   return result;
 }
 
-
-async function lassoContainsPicture(): Promise<boolean> {
-  let elements: any[] = [];
-  try {
-    const rectRes: any = await PluginCommAPI.getLassoRect();
-    const rect = rectRes?.success ? rectRes.result : null;
-    if (!rect || rect.right <= rect.left || rect.bottom <= rect.top) return false;
-
-    const fpRes: any = await PluginCommAPI.getCurrentFilePath();
-    const pgRes: any = await PluginCommAPI.getCurrentPageNum();
-    if (!fpRes?.success || !fpRes.result || !pgRes?.success || pgRes.result == null) return false;
-
-    const psRes: any = await PluginFileAPI.getPageSize(fpRes.result, pgRes.result);
-    const pageW = psRes?.result?.width ?? 0;
-    const pageH = psRes?.result?.height ?? 0;
-    if (!pageW || !pageH) return false;
-
-    const elemRes: any = await PluginFileAPI.getElements(pgRes.result, fpRes.result);
-    elements = elemRes?.success && Array.isArray(elemRes.result) ? elemRes.result : [];
-    for (const el of elements) {
-      if (el?.type !== 200 || !el.picture?.rect) continue; 
-      if (!(el.maxX > 0) || !(el.maxY > 0)) continue;
-      const sx = pageW / el.maxX;
-      const sy = pageH / el.maxY;
-      const p = el.picture.rect;
-      
-      
-      const hit = p.left * sx < rect.right && p.right * sx > rect.left &&
-                  p.top * sy < rect.bottom && p.bottom * sy > rect.top;
-      if (hit) {
-        console.log('[CLIP-DBG] lassoContainsPicture: hit picRect=', JSON.stringify(p),
-          'scale=', sx.toFixed(3), sy.toFixed(3), 'lasso=', JSON.stringify(rect));
-        return true;
-      }
-    }
-  } catch (e) {
-    console.warn('[CLIP-DBG] lassoContainsPicture error:', e);
-  } finally {
-    for (const el of elements) { try { el?.recycle?.(); } catch (_) {} }
-  }
-  return false;
-}
-
-
 function stickerMachineTypeForPageSize(
   pageSize: { width: number; height: number }, fallback: number,
 ): number {
   const shortSide = Math.min(pageSize.width, pageSize.height);
   const longSide = Math.max(pageSize.width, pageSize.height);
-  
-  
-  
+
   if (shortSide === 1404 && longSide === 1872) return 3;
   if (shortSide === 1920 && longSide === 2560) return 5;
   console.log('[CLIP-DBG] sticker machineType fallback=runtime', fallback,
@@ -1629,371 +2171,151 @@ function stickerMachineTypeForPageSize(
   return fallback;
 }
 
-function pickStickerMachineType(
-  deviceType: number, pageSize?: { width: number; height: number },
-): number {
-  const selected = pageSize ? stickerMachineTypeForPageSize(pageSize, deviceType) : deviceType;
-  console.log('[CLIP-DBG] pickStickerMachineType runtime=', deviceType,
-    'selected=', selected, 'pageSize=', pageSize ? `${pageSize.width}x${pageSize.height}` : 'unknown');
-  return selected;
-}
+const CLIP_PASTE_PROGRESS_DELAY_MS = 1500;
+
+type ClipPasteOutcome = { message: string; selection: boolean };
 
 async function clipPasteSticker(slot: string): Promise<string> {
   const clips = await loadClips();
   const stored = clips[slot];
   if (!stored) {
-    NativeUIUtils.showErrorTipDialog(t('clip_empty_hint'));
+    HostDialog.tip(t('clip_empty_hint'));
     return 'Clip empty';
   }
+  const path = stored.startsWith('/') ? stored : `${STICKER_DIR}/${stored}`;
+  if (FloatingToolbarBridge.isDocumentMode()) {
+    const textClip = path.endsWith('.textclip.json');
+    const meta = textClip ? null : await readClipMeta(path);
+    if (meta?.hasLinks === true) {
+      HostDialog.tip(t('clip_links_note_only'));
+      return `Paste clip ${slot} refused: links paste into notes only`;
+    }
 
-  let paths: string[];
-  if (stored.startsWith('/')) {
-
-    paths = [stored];
-  } else {
-
-    paths = [`${STICKER_DIR}/${stored}`];
+    if (textClip || meta?.inkOnly === false) {
+      HostDialog.tip(t('clip_doc_ink_only'));
+      return `Paste clip ${slot} refused: document accepts handwriting only`;
+    }
   }
 
-  for (const path of paths) {
-
-    if (path.endsWith('.textclip.json')) {
-      try {
-        const RNFS = getRNFS();
-        if (!RNFS) return `Paste clip ${slot} failed (no fs)`;
-        const content = await RNFS.readFile(path, 'utf8');
-        const payload = JSON.parse(content);
-        const items: any[] = Array.isArray(payload?.items) ? payload.items : [];
-        if (items.length === 0) {
-          return `Paste clip ${slot} failed (empty textclip)`;
-        }
-        let okAll = true;
-        let unionRect = { left: Infinity, top: Infinity, right: -Infinity, bottom: -Infinity };
-        for (const tb of items) {
-          console.log('[ToolActions] insertText input textRect:', JSON.stringify(tb.textRect));
-          const r: any = await (PluginNoteAPI as any).insertText?.(tb);
-          console.log('[ToolActions] insertText result:', JSON.stringify(r));
-          if (!r?.success) {
-            okAll = false;
-            console.warn('[ToolActions]: insertText failed:', r);
-          } else if (tb.textRect) {
-            unionRect.left = Math.min(unionRect.left, tb.textRect.left);
-            unionRect.top = Math.min(unionRect.top, tb.textRect.top);
-            unionRect.right = Math.max(unionRect.right, tb.textRect.right);
-            unionRect.bottom = Math.max(unionRect.bottom, tb.textRect.bottom);
-          }
-        }
-
-        if (unionRect.left < Infinity) {
-          try {
-            await new Promise(r => setTimeout(r, 500));
-
-            await PluginCommAPI.lassoElements({ left: 0, top: 0, right: 1, bottom: 1 });
-            await new Promise(r => setTimeout(r, 200));
-            const pad = 5;
-            const lassoTarget = {
-              left: unionRect.left - pad, top: unionRect.top - pad,
-              right: unionRect.right + pad, bottom: unionRect.bottom + pad,
-            };
-            console.log('[ToolActions] lassoElements target rect:', JSON.stringify(lassoTarget));
-            const lr: any = await PluginCommAPI.lassoElements(lassoTarget);
-            console.log('[ToolActions] lassoElements result:', JSON.stringify(lr));
-            await (PluginCommAPI as any).setLassoBoxState?.(0);
-          } catch (e) { console.warn('[ToolActions] lassoElements after textclip paste:', e); }
-        }
-
-        return okAll ? `Pasted clip ${slot}` : `Paste clip ${slot} partial`;
-      } catch (e) {
-        console.warn('[ToolActions]: textclip paste error:', e);
-        return `Paste clip ${slot} failed`;
-      }
-    }
-
-    
-    
-    
-    
-    const direct = await pasteNoteFromMosaicSidecar(path);
-    if (direct === 'handled') {
-      return `Pasted clip ${slot}`;
-    }
-    if (direct === 'failed') {
-      console.warn('[CLIP-DBG] direct note sidecar paste failed; trying sticker path');
-    }
-
-    console.log('[CLIP-DBG] clipPaste path=', path);
-    try {
-      const pasteSzRes: any = await PluginCommAPI.getStickerSize(path);
-      console.log('[CLIP-DBG] paste getStickerSize before insert=', JSON.stringify(pasteSzRes));
-    } catch (e) {
-      console.warn('[CLIP-DBG] paste getStickerSize before insert failed:', e);
-    }
-    try {
-      const r = await PluginCommAPI.insertSticker(path);
-      console.log('[CLIP-DBG] insertSticker result:', JSON.stringify(r));
-      if (r.success) {
-        const restored = await restoreInsertedStickerPlacement(path);
-        console.log('[CLIP-DBG] insertSticker placement restored=', restored);
-        notifyStickerInserted();
-        return `Pasted clip ${slot}`;
-      }
-    } catch (e) { console.warn('[CLIP-DBG] insertSticker error:', e); }
-
-    try {
-      const r2 = await PluginCommAPI.insertSticker(path + '.sticker');
-      console.log('[CLIP-DBG] insertSticker(.sticker) result:', JSON.stringify(r2));
-      if (r2.success) {
-        const restored = await restoreInsertedStickerPlacement(path);
-        console.log('[CLIP-DBG] insertSticker(.sticker) placement restored=', restored);
-        notifyStickerInserted();
-        return `Pasted clip ${slot}`;
-      }
-    } catch (e) { console.warn('[CLIP-DBG] insertSticker(.sticker) error:', e); }
-  }
-
-  return `Paste clip ${slot} failed`;
-}
-
-
-
-const ELEMENT_TYPE_PICTURE = 200;
-
-
-async function repairPictureElementPaths(
-  elements: any[], notePath: string, page: number,
-): Promise<string[]> {
-  const RNFS = getRNFS();
-  const broken: any[] = [];
-  for (const el of elements) {
-    if (el?.type !== ELEMENT_TYPE_PICTURE) continue;
-    const p = el.picture?.picturePath;
-    let exists = false;
-    if (p && RNFS) { try { exists = await RNFS.exists(p); } catch (_) {} }
-    if (!exists) broken.push(el);
-  }
-  if (broken.length === 0) return [];
-
-  const tmpFiles: string[] = [];
-  const ts = Date.now();
-  const previewPath = `${STICKER_DIR}/tmp_layer0_${ts}.png`;
-
-  
-  let ok = false;
+  FloatingToolbarBridge.beginPaletteApply();
+  FloatingToolbarBridge.beginBusyProgress('paste', CLIP_PASTE_PROGRESS_DELAY_MS);
+  let selection = false;
   try {
-    const r0: any = await PluginNoteAPI.generateLayerPreviewImage(notePath, page, 0, previewPath);
-    ok = r0?.success === true && r0.result !== false &&
-      (RNFS ? await RNFS.exists(previewPath) : true);
-  } catch (e) { console.warn('[SNAP] layer preview(0) error:', e); }
-  if (!ok) {
-    try {
-      const r1: any = await PluginNoteAPI.generateLayerPreviewImage(notePath, page, -1, previewPath);
-      ok = r1?.success === true && r1.result !== false &&
-        (RNFS ? await RNFS.exists(previewPath) : true);
-    } catch (e) { console.warn('[SNAP] layer preview(-1) error:', e); }
-  }
-  if (!ok) {
-    console.warn('[SNAP] layer preview unavailable, pictures cannot be repaired');
-    return tmpFiles;
-  }
-  tmpFiles.push(previewPath);
-
-  
-  let pageW = 0;
-  let pageH = 0;
-  try {
-    const psRes: any = await PluginFileAPI.getPageSize(notePath, page);
-    if (psRes?.success && psRes.result) {
-      pageW = psRes.result.width;
-      pageH = psRes.result.height;
-    }
-  } catch (_) {}
-
-  for (let i = 0; i < broken.length; i++) {
-    const el = broken[i];
-    const storageRect = el.picture?.rect;
-    if (!storageRect) continue;
-    
-    
-    
-    const maxX = typeof el.maxX === 'number' && el.maxX > 0 ? el.maxX : 0;
-    const maxY = typeof el.maxY === 'number' && el.maxY > 0 ? el.maxY : 0;
-    const sx = pageW > 0 && maxX > 0 ? pageW / maxX : 1;
-    const sy = pageH > 0 && maxY > 0 ? pageH / maxY : 1;
-    const rect = {
-      left: storageRect.left * sx,
-      top: storageRect.top * sy,
-      right: storageRect.right * sx,
-      bottom: storageRect.bottom * sy,
-    };
-    const outPath = `${STICKER_DIR}/tmp_pic_${ts}_${i}.png`;
-    try {
-      await NativeModules.InklingImageUtil.cropRegion(
-        previewPath, pageW, pageH,
-        rect.left, rect.top, rect.right, rect.bottom, outPath,
-      );
-      el.picture.picturePath = outPath;
-      tmpFiles.push(outPath);
-      console.log('[SNAP] picture repaired storage=', JSON.stringify(storageRect),
-        'page=', JSON.stringify(rect), '→', outPath);
-    } catch (e) {
-      console.warn('[SNAP] picture crop failed:', e);
-    }
-  }
-  return tmpFiles;
-}
-
-export async function snapshotCreate(silent = false, flushCurrent = true): Promise<string> {
-  await ensureStickerDir();
-  if (flushCurrent) {
-    
-    
-    await saveCurrentPage('snapshot');
-  }
-
-  const fpRes: any = await PluginCommAPI.getCurrentFilePath();
-  const pgRes: any = await PluginCommAPI.getCurrentPageNum();
-  if (!fpRes?.success || !fpRes.result || !pgRes?.success || pgRes.result == null) {
-    if (!silent) NativeUIUtils.showErrorTipDialog(t('snapshot_create_failed'));
-    return 'Snapshot: no note context';
-  }
-  const notePath: string = fpRes.result;
-  const page: number = pgRes.result;
-
-  const elemRes: any = await PluginFileAPI.getElements(page, notePath);
-  const elements: any[] = elemRes?.success && Array.isArray(elemRes.result) ? elemRes.result : [];
-  if (elements.length === 0) {
-    if (!silent) NativeUIUtils.showErrorTipDialog(t('snapshot_empty_page'));
-    return 'Snapshot: page empty';
-  }
-
-  let tmpFiles: string[] = [];
-  try {
-    const deviceType = await PluginManager.getDeviceType();
-    const pageSizeRes: any = await PluginFileAPI.getPageSize(notePath, page);
-    const sourcePageSize = pageSizeRes?.success && pageSizeRes.result?.width > 0 && pageSizeRes.result?.height > 0
-      ? pageSizeRes.result
-      : null;
-    if (!sourcePageSize) {
-      console.warn('[SNAP] source page size unavailable for sticker conversion');
-      if (!silent) NativeUIUtils.showErrorTipDialog(t('snapshot_create_failed'));
-      return 'Snapshot: page size unavailable';
-    }
-    const machineType = pickStickerMachineType(deviceType, sourcePageSize);
-
-    const ts = Date.now();
-    const stickerPath = `${STICKER_DIR}/quickbar_snapshot_${ts}.sticker`;
-
-    
-    
-    tmpFiles = await repairPictureElementPaths(elements, notePath, page);
-    let convertElements = elements;
-    if (elements.some(el => el?.type === ELEMENT_TYPE_PICTURE)) {
-      const RNFS = getRNFS();
-      const usable: any[] = [];
-      for (const el of elements) {
-        if (el?.type === ELEMENT_TYPE_PICTURE) {
-          const p = el.picture?.picturePath;
-          let exists = false;
-          if (p && RNFS) { try { exists = await RNFS.exists(p); } catch (_) {} }
-          if (!exists) {
-            console.warn('[SNAP] dropping picture with unreadable path:', p);
-            continue;
-          }
-        }
-        usable.push(el);
-      }
-      convertElements = usable;
-    }
-    if (convertElements.length === 0) {
-      if (!silent) NativeUIUtils.showErrorTipDialog(t('snapshot_create_failed'));
-      return 'Snapshot: no convertible elements';
-    }
-
-    console.log('[SNAP] create page=', page, 'elements=', convertElements.length,
-      '(raw=', elements.length, ') machineType=', machineType,
-      'sourcePageSize=', `${sourcePageSize.width}x${sourcePageSize.height}`, 'path=', stickerPath);
-    const convertRes: any = await NativeModules.NativePluginAPI.convertElement2Sticker({
-      machineType,
-      elements: convertElements,
-      stickerPath,
-    });
-    if (!convertRes?.success || convertRes.result === false) {
-      console.warn('[SNAP] convertElement2Sticker FAILED:', JSON.stringify(convertRes));
-      if (!silent) NativeUIUtils.showErrorTipDialog(t('snapshot_create_failed'));
-      return 'Snapshot: convert failed';
-    }
-
-    
-    let thumbPath = `${STICKER_DIR}/quickbar_snapshot_${ts}.png`;
-    try {
-      const pngRes: any = await PluginFileAPI.generateNotePng({
-        notePath, page, times: 1, pngPath: thumbPath, type: 1,
-      });
-      if (!pngRes?.success || pngRes.result === false) {
-        console.warn('[SNAP] generateNotePng failed:', JSON.stringify(pngRes));
-        thumbPath = '';
-      }
-    } catch (e) {
-      console.warn('[SNAP] generateNotePng error:', e);
-      thumbPath = '';
-    }
-
-    const records = await loadSnapshots();
-    records.unshift({
-      id: String(ts),
-      sticker: stickerPath,
-      thumb: thumbPath,
-      note: notePath,
-      page,
-      ts,
-    });
-    const keep = records.slice(0, 3);
-    for (const stale of records.slice(3)) {
-      try { await FileUtils.deleteFile(stale.sticker); } catch (_) {}
-      if (stale.thumb) { try { await FileUtils.deleteFile(stale.thumb); } catch (_) {} }
-    }
-    await saveSnapshots(keep);
-    return 'Snapshot created';
+    const outcome = await pasteClipToPage(slot, path);
+    selection = outcome.selection;
+    return outcome.message;
   } finally {
-    for (const f of tmpFiles) { try { await FileUtils.deleteFile(f); } catch (_) {} }
-    for (const el of elements) { try { el?.recycle?.(); } catch (_) {} }
+    FloatingToolbarBridge.endBusyProgress();
+    FloatingToolbarBridge.parkToolbarForPastedClip(selection);
+    FloatingToolbarBridge.paletteApplyFinished();
   }
 }
 
-export async function snapshotRestore(stickerPath: string): Promise<string> {
-  const RNFS = getRNFS();
-  if (RNFS && !(await RNFS.exists(stickerPath).catch(() => false))) {
-    NativeUIUtils.showErrorTipDialog(t('snapshot_missing'));
-    return 'Snapshot file missing';
+async function pasteClipToPage(slot: string, path: string): Promise<ClipPasteOutcome> {
+  const failed = (message: string): ClipPasteOutcome => ({ message, selection: false });
+
+  if (path.endsWith('.textclip.json')) {
+    try {
+      const RNFS = getRNFS();
+      if (!RNFS) return failed(`Paste clip ${slot} failed (no fs)`);
+      const content = await RNFS.readFile(path, 'utf8');
+      const payload = JSON.parse(content);
+      const items: any[] = Array.isArray(payload?.items) ? payload.items : [];
+      if (items.length === 0) {
+        return failed(`Paste clip ${slot} failed (empty textclip)`);
+      }
+      let okAll = true;
+      let selection = false;
+      let unionRect = { left: Infinity, top: Infinity, right: -Infinity, bottom: -Infinity };
+      for (const tb of items) {
+        console.log('[ToolActions] insertText input textRect:', JSON.stringify(tb.textRect));
+        const r: any = await PluginNoteAPI.insertText?.(tb);
+        console.log('[ToolActions] insertText result:', JSON.stringify(r));
+        if (!r?.success) {
+          okAll = false;
+          console.warn('[ToolActions]: insertText failed:', r);
+        } else if (tb.textRect) {
+          unionRect.left = Math.min(unionRect.left, tb.textRect.left);
+          unionRect.top = Math.min(unionRect.top, tb.textRect.top);
+          unionRect.right = Math.max(unionRect.right, tb.textRect.right);
+          unionRect.bottom = Math.max(unionRect.bottom, tb.textRect.bottom);
+        }
+      }
+
+      if (unionRect.left < Infinity) {
+        try {
+          await new Promise(r => setTimeout(r, 500));
+
+          await PluginCommAPI.lassoElements({ left: 0, top: 0, right: 1, bottom: 1 });
+          await new Promise(r => setTimeout(r, 200));
+          const pad = 5;
+          const lassoTarget = {
+            left: unionRect.left - pad, top: unionRect.top - pad,
+            right: unionRect.right + pad, bottom: unionRect.bottom + pad,
+          };
+          console.log('[ToolActions] lassoElements target rect:', JSON.stringify(lassoTarget));
+          const lr: any = await PluginCommAPI.lassoElements(lassoTarget);
+          console.log('[ToolActions] lassoElements result:', JSON.stringify(lr));
+          selection = lr?.success === true && lr.result === true;
+          await PluginCommAPI.setLassoBoxState?.(0);
+        } catch (e) { console.warn('[ToolActions] lassoElements after textclip paste:', e); }
+      }
+
+      return { message: okAll ? `Pasted clip ${slot}` : `Paste clip ${slot} partial`, selection };
+    } catch (e) {
+      console.warn('[ToolActions]: textclip paste error:', e);
+      return failed(`Paste clip ${slot} failed`);
+    }
   }
-  try { await (PluginCommAPI as any).setLassoBoxState?.(2); } catch (_) {}
+
+  const occupied = startOccupiedCapture('clip-paste');
+  await occupied.ready;
+
+  const direct = await pasteNoteFromMosaicSidecar(path, occupied);
+  if (direct === 'selected' || direct === 'pasted-no-selection') {
+    return { message: `Pasted clip ${slot}`, selection: direct === 'selected' };
+  }
+  if (direct === 'failed') {
+    console.warn('[CLIP-DBG] direct note sidecar paste failed; trying sticker path');
+  }
+
+  console.log('[CLIP-DBG] clipPaste path=', path);
   try {
-    const r: any = await PluginCommAPI.insertSticker(stickerPath);
-    console.log('[SNAP] insertSticker result:', JSON.stringify(r));
-    if (r?.success) { notifyStickerInserted(); return 'Snapshot restored'; }
-  } catch (e) { console.warn('[SNAP] insertSticker error:', e); }
-  NativeUIUtils.showErrorTipDialog(t('snapshot_restore_failed'));
-  return 'Snapshot restore failed';
+    const pasteSzRes = await PluginCommAPI.getStickerSize(path);
+    console.log('[CLIP-DBG] paste getStickerSize before insert=', JSON.stringify(pasteSzRes));
+  } catch (e) {
+    console.warn('[CLIP-DBG] paste getStickerSize before insert failed:', e);
+  }
+
+  try {
+    const r = await PluginCommAPI.insertSticker(path);
+    console.log('[CLIP-DBG] insertSticker result:', JSON.stringify(r));
+    if (r.success) {
+      const restored = await restoreInsertedStickerPlacement(path, occupied);
+      console.log('[CLIP-DBG] insertSticker placement restored=', restored);
+      notifyStickerInserted();
+      return { message: `Pasted clip ${slot}`, selection: true };
+    }
+  } catch (e) { console.warn('[CLIP-DBG] insertSticker error:', e); }
+
+  try {
+    const r2 = await PluginCommAPI.insertSticker(path + '.sticker');
+    console.log('[CLIP-DBG] insertSticker(.sticker) result:', JSON.stringify(r2));
+    if (r2.success) {
+      const restored = await restoreInsertedStickerPlacement(path, occupied);
+      console.log('[CLIP-DBG] insertSticker(.sticker) placement restored=', restored);
+      notifyStickerInserted();
+      return { message: `Pasted clip ${slot}`, selection: true };
+    }
+  } catch (e) { console.warn('[CLIP-DBG] insertSticker(.sticker) error:', e); }
+
+  return failed(`Paste clip ${slot} failed`);
 }
 
-export async function snapshotDelete(id: string): Promise<string> {
-  const records = await loadSnapshots();
-  const target = records.find(r => r.id === id);
-  if (!target) return 'Snapshot not found';
-  try { await FileUtils.deleteFile(target.sticker); } catch (_) {}
-  if (target.thumb) { try { await FileUtils.deleteFile(target.thumb); } catch (_) {} }
-  await saveSnapshots(records.filter(r => r.id !== id));
-  return 'Snapshot deleted';
-}
-
-async function clipClear(slot: string): Promise<string> {
+export async function clipClear(slot: string): Promise<string> {
   const clips = await loadClips();
   const oldPath = clips[slot];
-  if (oldPath) {
-    try { await FileUtils.deleteFile(oldPath); } catch (_) {}
-    try { await FileUtils.deleteFile(oldPath + '.meta.json'); } catch (_) {}
-    try { await FileUtils.deleteFile(oldPath + '.mosaic.json'); } catch (_) {}
-  }
+  if (oldPath) await deleteClipFiles(oldPath);
   clips[slot] = null;
   await saveClips(clips);
   return `Clip ${slot} cleared`;
@@ -2004,18 +2326,18 @@ export interface PaletteLassoInfo {
   strokeCount: number;
   geometryCount: number;
   avgThickness: number;
-  hasMarkerStroke: boolean;
   dominantPenType: number | null;
   dominantPenColor: number | null;
   elements?: any[];
 }
 
-const PEN_TYPE_MARKER = 11;
-
 export async function getPaletteLassoInfo(retainElements?: boolean): Promise<PaletteLassoInfo | null> {
   const t0 = Date.now();
   console.log('[PLT/stats] START');
+
+  _paletteLassoNoPage = false;
   const elemRes = await PluginCommAPI.getLassoElements() as any;
+  _paletteLassoNoPage = isHostNoPageError(elemRes);
   if (!elemRes?.success || !Array.isArray(elemRes.result) || elemRes.result.length === 0) {
     console.log(`[PLT/stats] getLassoElements empty ok=${elemRes?.success} n=${elemRes?.result?.length ?? 0} +${Date.now() - t0}ms`);
     return null;
@@ -2066,7 +2388,6 @@ export async function getPaletteLassoInfo(retainElements?: boolean): Promise<Pal
       strokeCount: strokes.length,
       geometryCount: geoms.length,
       avgThickness,
-      hasMarkerStroke: penTypeCount.has(PEN_TYPE_MARKER),
       dominantPenType: dominant(penTypeCount),
       dominantPenColor: dominant(penColorCount),
     };
@@ -2074,17 +2395,17 @@ export async function getPaletteLassoInfo(retainElements?: boolean): Promise<Pal
       info.elements = els;
       shouldRecycle = false;
     }
-    console.log(`[PLT/stats] result: s=${info.strokeCount} g=${info.geometryCount} avgT=${info.avgThickness} domPT=${info.dominantPenType} domPC=${info.dominantPenColor} marker=${info.hasMarkerStroke} retain=${!!retainElements} +${Date.now() - t0}ms`);
+    console.log(`[PLT/stats] result: s=${info.strokeCount} g=${info.geometryCount} avgT=${info.avgThickness} domPT=${info.dominantPenType} domPC=${info.dominantPenColor} retain=${!!retainElements} +${Date.now() - t0}ms`);
     return info;
   } finally {
     if (shouldRecycle) {
-      for (const el of els) { try { el?.recycle?.(); } catch (_) {} }
+      recycleElements(els);
       console.log(`[PLT/stats] recycled ${els.length} +${Date.now() - t0}ms`);
     }
   }
 }
 
-let modeExitSub: EmitterSubscription | null = null;
+let modeExitSub: Subscription | null = null;
 
 export function attachModeListeners(): void {
   modeExitSub?.remove();

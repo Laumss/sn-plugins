@@ -3,6 +3,7 @@ import { NativeModules, NativeEventEmitter } from 'react-native';
 import { FileLogger } from './FileLogger';
 import { splitTextForHeight } from './TextboxMetrics';
 import { normalizeInsertionLeft } from './InsertionGeometry';
+import type { Subscription } from './FloatingToolbarBridge';
 
 const { FloatingToolbar } = NativeModules;
 
@@ -12,7 +13,14 @@ export type InsertMode = 'nospacing' | 'paragraph';
 
 export type TextSource = 'localsend' | 'broadcast' | 'unknown';
 
-interface QueueItem {
+type AckCallback = (text: string, success: boolean, error: string | null) => void;
+type PositionChangedCallback = (page: number, nextTop: number, source: TextSource, isPageChange: boolean) => void;
+type NoteChangedCallback = (reason: 'note_switched' | 'pages_changed', detail: string) => void;
+type PageWaitChangedCallback = (waiting: boolean, queueLength: number) => void;
+
+export type InsertionAnchor = { top: number; left: number; safeMaxLeft: number };
+
+export interface QueueItem {
   text: string;
   source: TextSource;
 }
@@ -20,10 +28,6 @@ interface QueueItem {
 const TOP_MARGIN_BASE     = 150;
 
 const BASE_PAGE_HEIGHT    = 1872;
-
-
-
-
 
 let _presetNotePath: string | null = null;
 let _presetPageSize: { width: number; height: number } | null = null;
@@ -36,14 +40,9 @@ export function presetPageInfo(notePath: string, size: { width: number; height: 
 
 const FONT_SIZE         = 36;
 
-
-
 const NOTE_RENDER_PAD   = 28;
 
-
-
 const DEVICE_LINE_HEIGHT = 42;
-
 
 const SYSTEM_FONT_WRAP_SAFETY_RATIO = 0.15;
 const SYSTEM_FONT_WRAP_SAFETY_MIN_LINES = 8;
@@ -61,15 +60,10 @@ function systemFontWrapExtraHeight(lineCount: number): number {
   return Math.ceil(lineCount * SYSTEM_FONT_WRAP_SAFETY_RATIO) * DEVICE_LINE_HEIGHT;
 }
 
-
-
 const WIDTH_ADJUSTMENT  = 30;
 const INTERVAL_MS       = 200;
 
 const PEN_SAFE_GAP_MS   = 2000;
-
-
-
 
 const NOTE_FOREGROUND_SETTLE_MS = 1500;
 
@@ -134,12 +128,10 @@ export class TextInserter {
   private _bubbleAnchorTop: number = -1;
   private _bubbleAnchorLeft: number = -1;
 
-  
-  
   private _waitingForPageTap = false;
   private _waitingForPageTurn = false;
 
-  private timerRef: ReturnType<typeof setTimeout> | null = null;
+  private _loopActive = false;
   private activeMode: InsertMode | null = null;
 
   private inserting = false;
@@ -148,35 +140,32 @@ export class TextInserter {
 
   private lastPenUpAt = 0;
 
-  private penUpSub: { remove(): void } | null = null;
+  private penUpSub: Subscription | null = null;
 
   private _paused = false;
   private _scheduleNextDeferred: InsertMode | null = null;
-  private _deferredTimerRef: any = null;
-  private _nativeTickSub: { remove(): void } | null = null;
+  private _deferredTimerRef: ReturnType<typeof setTimeout> | undefined = undefined;
+  private _nativeTickSub: Subscription | null = null;
 
   private _occupiedRanges: OccupiedRange[] = [];
   private _occupiedPage = -1;
 
-  
-  
-  
   private _holdInsertsUntil = 0;
 
   private _expectedTotalPages = -1;
 
-  private onAck?: (text: string, success: boolean, error: string | null) => void;
-  private onPositionChanged?: (page: number, nextTop: number, source: TextSource, isPageChange: boolean) => void;
+  private onAck?: AckCallback;
+  private onPositionChanged?: PositionChangedCallback;
 
-  private onNoteChanged?: (reason: 'note_switched' | 'pages_changed', detail: string) => void;
+  private onNoteChanged?: NoteChangedCallback;
 
-  private onPageWaitChanged?: (waiting: boolean, queueLength: number) => void;
+  private onPageWaitChanged?: PageWaitChangedCallback;
 
   constructor(
-    onAck?: (text: string, success: boolean, error: string | null) => void,
-    onPositionChanged?: (page: number, nextTop: number, source: TextSource, isPageChange: boolean) => void,
-    onNoteChanged?: (reason: 'note_switched' | 'pages_changed', detail: string) => void,
-    onPageWaitChanged?: (waiting: boolean, queueLength: number) => void,
+    onAck?: AckCallback,
+    onPositionChanged?: PositionChangedCallback,
+    onNoteChanged?: NoteChangedCallback,
+    onPageWaitChanged?: PageWaitChangedCallback,
   ) {
     this.onAck = onAck;
     this.onPositionChanged = onPositionChanged;
@@ -190,20 +179,18 @@ export class TextInserter {
   }
 
   enqueue(text: string, source: TextSource = 'unknown') {
-    
-    
+
     text = text.replace(/^#{1,6}\s+/gm, '');
-    
+
     text = text.replace(/^(?:>\s?)+/gm, '');
     this.textQueue.push({ text, source });
 
     if (this.activeMode && !this._paused && !this._waitingForPageTap) this._registerPenUp();
 
     if (this.activeMode && !this.inserting && !this._paused && !this._waitingForPageTap) {
-      if (this.timerRef === null) {
-
+      if (!this._loopActive) {
         console.log('[TextInserter]: waking up from enqueue');
-        this.timerRef = 1 as any;
+        this._loopActive = true;
         this._scheduleNext(this.activeMode);
       } else {
 
@@ -218,7 +205,7 @@ export class TextInserter {
 
   clearQueue() {
     this.textQueue = [];
-    this._waitingForPageTurn = false;
+    this._setWaitingForPageTurn(false);
     this._setWaitingForPageTap(false);
   }
 
@@ -236,7 +223,6 @@ export class TextInserter {
     return out;
   }
 
-  
   isBusy(): boolean {
     return this.inserting;
   }
@@ -246,7 +232,7 @@ export class TextInserter {
   }
 
   hasLiveTimers(): boolean {
-    return this.timerRef !== null || this._waitingForPageTap || this._waitingForPageTurn;
+    return this._loopActive || this._waitingForPageTap || this._waitingForPageTurn;
   }
 
   getMode(): InsertMode | null {
@@ -256,6 +242,7 @@ export class TextInserter {
   pause(): void {
     if (this._paused) return;
     this._paused = true;
+    this._cancelDeferredTick();
     this._unregisterPenUp();
     console.log('[TextInserter]: ⏸ paused (queue len=', this.textQueue.length, ')');
     FileLogger.logEvent('InsertPaused', `queueLen=${this.textQueue.length}`);
@@ -269,8 +256,7 @@ export class TextInserter {
 
     if (this.activeMode && this.textQueue.length > 0) this._registerPenUp();
     if (this.activeMode && !this.inserting) {
-      if (this.timerRef !== null) clearTimeout(this.timerRef as any);
-      this.timerRef = 1 as any;
+      this._loopActive = true;
       this._scheduleNext(this.activeMode);
     }
   }
@@ -288,13 +274,12 @@ export class TextInserter {
     return this._waitingForPageTap;
   }
 
-  
   continueAfterPageTap(): boolean {
     if (!this._waitingForPageTap) return false;
     this._setWaitingForPageTap(false);
     if (this.activeMode && this.textQueue.length > 0 && !this.inserting && !this._paused) {
       this._registerPenUp();
-      this.timerRef = 1 as any;
+      this._loopActive = true;
       this._scheduleNext(this.activeMode);
     }
     return true;
@@ -328,7 +313,6 @@ export class TextInserter {
     this.onPositionChanged?.(this.targetPage, clamped, 'unknown', false);
   }
 
-  
   holdInserts(ms: number) {
     const until = Date.now() + ms;
     if (until > this._holdInsertsUntil) {
@@ -360,8 +344,7 @@ export class TextInserter {
     return geometry.left;
   }
 
-  setNextInsertionAnchor(top: number, left: number, source: string = 'programmatic'):
-      { top: number; left: number; safeMaxLeft: number } {
+  setNextInsertionAnchor(top: number, left: number, source: string = 'programmatic'): InsertionAnchor {
     const clampedTop = Math.max(this._topMargin(), Math.round(top));
     const geometry = this._normalizeNextLeft(left);
     this.pageNextTop.set(this.targetPage, clampedTop);
@@ -407,6 +390,16 @@ export class TextInserter {
     return this.pageSize;
   }
 
+  private _setWaitingForPageTurn(waiting: boolean): void {
+    if (this._waitingForPageTurn === waiting) return;
+    this._waitingForPageTurn = waiting;
+    this.onPageWaitChanged?.(this._waitingForPageTap, this.textQueue.length);
+  }
+
+  isWaitingForPageTurn(): boolean {
+    return this._waitingForPageTurn;
+  }
+
   private _setWaitingForPageTap(waiting: boolean): void {
     if (this._waitingForPageTap === waiting) return;
     this._waitingForPageTap = waiting;
@@ -428,9 +421,8 @@ export class TextInserter {
       console.log('[TextInserter]: auto-resume on switchMode');
     }
 
-    if (this.timerRef !== null) {
-      clearTimeout(this.timerRef as any);
-      this.timerRef = 1 as any;
+    if (this._loopActive) {
+      this._cancelDeferredTick();
       this._scheduleNext(newMode);
     }
 
@@ -474,7 +466,7 @@ export class TextInserter {
     this.lastPenUpAt = 0;
     this.inserting = false;
     this._paused = false;
-    this._waitingForPageTurn = false;
+    this._setWaitingForPageTurn(false);
     this._setWaitingForPageTap(false);
 
     try {
@@ -499,7 +491,7 @@ export class TextInserter {
 
       let psRes: any = null;
       if (_presetNotePath && _presetPageSize && _presetNotePath === this.notePath) {
-        
+
         psRes = { success: true, result: { ..._presetPageSize } };
         console.log('[TextInserter]: pageSize from preset cache →', JSON.stringify(psRes.result));
       } else {
@@ -540,22 +532,19 @@ export class TextInserter {
       console.warn('[TextInserter]: getNoteTotalPageNum failed (non-fatal):', e);
     }
 
-    this.timerRef = 1 as any;
+    this._loopActive = true;
     console.log('[TextInserter]: started, mode=', mode, 'page=', this.currentPage, 'notePath=', this.notePath);
     this._scheduleNext(mode);
     return true;
   }
 
   stop(clearActive = false) {
-    if (this.timerRef) {
-      clearTimeout(this.timerRef as any);
-      this.timerRef = null;
-    }
-    this._stopNativeTick();
+    this._loopActive = false;
+    this._cancelDeferredTick();
     if (clearActive) {
       this.activeMode = null;
       this._paused = false;
-      this._waitingForPageTurn = false;
+      this._setWaitingForPageTurn(false);
       this._setWaitingForPageTap(false);
       this._unregisterPenUp();
     }
@@ -569,11 +558,11 @@ export class TextInserter {
     this._unregisterPenUp();
     try {
       this.penUpSub = PluginManager.registerEventListener('event_pen_up', 1, {
-        onMsg: (_elements: any) => {
+        onMsg: (_elements: unknown) => {
           this.lastPenUpAt = Date.now();
           if (Array.isArray(_elements)) {
             for (const el of _elements) {
-              try { el.recycle?.(); } catch (_) {}
+              el?.recycle?.();
             }
           }
         },
@@ -618,7 +607,7 @@ export class TextInserter {
             }
           } finally {
 
-            try { el.recycle?.(); } catch (_) {}
+            el?.recycle?.();
           }
         }
 
@@ -642,14 +631,18 @@ export class TextInserter {
 
   private async _readBackActualBottom(): Promise<number | null> {
     try {
-      const res = await sdkCall((PluginFileAPI.getLastElement as any)(this.targetPage, this.notePath), 'getLastElement');
+
+      const res = await sdkCall(PluginFileAPI.getLastElement(), 'getLastElement');
       if (res?.success && res.result) {
         const el = res.result;
-
+        if (typeof el.pageNum === 'number' && el.pageNum !== this.targetPage) {
+          el?.recycle?.();
+          return null;
+        }
         const elType = el.type;
         const isTextBox = typeof elType === 'number' && elType >= 500 && elType <= 502;
         const actualBottom = el.textBox?.textRect?.bottom;
-        try { el.recycle?.(); } catch (_) {}
+        el?.recycle?.();
         if (isTextBox && typeof actualBottom === 'number' && actualBottom > 0) {
           return actualBottom;
         }
@@ -671,14 +664,10 @@ export class TextInserter {
       return 'continue';
     }
 
-    
-    
-    
-    
     try {
       const elapsed = FloatingToolbar?.getNoteForegroundElapsedMs?.();
       if (typeof elapsed === 'number' && elapsed < NOTE_FOREGROUND_SETTLE_MS) {
-        return 'continue'; 
+        return 'continue';
       }
     } catch (_) {}
 
@@ -703,33 +692,22 @@ export class TextInserter {
     const rawLines = text.split('\n');
     const rawLineCount = rawLines.length;
     const emptyLineCount = rawLines.filter(l => l.trim().length === 0).length;
-    
+
     text = text.replace(/<t>[\s\S]*?<\/t>\s*/g, '');
-    
+
     text = text.replace(/<t>[^]*$/g, '');
-    
-    
-    
+
     text = text.replace(/^[^]*?<\/t>\s*/g, '');
     text = text.replace(/^(\d+)\./gm, '$1\u200B.');
     text = text.replace(/\*/g, '');
     text = text.replace(/`/g, '');
-    // Prefill placeholder UUIDs \u2014 defense in depth (relay strips them on
-    // closeHead, but streamed/older texts still carry them; tail group may
-    // be truncated mid-stream, hence {1,12}).
+
     text = text.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1,12}/gi, '');
-    // Role turn markers:
-    //   H:/Human: \u2014 the user's handwritten text (already on the page as ink);
-    //             delete the ENTIRE line (marker + content) to avoid duplicate.
-    //   A:/Assistant: \u2014 AI reply; strip the marker only, keep the content.
-    // BLANK is an invisible sentinel that survives the empty-line filter
-    // below and turns back into a real empty line (turn separator) at the
-    // end; leading sentinels (prefill "## H:" opener at text start) are
-    // dropped so the note doesn't begin with a blank line.
+
     const BLANK = '\u2063';
-    // H lines: entire line \u2192 blank sentinel (content discarded)
+
     text = text.replace(/^(?:#{1,3}\s*)?(?:H|Human)\s*[:\uFF1A].*$/gim, BLANK);
-    // A lines: marker stripped, content kept on its own line
+
     text = text.replace(/^(?:#{1,3}\s*)?(?:A|Assistant)\s*[:\uFF1A][ \t]*(.*)$/gim,
       (_, rest) => (rest && rest.trim().length > 0 ? `${BLANK}\n${rest}` : BLANK));
     text = text.split('\n').map(line => {
@@ -747,9 +725,7 @@ export class TextInserter {
       if (/^-{2,}$/.test(t)) return false;
       return true;
     }).join('\n');
-    // Sentinel → real blank line: collapse runs, drop leading/trailing ones
-    // (a prefill "## H:" opener must not indent the note with an empty line),
-    // then the bare sentinel char vanishes leaving "\n\n" = one blank line.
+
     text = text
       .replace(new RegExp(`(?:${BLANK}\\n?)+`, 'g'), `${BLANK}\n`)
       .replace(new RegExp(`^(?:${BLANK}\\n)+`), '')
@@ -802,7 +778,7 @@ export class TextInserter {
             if (isFromQueue) {
               this.textQueue.unshift({ text, source: itemSource });
             }
-            this._waitingForPageTurn = false;
+            this._setWaitingForPageTurn(false);
             this._setWaitingForPageTap(true);
             FileLogger.logEvent('PageTurnReady',
               `page=${this.currentPage} queueLen=${this.textQueue.length}`);
@@ -857,9 +833,7 @@ export class TextInserter {
         let splitLineCount = 0;
 
         try {
-          // Measure at the note's effective wrap width, and reserve the
-          // render pad + emoji allowance so fitting lines still fit the page
-          // after the device's wider emoji wrapping.
+
           const measureWidth = Math.max(24, boxWidth - WIDTH_ADJUSTMENT);
           const availableLineBudget = Math.floor(
             Math.max(0, splitAvailH - NOTE_RENDER_PAD) / DEVICE_LINE_HEIGHT,
@@ -912,8 +886,7 @@ export class TextInserter {
 
         if (splitFitting && splitFitting.trim().length > 0) {
           const fitTop = top;
-          // splitHeight includes StaticLayout's bottom padding; add the
-          // note-render + emoji allowance (same basis as the single-box path).
+
           const fitBottom = Math.min(ps.height,
             fitTop + splitHeight + NOTE_RENDER_PAD + emojiExtraHeight(splitFitting)
               + systemFontWrapExtraHeight(splitLineCount));
@@ -965,11 +938,9 @@ export class TextInserter {
         return 'continue';
       }
 
-      // Page full — do NOT auto-create a new page (that triggers a note save
-      // which breaks undo/redo). Instead pause and let the user decide.
       console.log('[TextInserter]: page full, pausing (remaining queue=', this.textQueue.length, ')');
       FileLogger.logEvent('PageFull', `page=${this.targetPage} queueLen=${this.textQueue.length}`);
-      this._waitingForPageTurn = true;
+      this._setWaitingForPageTurn(true);
       return 'pause';
     }
 
@@ -1043,6 +1014,13 @@ export class TextInserter {
     }
   }
 
+  private _cancelDeferredTick() {
+    clearTimeout(this._deferredTimerRef);
+    this._deferredTimerRef = undefined;
+    this._scheduleNextDeferred = null;
+    this._stopNativeTick();
+  }
+
   private _deferNextTick(mode: InsertMode, delay: number) {
     this._scheduleNextDeferred = mode;
     clearTimeout(this._deferredTimerRef);
@@ -1079,8 +1057,8 @@ export class TextInserter {
   }
 
   private _scheduleNext(mode: InsertMode) {
-    if (this._paused || this._waitingForPageTap || this.timerRef === null || this.textQueue.length === 0) {
-      this.timerRef = null;
+    if (this._paused || this._waitingForPageTap || !this._loopActive || this.textQueue.length === 0) {
+      this._loopActive = false;
 
       this._unregisterPenUp();
       console.log(`[TextInserter]: idle (paused=${this._paused}, queue=${this.textQueue.length})`);
@@ -1101,26 +1079,23 @@ export class TextInserter {
     this._insertParagraph(mode).then(result => {
       this.inserting = false;
 
-      if (result === 'continue' && this.timerRef !== null) {
+      if (result === 'continue' && this._loopActive) {
         if (this.textQueue.length > 0) {
-
-          this.timerRef = 1 as any;
           this._deferNextTick(mode, 50);
         } else {
           this._deferNextTick(mode, INTERVAL_MS);
         }
       } else if (result === 'pause') {
         if (this._waitingForPageTap) {
-          this.timerRef = null;
+          this._loopActive = false;
           this._unregisterPenUp();
           console.log('[TextInserter]: page full, waiting for bubble tap');
         } else {
           console.log('[TextInserter]: waiting for forward page turn');
-          this.timerRef = 1 as any;
           this._deferNextTick(mode, 800);
         }
       } else {
-        this.timerRef = null;
+        this._loopActive = false;
         this.activeMode = null;
         console.log('[TextInserter]: stopped');
       }
@@ -1128,8 +1103,7 @@ export class TextInserter {
       this.inserting = false;
       console.error('[TextInserter]: _scheduleNext unexpected error:', e);
       FileLogger.logEvent('ScheduleError', String(e));
-      if (this.timerRef !== null) {
-        this.timerRef = 1 as any;
+      if (this._loopActive) {
         this._deferNextTick(mode, INTERVAL_MS * 5);
       }
     });
@@ -1138,10 +1112,6 @@ export class TextInserter {
   private async _checkNoteContext(): Promise<boolean> {
     try {
 
-      // 非笔记前台（切到 relay/其他 app）时 getCurrentFilePath 返回的不是本
-      // 笔记路径，不能据此判定"换笔记"——那会误 stop(true) 永久拆掉插入循环，
-      // 切回笔记后队列僵死、需手动点工具栏才恢复。此时交给 _insertParagraph
-      // 的 foreground gate（elapsed<0 → continue）暂停等待即可。
       const fgElapsed = FloatingToolbar?.getNoteForegroundElapsedMs?.();
       const notInNoteApp = typeof fgElapsed === 'number' && fgElapsed < 0;
 

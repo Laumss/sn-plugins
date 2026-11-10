@@ -6,7 +6,6 @@ import me.laumss.notipal.BuildConfig
 import me.laumss.notipal.*
 import me.laumss.notipal.overlays.*
 import me.laumss.notipal.panels.*
-import me.laumss.notipal.ui_common.ScreenScale
 import me.laumss.notipal.ui_common.VectorAssets
 
 import android.content.Context
@@ -17,7 +16,6 @@ import android.util.Log
 import android.view.*
 import android.widget.LinearLayout
 import com.facebook.react.bridge.*
-import com.facebook.react.modules.core.DeviceEventManagerModule
 import kotlin.math.roundToInt
 
 class FloatingBubbleModule(reactContext: ReactApplicationContext) :
@@ -48,9 +46,7 @@ class FloatingBubbleModule(reactContext: ReactApplicationContext) :
         @Volatile @JvmStatic private var screenWidth = 1404
 
         @Volatile @JvmStatic private var stickyY: Int = 56
-        
-        
-        
+
         @Volatile @JvmStatic private var stickyX: Int = 56
 
         @Volatile @JvmStatic private var pendingInitX: Int = -1
@@ -59,31 +55,34 @@ class FloatingBubbleModule(reactContext: ReactApplicationContext) :
         @Volatile @JvmStatic var lastShownText: String = ""
         @Volatile @JvmStatic var lastShownMode: String = ""
 
-        
-        
         @Volatile @JvmStatic private var pendingState: Boolean = false
+        @Volatile @JvmStatic private var pageFullState: Boolean = false
 
         @Volatile @JvmStatic
         private var currentInstance: FloatingBubbleModule? = null
+
+        @JvmStatic private fun detachBubble() {
+
+            Log.i("FloatingBubble", "bubble detached dragging=$isDragging")
+            BubbleWindowSupport.detach(windowManager, bubbleView, "FloatingBubble")
+            bubbleView = null; layoutParams = null
+        }
 
         @JvmStatic fun reshowLast(ctx: ReactApplicationContext, force: Boolean = false) {
             if (lastShownText.isEmpty()) return
             val handler = Handler(Looper.getMainLooper())
             handler.post {
                 if (!FloatingToolbarModule.isInNoteApp()) return@post
-                
-                
+
                 if (FloatingToolbarModule.anyNativeOverlayOwnsScreen()) return@post
-                
+
                 if (isTextReceiverMode(lastShownMode) && FloatingToolbarModule.isDocumentContext()) return@post
                 try {
                     if (bubbleView != null) {
                         if (!force) return@post
                         pendingLongPress?.let { currentInstance?.handler?.removeCallbacks(it) }
                         pendingLongPress = null
-                        bubbleView?.let { FloatingDragRefresh.endNow(it) }
-                        try { windowManager?.removeView(bubbleView) } catch (_: Exception) {}
-                        bubbleView = null; layoutParams = null
+                        detachBubble()
                     }
                     val inst = currentInstance
                         ?: try { ctx.getNativeModule(FloatingBubbleModule::class.java) } catch (_: Exception) { null }
@@ -98,9 +97,7 @@ class FloatingBubbleModule(reactContext: ReactApplicationContext) :
                 if (bubbleView != null) {
                     pendingLongPress?.let { currentInstance?.handler?.removeCallbacks(it) }
                     pendingLongPress = null
-                    bubbleView?.let { FloatingDragRefresh.endNow(it) }
-                    try { windowManager?.removeView(bubbleView) } catch (_: Exception) {}
-                    bubbleView = null; layoutParams = null
+                    detachBubble()
                 }
             }
         }
@@ -109,6 +106,8 @@ class FloatingBubbleModule(reactContext: ReactApplicationContext) :
             lastShownText = ""
             hideStatic()
         }
+
+        @JvmStatic fun isShowing(): Boolean = bubbleView != null
 
         @JvmStatic fun isTextReceiverShowing(): Boolean =
             bubbleView != null && isTextReceiverMode(lastShownMode)
@@ -119,46 +118,45 @@ class FloatingBubbleModule(reactContext: ReactApplicationContext) :
         @JvmStatic fun handleOrientationChange() {
             Handler(Looper.getMainLooper()).post {
                 val inst = currentInstance ?: return@post
-                try {
-                    val dm = inst.reactApplicationContext.resources.displayMetrics
-                    val newW = dm.widthPixels; val newH = dm.heightPixels
-                    if (newW == screenWidth && newH == screenHeight) return@post
-                    screenWidth = newW; screenHeight = newH
-                    val lp = layoutParams ?: return@post
-                    val v = bubbleView ?: return@post
-                    val vh = v.height.takeIf { it > 0 } ?: 60
-                    val vw = v.width.takeIf { it > 0 } ?: currentInstance?.bubbleSizePx() ?: 72
-                    
-                    
-                    lp.x = lp.x.coerceIn(0, (screenWidth - vw).coerceAtLeast(0))
-                    lp.y = clampY(lp.y, vh)
-                    stickyX = lp.x
-                    stickyY = lp.y
-                    try { windowManager?.updateViewLayout(v, lp) } catch (_: Exception) {}
-                } catch (_: Exception) {}
+                val dm = inst.reactApplicationContext.resources.displayMetrics
+                val newW = dm.widthPixels; val newH = dm.heightPixels
+                if (newW == screenWidth && newH == screenHeight) return@post
+                screenWidth = newW; screenHeight = newH
+                val lp = layoutParams ?: return@post
+                val v = bubbleView ?: return@post
+                val vh = v.height.takeIf { it > 0 } ?: 60
+                val vw = v.width.takeIf { it > 0 } ?: currentInstance?.bubbleWidthPx() ?: 72
+
+                lp.x = lp.x.coerceIn(0, (screenWidth - vw).coerceAtLeast(0))
+                lp.y = clampY(lp.y, vh)
+                stickyX = lp.x
+                stickyY = lp.y
+                try { windowManager?.updateViewLayout(v, lp) } catch (_: Exception) {}
             }
         }
 
-        
         @JvmStatic private fun maxBubbleX(bubbleW: Int): Int =
             (screenWidth * 3 / 5 - bubbleW).coerceAtLeast(0)
 
         @JvmStatic private fun clampY(desired: Int, viewH: Int): Int =
             BubbleWindowSupport.clampToBand(screenHeight, desired, viewH)
 
-        
-        
         private const val PROGRAMMATIC_GAP_X_DP = 12
         private const val PROGRAMMATIC_GAP_Y_DP = 12
-        private const val BUBBLE_SIZE_DP = 48
+
+        private const val BUBBLE_W_DP = 56
+        private const val BUBBLE_H_DP = 38
         private const val LONG_PRESS_MS = 650L
     }
 
     private fun bubbleScaleFactor(): Float =
         BubbleWindowSupport.bubbleScale(reactApplicationContext)
 
-    private fun bubbleSizePx(density: Float = reactApplicationContext.resources.displayMetrics.density): Int =
-        (BUBBLE_SIZE_DP * density * bubbleScaleFactor()).roundToInt()
+    private fun bubbleWidthPx(density: Float = reactApplicationContext.resources.displayMetrics.density): Int =
+        (BUBBLE_W_DP * density * bubbleScaleFactor()).roundToInt()
+
+    private fun bubbleHeightPx(density: Float = reactApplicationContext.resources.displayMetrics.density): Int =
+        (BUBBLE_H_DP * density * bubbleScaleFactor()).roundToInt()
 
     @ReactMethod fun remember(text: String, mode: String?) {
         lastShownText = text
@@ -190,11 +188,10 @@ class FloatingBubbleModule(reactContext: ReactApplicationContext) :
                 screenWidth = dm.widthPixels
                 val insertionX = if (pageWidth > 0) (pageX.toFloat() * screenWidth / pageWidth).toInt() else pageX
                 val insertionY = if (pageHeight > 0) (pageY.toFloat() * screenHeight / pageHeight).toInt() else pageY
-                val bubbleSize = bubbleSizePx(dm.density)
                 val gapX = (PROGRAMMATIC_GAP_X_DP * dm.density * bubbleScaleFactor()).roundToInt()
                 val gapY = (PROGRAMMATIC_GAP_Y_DP * dm.density * bubbleScaleFactor()).roundToInt()
-                pendingInitX = insertionX - bubbleSize - gapX
-                pendingInitY = insertionY - bubbleSize - gapY
+                pendingInitX = insertionX - bubbleWidthPx(dm.density) - gapX
+                pendingInitY = insertionY - bubbleHeightPx(dm.density) - gapY
                 if (BuildConfig.ENABLE_DEBUG) Log.i(TAG,
                     "showAt insertionPage=($pageX,$pageY) insertionScreen=($insertionX,$insertionY) " +
                         "visualScreen=($pendingInitX,$pendingInitY) gap=($gapX,$gapY)")
@@ -208,16 +205,14 @@ class FloatingBubbleModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    
     private fun updateBubblePosition(screenX: Int, screenY: Int) {
         val lp = layoutParams ?: return
         val v = bubbleView ?: return
-        val bubbleSize = v.width.takeIf { it > 0 }
-            ?: bubbleSizePx()
+        val bubbleW = v.width.takeIf { it > 0 } ?: bubbleWidthPx()
+        val bubbleH = v.height.takeIf { it > 0 } ?: bubbleHeightPx()
 
-        
-        lp.x = screenX.coerceIn(0, (screenWidth - bubbleSize).coerceAtLeast(0))
-        lp.y = clampY(screenY, bubbleSize)
+        lp.x = screenX.coerceIn(0, (screenWidth - bubbleW).coerceAtLeast(0))
+        lp.y = clampY(screenY, bubbleH)
         stickyX = lp.x
         stickyY = lp.y
 
@@ -233,14 +228,20 @@ class FloatingBubbleModule(reactContext: ReactApplicationContext) :
     @ReactMethod fun hide() {
         lastShownText = ""
         lastShownMode = ""
-        handler.post { try { removeBubble() } catch (e: Exception) { if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "hide: ${e.message}", e) } }
+        handler.post { removeBubble() }
     }
 
-    
     @ReactMethod fun setPending(pending: Boolean) {
         pendingState = pending
         handler.post {
             (bubbleView?.getChildAt(0) as? TextReceiveBubbleView)?.pending = pending
+        }
+    }
+
+    @ReactMethod fun setPageFull(full: Boolean) {
+        pageFullState = full
+        handler.post {
+            (bubbleView?.getChildAt(0) as? TextReceiveBubbleView)?.pageFull = full
         }
     }
 
@@ -249,6 +250,8 @@ class FloatingBubbleModule(reactContext: ReactApplicationContext) :
 
     private fun createBubble(text: String) {
         if (FloatingToolbarModule.areFloatingOverlaysSuspendedForPalette()) return
+
+        if (me.laumss.notipal.panels.RelayInboxPanel.typingSmall()) return
         if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[BUBBLE-DBG] createBubble enter text='$text'")
         val context = reactApplicationContext
         removeBubble()
@@ -258,30 +261,31 @@ class FloatingBubbleModule(reactContext: ReactApplicationContext) :
         screenWidth = dm.widthPixels
         val d = dm.density
         val scaledD = d * bubbleScaleFactor()
-        val bubbleSize = bubbleSizePx(d)
+        val bubbleW = bubbleWidthPx(d)
+        val bubbleH = bubbleHeightPx(d)
 
         val iconView = TextReceiveBubbleView(context, scaledD)
         iconView.pending = pendingState
-        iconView.layoutParams = LinearLayout.LayoutParams(bubbleSize, bubbleSize)
+        iconView.pageFull = pageFullState
+        iconView.layoutParams = LinearLayout.LayoutParams(bubbleW, bubbleH)
 
         bubbleView = TouchSinkLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             addView(iconView)
         }
 
-        layoutParams = BubbleWindowSupport.overlayParams(bubbleSize, bubbleSize).apply {
+        layoutParams = BubbleWindowSupport.overlayParams(bubbleW, bubbleH).apply {
             gravity = Gravity.TOP or Gravity.START
             if (pendingInitX >= 0 && pendingInitY >= 0) {
-                
-                x = pendingInitX.coerceIn(0, (screenWidth - bubbleSize).coerceAtLeast(0))
-                y = clampY(pendingInitY, bubbleSize)
+
+                x = pendingInitX.coerceIn(0, (screenWidth - bubbleW).coerceAtLeast(0))
+                y = clampY(pendingInitY, bubbleH)
                 stickyX = x
                 stickyY = y
             } else {
-                
-                
-                x = stickyX.coerceIn(0, (screenWidth - bubbleSize).coerceAtLeast(0))
-                y = clampY(stickyY, bubbleSize)
+
+                x = stickyX.coerceIn(0, (screenWidth - bubbleW).coerceAtLeast(0))
+                y = clampY(stickyY, bubbleH)
             }
         }
 
@@ -303,6 +307,8 @@ class FloatingBubbleModule(reactContext: ReactApplicationContext) :
             val view = bubbleView ?: return@setOnTouchListener false
             when (ev.action) {
                 MotionEvent.ACTION_DOWN -> {
+                    Log.i(TAG, "bubble touch down finger=${TouchInput.isFinger(ev)} tool=${ev.getToolType(0)} " +
+                        "raw=${ev.rawX.toInt()},${ev.rawY.toInt()} window=${lp.x},${lp.y} ${view.width}x${view.height}")
                     startX = lp.x; startY = lp.y; startRawX = ev.rawX; startRawY = ev.rawY
                     isDragging = false
                     longPressTriggered = false
@@ -317,10 +323,11 @@ class FloatingBubbleModule(reactContext: ReactApplicationContext) :
                 MotionEvent.ACTION_MOVE -> {
                     if (!TouchInput.isFinger(ev)) return@setOnTouchListener true
                     val dx = ev.rawX - startRawX; val dy = ev.rawY - startRawY
-                    if (!isDragging && (Math.abs(dx) > 10 || Math.abs(dy) > 10)) {
+                    if (!isDragging && (Math.abs(dx) > BubbleWindowSupport.DRAG_THRESHOLD_PX || Math.abs(dy) > BubbleWindowSupport.DRAG_THRESHOLD_PX)) {
                         isDragging = true
                         pendingLongPress?.let { handler.removeCallbacks(it) }
                         pendingLongPress = null
+                        Log.i(TAG, "bubble drag begin d=${dx.toInt()},${dy.toInt()}")
                         FloatingDragRefresh.begin(view, lp.x, lp.y)
                     }
                     if (isDragging) {
@@ -333,6 +340,7 @@ class FloatingBubbleModule(reactContext: ReactApplicationContext) :
                     true
                 }
                 MotionEvent.ACTION_CANCEL -> {
+                    Log.i(TAG, "bubble touch cancel dragging=$isDragging")
                     pendingLongPress?.let { handler.removeCallbacks(it) }
                     pendingLongPress = null
                     if (isDragging) {
@@ -344,6 +352,8 @@ class FloatingBubbleModule(reactContext: ReactApplicationContext) :
                     true
                 }
                 MotionEvent.ACTION_UP -> {
+                    Log.i(TAG, "bubble touch up dragging=$isDragging longPress=$longPressTriggered " +
+                        "d=${(ev.rawX - startRawX).toInt()},${(ev.rawY - startRawY).toInt()} window=${lp.x},${lp.y}")
                     pendingLongPress?.let { handler.removeCallbacks(it) }
                     pendingLongPress = null
                     if (isDragging) {
@@ -352,8 +362,7 @@ class FloatingBubbleModule(reactContext: ReactApplicationContext) :
                         stickyY = lp.y
                         emitBubbleCoords(view, lp, "onBubbleDragEnd")
                     } else if (!longPressTriggered) {
-                        
-                        
+
                         emitBubbleCoords(view, lp, "onBubbleTap")
                     }
                     if (isDragging) FloatingDragRefresh.end(view)
@@ -373,6 +382,7 @@ class FloatingBubbleModule(reactContext: ReactApplicationContext) :
             return
         }
         bubbleView?.let { FloatingPenGuard.track("floating_bubble", it) }
+        Log.i(TAG, "bubble created at ${layoutParams?.x},${layoutParams?.y} ${bubbleW}x$bubbleH")
         if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[BUBBLE-DBG] bubble shown: '$text'")
         bubbleView?.post {
             val lp = layoutParams ?: return@post
@@ -382,8 +392,7 @@ class FloatingBubbleModule(reactContext: ReactApplicationContext) :
     }
 
     private fun emitBubbleCoords(view: View, lp: WindowManager.LayoutParams, eventName: String) {
-        
-        
+
         val sx = lp.x.toFloat()
         val sy = lp.y.toFloat()
         val bubbleH = view.height
@@ -410,11 +419,7 @@ class FloatingBubbleModule(reactContext: ReactApplicationContext) :
     private fun removeBubble() {
         pendingLongPress?.let { handler.removeCallbacks(it) }
         pendingLongPress = null
-        if (bubbleView != null) {
-            bubbleView?.let { FloatingDragRefresh.endNow(it) }
-            try { windowManager?.removeView(bubbleView) } catch (e: Exception) { if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "removeView: ${e.message}") }
-            bubbleView = null; layoutParams = null
-        }
+        if (bubbleView != null) detachBubble()
     }
 
     private fun emitEvent(name: String, params: WritableMap) =
@@ -429,12 +434,18 @@ class FloatingBubbleModule(reactContext: ReactApplicationContext) :
     @ReactMethod fun removeListeners(count: Int) {}
 }
 
-
 private class TextReceiveBubbleView(ctx: Context, private val density: Float) : View(ctx) {
 
     private val INK = Color.parseColor("#111111")
 
     var pending: Boolean = false
+        set(value) {
+            if (field == value) return
+            field = value
+            invalidate()
+        }
+
+    var pageFull: Boolean = false
         set(value) {
             if (field == value) return
             field = value
@@ -448,18 +459,40 @@ private class TextReceiveBubbleView(ctx: Context, private val density: Float) : 
     }
     private val iconPaint = Paint(Paint.FILTER_BITMAP_FLAG)
 
+    private val shape = RectF()
+
     override fun onDraw(canvas: Canvas) {
         val cx = width / 2f
         val cy = height / 2f
-        val r = minOf(width, height) / 2f - borderPaint.strokeWidth / 2f
+        val inset = borderPaint.strokeWidth / 2f
+        shape.set(inset, inset, width - inset, height - inset)
+        val r = shape.height() / 2f
         bgPaint.color = if (pending) INK else Color.WHITE
-        canvas.drawCircle(cx, cy, r, bgPaint)
-        canvas.drawCircle(cx, cy, r, borderPaint)
+        canvas.drawRoundRect(shape, r, r, bgPaint)
+        canvas.drawRoundRect(shape, r, r, borderPaint)
 
-        val iconPx = (r * 1.15f).toInt().coerceAtLeast(1)
+        val iconPx = (r * 1.6f).toInt().coerceAtLeast(1)
         val asset = if (pending) "icons/ic_bubble_text_ready.xml" else "icons/ic_bubble_text_idle.xml"
         val icon = VectorAssets.loadBitmapTinted(
             context, asset, iconPx, if (pending) Color.WHITE else INK) ?: return
         canvas.drawBitmap(icon, cx - icon.width / 2f, cy - icon.height / 2f, iconPaint)
+        if (pageFull) drawPageFullBadge(canvas, r)
+    }
+
+    private fun drawPageFullBadge(canvas: Canvas, r: Float) {
+        val br = r * 0.42f
+        val bx = shape.right - br
+        val by = shape.top + br
+        bgPaint.color = INK
+        canvas.drawCircle(bx, by, br, bgPaint)
+        badgeStroke.color = Color.WHITE
+        badgeStroke.strokeWidth = 2f * density
+        canvas.drawCircle(bx, by, br, badgeStroke)
+        canvas.drawLine(bx - br * 0.5f, by, bx + br * 0.5f, by, badgeStroke)
+    }
+
+    private val badgeStroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
     }
 }

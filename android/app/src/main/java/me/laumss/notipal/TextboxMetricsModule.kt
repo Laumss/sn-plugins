@@ -32,16 +32,7 @@ class TextboxMetricsModule(
                 maxLineWidth = maxOf(maxLineWidth, layout.getLineWidth(i).toDouble())
             }
 
-            val result = Arguments.createMap().apply {
-                putString("text", ctx.text)
-                putInt("requestedWidth", ctx.width)
-                putDouble("requestedFontSize", ctx.fontSize.toDouble())
-                putBoolean("includePad", ctx.includePad)
-                putInt("layoutHeight", layout.height)
-                putInt("lineCount", layout.lineCount)
-                putDouble("maxLineWidth", maxLineWidth)
-            }
-            promise.resolve(result)
+            promise.resolve(metricsResult(ctx, maxLineWidth))
         } catch (e: Throwable) {
             promise.reject("E_MEASURE_TEXT", e)
         }
@@ -113,18 +104,10 @@ class TextboxMetricsModule(
                 }
             }
 
-            val result = Arguments.createMap().apply {
-                putString("text", ctx.text)
-                putInt("requestedWidth", ctx.width)
-                putDouble("requestedFontSize", ctx.fontSize.toDouble())
-                putBoolean("includePad", ctx.includePad)
-                putInt("layoutHeight", layout.height)
-                putInt("lineCount", layout.lineCount)
-                putDouble("maxLineWidth", maxLineWidth)
+            promise.resolve(metricsResult(ctx, maxLineWidth).apply {
                 putArray("lines", lines)
                 putArray("words", words)
-            }
-            promise.resolve(result)
+            })
         } catch (e: Throwable) {
             promise.reject("E_MEASURE_TEXT_DETAILED", e)
         }
@@ -138,22 +121,10 @@ class TextboxMetricsModule(
             val availableHeight = options.getInt("availableHeight")
 
             if (layout.height <= availableHeight) {
-                val result = Arguments.createMap().apply {
-                    putString("fittingText", ctx.text)
-                    putString("overflowText", "")
-                    putInt("fittingHeight", layout.height)
-                    putInt("fittingLineCount", layout.lineCount)
-                    putBoolean("didSplit", false)
-                }
-                promise.resolve(result)
+                promise.resolve(splitResult(ctx.text, "", layout.height, layout.lineCount, false))
                 return
             }
 
-            
-            
-            
-            
-            
             val bottomPad = layout.height - layout.getLineBottom(layout.lineCount - 1)
 
             var lastFittingLine = -1
@@ -167,14 +138,7 @@ class TextboxMetricsModule(
             }
 
             if (lastFittingLine < 0) {
-                val result = Arguments.createMap().apply {
-                    putString("fittingText", "")
-                    putString("overflowText", ctx.text)
-                    putInt("fittingHeight", 0)
-                    putInt("fittingLineCount", 0)
-                    putBoolean("didSplit", true)
-                }
-                promise.resolve(result)
+                promise.resolve(splitResult("", ctx.text, 0, 0, true))
                 return
             }
 
@@ -192,9 +156,6 @@ class TextboxMetricsModule(
                 if (breakLine < lastFittingLine) actualLastLine = breakLine
             }
 
-            
-            
-            
             val leadingPunct = "，。、；：！？）》」』”’,.;:!?)]}"
             while (overflowText.isNotEmpty() && overflowText.first() in leadingPunct &&
                 fittingText.isNotEmpty()
@@ -203,30 +164,40 @@ class TextboxMetricsModule(
                 fittingText = fittingText.dropLast(1).trimEnd()
             }
             if (fittingText.isEmpty()) {
-                
-                val result = Arguments.createMap().apply {
-                    putString("fittingText", "")
-                    putString("overflowText", ctx.text)
-                    putInt("fittingHeight", 0)
-                    putInt("fittingLineCount", 0)
-                    putBoolean("didSplit", true)
-                }
-                promise.resolve(result)
+
+                promise.resolve(splitResult("", ctx.text, 0, 0, true))
                 return
             }
 
             val fittingHeight = layout.getLineBottom(actualLastLine) + bottomPad
-            val result = Arguments.createMap().apply {
-                putString("fittingText", fittingText)
-                putString("overflowText", overflowText)
-                putInt("fittingHeight", fittingHeight)
-                putInt("fittingLineCount", actualLastLine + 1)
-                putBoolean("didSplit", true)
-            }
-            promise.resolve(result)
+            promise.resolve(splitResult(fittingText, overflowText, fittingHeight, actualLastLine + 1, true))
         } catch (e: Throwable) {
             promise.reject("E_SPLIT_TEXT", e)
         }
+    }
+
+    private fun metricsResult(ctx: MeasurementContext, maxLineWidth: Double) = Arguments.createMap().apply {
+        putString("text", ctx.text)
+        putInt("requestedWidth", ctx.width)
+        putDouble("requestedFontSize", ctx.fontSize.toDouble())
+        putBoolean("includePad", ctx.includePad)
+        putInt("layoutHeight", ctx.layout.height)
+        putInt("lineCount", ctx.layout.lineCount)
+        putDouble("maxLineWidth", maxLineWidth)
+    }
+
+    private fun splitResult(
+        fittingText: String,
+        overflowText: String,
+        fittingHeight: Int,
+        fittingLineCount: Int,
+        didSplit: Boolean
+    ) = Arguments.createMap().apply {
+        putString("fittingText", fittingText)
+        putString("overflowText", overflowText)
+        putInt("fittingHeight", fittingHeight)
+        putInt("fittingLineCount", fittingLineCount)
+        putBoolean("didSplit", didSplit)
     }
 
     private data class MeasurementContext(

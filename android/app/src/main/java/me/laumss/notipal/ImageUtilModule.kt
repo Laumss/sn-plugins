@@ -11,14 +11,12 @@ import com.facebook.react.bridge.ReactMethod
 import java.io.File
 import java.io.FileOutputStream
 
-
 class ImageUtilModule(
     reactContext: ReactApplicationContext,
 ) : ReactContextBaseJavaModule(reactContext) {
 
     override fun getName(): String = "InklingImageUtil"
 
-    
     @ReactMethod
     fun cropRegion(
         srcPath: String,
@@ -76,8 +74,8 @@ class ImageUtilModule(
                 }
                 promise.resolve(outPath)
             } finally {
-                try { cropped?.recycle() } catch (_: Throwable) {}
-                try { decoder?.recycle() } catch (_: Throwable) {}
+                cropped?.recycle()
+                decoder?.recycle()
             }
         } catch (t: Throwable) {
             promise.reject("E_CROP", t.message ?: "crop failed", t)

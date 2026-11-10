@@ -6,7 +6,6 @@ import android.os.Looper
 import android.util.Log
 import java.util.concurrent.Executors
 
-
 internal object DocChromeProbe {
     private const val TAG = "DocChromeProbe"
     private const val DOC_ACTIVITY_MARKER = "ACTIVITY com.supernote.document/"
@@ -18,11 +17,15 @@ internal object DocChromeProbe {
     @Volatile private var probeInFlight = false
     @Volatile private var contextEpoch = 0L
 
-    
     private val VIEW_LINE =
         Regex("""^( *)([A-Za-z0-9_.$]+)\{[0-9a-f]+ (\S)\S* \S+ (-?\d+),(-?\d+)-(-?\d+),(-?\d+)""")
 
     private var probePending = false
+
+    private var staleLayoutRetries = 0
+    private const val STALE_LAYOUT_MAX_RETRIES = 4
+    private val staleRetryRunnable = Runnable { request("stale layout retry") }
+
     private val probeRunnable: Runnable = Runnable {
         if (probeInFlight) {
             probePending = true
@@ -39,7 +42,9 @@ internal object DocChromeProbe {
             main.post {
                 probeInFlight = false
                 if (epoch == contextEpoch && snapshot != null &&
-                    FloatingToolbarModule.isDocumentContext() == document) {
+                    FloatingToolbarModule.isDocumentContext() == document &&
+                    !isStaleLayout(snapshot, reason)) {
+                    staleLayoutRetries = 0
                     FloatingPenGuard.setHostChromeAreas(snapshot.rects, reason)
                     if (BuildConfig.ENABLE_DEBUG) Log.i(TAG,
                         "probe reason=$reason document=$document menuVisible=${snapshot.menuVisible} token=$menuToken rects=${snapshot.rects}")
@@ -48,15 +53,15 @@ internal object DocChromeProbe {
                         SubviewLogMonitor.closeDocumentToolbarMenu(menuToken)
                     }
                 }
-                
+
                 if (probePending) request(pendingReason)
             }
         }
     }
 
-    
     fun request(reason: String) {
         pendingReason = reason
+        main.removeCallbacks(staleRetryRunnable)
         main.removeCallbacks(probeRunnable)
         main.post(probeRunnable)
     }
@@ -64,8 +69,27 @@ internal object DocChromeProbe {
     fun clear(reason: String) {
         contextEpoch++
         probePending = false
+        staleLayoutRetries = 0
+        main.removeCallbacks(staleRetryRunnable)
         main.removeCallbacks(probeRunnable)
         FloatingPenGuard.setHostChromeAreas(emptyList(), reason)
+    }
+
+    private fun isStaleLayout(snapshot: Snapshot, reason: String): Boolean {
+        val windowLandscape = snapshot.windowLandscape ?: return false
+        val screenLandscape = FloatingToolbarModule.screenWidth > FloatingToolbarModule.screenHeight
+        if (windowLandscape == screenLandscape) return false
+        val window = if (windowLandscape) "landscape" else "portrait"
+        if (staleLayoutRetries >= STALE_LAYOUT_MAX_RETRIES) {
+            Log.w(TAG, "host window still $window after $staleLayoutRetries retries; using it reason=$reason")
+            return false
+        }
+        staleLayoutRetries++
+        Log.i(TAG, "probe discarded: host window $window, screen " +
+            "${if (screenLandscape) "landscape" else "portrait"} reason=$reason retry=$staleLayoutRetries")
+        main.removeCallbacks(staleRetryRunnable)
+        main.postDelayed(staleRetryRunnable, PenGuardTiming.DOC_CHROME_STALE_LAYOUT_RETRY_MS)
+        return true
     }
 
     private fun query(document: Boolean): Snapshot? = try {
@@ -85,10 +109,15 @@ internal object DocChromeProbe {
         val visible: Boolean,
         val inSideBar: Boolean,
         val isSideBar: Boolean = false,
+        val isDecor: Boolean = false,
     )
 
-    
-    internal data class Snapshot(val rects: List<Rect>, val menuVisible: Boolean?, val bottomVisible: Boolean = false)
+    internal data class Snapshot(
+        val rects: List<Rect>,
+        val menuVisible: Boolean?,
+        val bottomVisible: Boolean = false,
+        val windowLandscape: Boolean? = null,
+    )
 
     internal fun parse(lines: Sequence<String>): List<Rect> = parseSnapshot(lines).rects
 
@@ -99,6 +128,8 @@ internal object DocChromeProbe {
         var sawActiveSideBar = false
         var menuVisible = false
         var bottomVisible = false
+        var windowW = 0
+        var windowH = 0
         var inHierarchy = false
         var hierarchyIndent = -1
         val stack = ArrayDeque<Node>()
@@ -132,7 +163,7 @@ internal object DocChromeProbe {
             if (match == null) {
                 if (line.trimStart().startsWith("DecorView")) {
                     stack.clear()
-                    stack.addLast(Node(indent, 0, 0, visible = true, inSideBar = false))
+                    stack.addLast(Node(indent, 0, 0, visible = true, inSideBar = false, isDecor = true))
                 }
                 continue
             }
@@ -148,9 +179,12 @@ internal object DocChromeProbe {
             val inSideBar = (parent?.inSideBar ?: false) || cls.endsWith(".SideBarView")
             val isSideBar = cls.endsWith(".SideBarView")
             stack.addLast(Node(indent, left, top, visible, inSideBar, isSideBar))
+            if (resumed && parent?.isDecor == true) {
+                windowW = maxOf(windowW, r - l)
+                windowH = maxOf(windowH, b - t)
+            }
             if (isSideBar && resumed) sawActiveSideBar = true
-            
-            
+
             val focusable = line.getOrNull(match.groups[3]!!.range.last + 1) == 'F'
             if (resumed && parent?.isSideBar == true && visible && focusable && r > l && b > t) {
                 menuVisible = true
@@ -163,6 +197,7 @@ internal object DocChromeProbe {
                 out += Rect(left, top, left + (r - l), top + (b - t))
             }
         }
-        return Snapshot(out, if (sawActiveSideBar) menuVisible else null, bottomVisible)
+        val windowLandscape = if (windowW > 0 && windowH > 0) windowW > windowH else null
+        return Snapshot(out, if (sawActiveSideBar) menuVisible else null, bottomVisible, windowLandscape)
     }
 }

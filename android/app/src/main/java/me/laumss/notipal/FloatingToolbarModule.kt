@@ -3,10 +3,12 @@ import me.laumss.notipal.panels.*
 import me.laumss.notipal.overlays.*
 import me.laumss.notipal.bubbles.*
 import me.laumss.notipal.ui_common.Dialog
+import me.laumss.notipal.relay.AIRelayCore
+import me.laumss.notipal.relay.RelayOpenTrace
+import me.laumss.notipal.relay.TranslationService
 import me.laumss.notipal.ui_common.PanelBase
 import me.laumss.notipal.render.PageImageSource
 import me.laumss.notipal.render.ClipboardElementIo
-import me.laumss.notipal.render.NoteMosaicExport
 
 import android.graphics.Color
 import android.graphics.PixelFormat
@@ -20,12 +22,12 @@ import android.provider.Settings
 import android.util.Log
 import android.util.TypedValue
 import android.view.*
-import android.widget.GridLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.facebook.react.bridge.*
 import com.facebook.react.modules.core.DeviceEventManagerModule
+import com.ratta.supernote.pluginlib.api.HostDataCacheAPI
 import org.json.JSONArray
 import org.json.JSONObject
 import android.content.ComponentName
@@ -35,7 +37,9 @@ import android.content.res.Configuration
 import android.hardware.display.DisplayManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 import java.lang.reflect.Proxy
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -74,11 +78,15 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         private const val PLUGIN_INTERNET_PERMISSION = "plugin.permission.INTERNET"
         private const val PLUGIN_PERMISSION_STATUS_ALWAYS = 2
         private const val PLUGIN_PERMISSION_STATUS_SESSION = 1
-        
-        
-        
+
+        private const val INSERT_IMAGE_WATCHDOG_MS = 30_000L
+
         private const val INKLING_PLUGIN_ID = "19uq35yjd3tr3zjr"
         private const val MOSAIC_PLUGIN_ID = "mosaic20260730ab"
+        private const val MOSAIC_CLOSE_POLLS = 30
+        private const val MOSAIC_CLOSE_POLL_MS = 100L
+        private const val MOSAIC_CLOSE_SETTLE_MS = 400L
+        private const val DOCUCRAFT_PLUGIN_ID = "ih0tyg5dw2caehtg"
         private const val HOST_PLUGIN_MANAGER_CLASS =
             "com.ratta.supernote.pluginhost.manager.PluginManager"
         private const val HOST_PERMISSION_CALLBACK_CLASS =
@@ -88,7 +96,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         private const val SCREENSHOT_STATE_PREFS = "screenshot_state"
         private const val STITCH_SESSION_ACTIVE_KEY = "stitch_session_active"
         private const val STITCH_ARMED_AT_KEY = "stitch_armed_at"
-        
+
         private const val STITCH_RECENT_MS = 15 * 60 * 1000L
 
         private val RETRY_DELAYS_MS = longArrayOf(50, 250, 750, 1500, 2500)
@@ -110,6 +118,12 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
         @Volatile @JvmStatic
         private var collapsed: Boolean = false
+
+        private var relayStowed = false
+
+        private var lexiStowed = false
+
+        private const val LEXI_TOOLBAR_HOLD = "toolbar"
         @Volatile @JvmStatic
         private var dockSide: String = "left"
         @Volatile @JvmStatic
@@ -122,31 +136,37 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         @Volatile private var mosaicNoteRef: String? = null
         @Volatile private var pendingMosaicRebuild = false
         @Volatile private var mosaicRebuildRunnable: Runnable? = null
-        
+
         @Volatile private var surfaceBubbleRaisePending = false
 
         private val LATCHING_ACTIONS: Set<String> = setOf(
             "insert_text", "text_recv_nospacing", "text_recv_paragraph", "ai_relay"
         )
 
-        
         internal const val SMART_LASSO_TOOL_ID = "smart_lasso"
         internal const val AI_RELAY_TOOL_ID = "ai_relay"
         internal const val INK_PALETTE_TOOL_ID = "ink_palette"
         internal const val CLIPBOARD_TOOL_ID = "toolbar_clipboard"
         internal const val COLLAPSE_TOOL_ID = "toolbar_collapse"
-        internal const val GOTO_NOTE_TOOL_ID = "goto_note"
-        
+
         internal const val NOTE_TO_MOSAIC_TOOL_ID = "note_to_mosaic"
+
+        internal const val DOC_TO_MOSAIC_TOOL_ID = "doc_to_mosaic"
+
+        internal const val DOC_SHARE_TOOL_ID = "doc_share"
         internal const val INSERT_TEXT_TOOL_ID = "insert_text"
 
+        internal const val CLIP_MANAGER_TOOL_ID = "manage_clips"
+
+        private const val LEGACY_INSERT_IMAGE_ID = "insert_image"
+
         private fun defaultToolNameKey(id: String): String = when (id) {
-            "insert_image" -> "config_tool_image"
-            "insert_doc_screenshot" -> "config_tool_doc"
+
+            "insert_doc_screenshot" -> "config_tool_image_capture"
+            CLIP_MANAGER_TOOL_ID -> "config_tool_clip_manager"
             INSERT_TEXT_TOOL_ID -> "config_tool_text"
             SMART_LASSO_TOOL_ID -> "config_tool_smart_lasso"
             "insert_link" -> "config_tool_link"
-            GOTO_NOTE_TOOL_ID -> "config_tool_goto_note"
             AI_RELAY_TOOL_ID -> "config_tool_ai_relay"
             INK_PALETTE_TOOL_ID -> "config_tool_ink_palette"
             CLIPBOARD_TOOL_ID -> "config_tool_clipboard"
@@ -160,29 +180,27 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             "{\"id\":\"ink_palette\",\"action\":\"ink_palette\",\"icon\":\"Ip\"}," +
             "{\"id\":\"ai_relay\",\"action\":\"ai_relay\",\"icon\":\"Rl\"}]"
         private const val NOTE_DEFAULT_TOOLS_JSON =
-            "[{\"id\":\"insert_image\",\"action\":\"insert_image\",\"icon\":\"Im\"}]"
+            "[{\"id\":\"manage_clips\",\"action\":\"manage_clips\",\"icon\":\"Cm\"}]"
         private const val DOC_DEFAULT_TOOLS_JSON = "[]"
 
         private val TOOLBAR_UTILITY_TOOL_IDS = setOf(
             CLIPBOARD_TOOL_ID,
             COLLAPSE_TOOL_ID,
-            GOTO_NOTE_TOOL_ID,
             INSERT_TEXT_TOOL_ID
         )
 
-        private val NOTE_ONLY_TOOL_IDS = setOf("insert_image", "insert_link")
+        private val NOTE_ONLY_TOOL_IDS = setOf(CLIP_MANAGER_TOOL_ID, "insert_link")
 
         private val MOSAIC_TOOL_IDS = setOf(
-            "insert_image", "insert_doc_screenshot", SMART_LASSO_TOOL_ID, AI_RELAY_TOOL_ID,
+            CLIP_MANAGER_TOOL_ID, "insert_doc_screenshot", SMART_LASSO_TOOL_ID, AI_RELAY_TOOL_ID,
         )
 
         private val TOOL_CATALOG_IDS = setOf(
-            "insert_image",
+            CLIP_MANAGER_TOOL_ID,
             "insert_doc_screenshot",
             INSERT_TEXT_TOOL_ID,
             SMART_LASSO_TOOL_ID,
             "insert_link",
-            GOTO_NOTE_TOOL_ID,
             AI_RELAY_TOOL_ID,
             INK_PALETTE_TOOL_ID,
             CLIPBOARD_TOOL_ID,
@@ -204,7 +222,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         @Volatile @JvmStatic
         private var pendingScreen: String = ""
 
-        
         @Volatile @JvmStatic
         private var selfShowPluginViewAt = 0L
         private const val SELF_SHOW_GRACE_MS = 3_000L
@@ -213,7 +230,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         private fun isSelfInitiatedHostShow(): Boolean =
             android.os.SystemClock.elapsedRealtime() - selfShowPluginViewAt < SELF_SHOW_GRACE_MS
 
-        
         @JvmStatic
         private fun toolbarShowOwnsHostEntry(): Boolean =
             toolbarHostClosePending && toolbarHostCloseGeneration == toolbarBuildGeneration
@@ -221,18 +237,13 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         @Volatile @JvmStatic
         private var pendingShow: Boolean = false
 
-        
         @Volatile @JvmStatic
         private var toolbarHostClosePending: Boolean = false
         @Volatile @JvmStatic
         private var toolbarHostCloseGeneration: Long = -1L
 
-        
         @Volatile @JvmStatic
         private var toolbarBuildGeneration: Long = 0L
-
-        @Volatile @JvmStatic
-        private var insertPluginViewClosed: Boolean = false
 
         @Volatile @JvmStatic
         private var startX = 0
@@ -247,12 +258,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         @Volatile @JvmStatic
         private var longPressTriggered = false
 
-        private const val AUTO_COLLAPSE_MS = 9000L
-        
-        
-        
-        private const val DOCK_FLUSH_TOLERANCE = 6
-
         @JvmStatic
         internal var screenWidth = 1404
         @JvmStatic
@@ -266,30 +271,27 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         private var lastDisplayRotation = -1
 
         @Volatile @JvmStatic
-        var lastNotePath: String = ""
-        @Volatile @JvmStatic
-        var lastPageNum: Int = 0
+        private var foregroundMonitorRunning = false
 
         @Volatile @JvmStatic
-        private var foregroundMonitorRunning = false
-        
+        private var monitorOnlyForRelay = false
+
+        @Volatile @JvmStatic
+        private var pendingRestoreReason = ""
         @JvmStatic
-        private var pendingRestoreRunnable: Runnable? = null
+        private val restoreRunnable = Runnable { evaluateRestore(pendingRestoreReason) }
         @Volatile @JvmStatic
         private var isInNoteApp = true
 
-        
         @Volatile @JvmStatic
         private var lastForegroundKey: String? = null
 
-        
         @Volatile @JvmStatic
         private var noteForegroundSinceMs = 0L
 
         @JvmStatic
         fun isInNoteApp(): Boolean = isInNoteApp
 
-        
         @JvmStatic
         fun isDocumentContext(): Boolean = docMode && !MosaicLink.isBoardVisible()
 
@@ -300,7 +302,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             )
         }
 
-        
         private fun syncPluginHostGuard() {
             FloatingPenGuard.setFullScreenActive(
                 isInNoteApp && isPluginHostWindowShowing && !mosaicMode,
@@ -308,24 +309,18 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             )
         }
 
-        
         @JvmStatic
         fun isTextReceiveModeActive(): Boolean = activeModeIds.contains(INSERT_TEXT_TOOL_ID)
 
         @JvmStatic
         fun isDocMode(): Boolean = docMode
 
-        @JvmStatic
-        fun isMosaicMode(): Boolean = mosaicMode
-
         @Volatile @JvmStatic
         private var isPluginHostWindowShowing = false
 
-        
         @Volatile @JvmStatic
         private var configPanelActive = false
 
-        
         @Volatile @JvmStatic
         private var configPanelShowPending = false
 
@@ -343,10 +338,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         internal fun isConfigPanelShowPending(): Boolean = configPanelShowPending
 
         @JvmStatic
-        internal fun isConfigPanelActive(): Boolean = configPanelActive
-
-        
-        @JvmStatic
         private fun configPanelBlocksToolbar(): Boolean {
             val visible = ConfigPanel.currentInstance?.isActuallyVisible == true
             if (visible || configPanelShowPending) {
@@ -362,7 +353,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             return false
         }
 
-        
         @JvmStatic
         internal fun resetConfigPanelState() {
             configPanelActive = false
@@ -372,17 +362,13 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         @JvmStatic
         private var windowStateMonitor: WindowStateMonitor? = null
 
-
-        
         @Volatile @JvmStatic
         private var toolbarRestorePending = false
         private var entryPermissionInFlight = false
 
-        
         @Volatile @JvmStatic
         private var terminateAfterPluginMenuClose = false
 
-        
         @Volatile @JvmStatic
         private var hostButtonChannelBroken = false
 
@@ -398,22 +384,23 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 monitorHandler.post {
                     if (!SubviewLogMonitor.isCurrentGeneration(generation)) return@post
                     HostPenSignals.cancelLassoMenuRelease()
+
+                    if (open || !SubviewLogMonitor.isLassoMenuOpen()) onSmartLassoSelectionChanged(open)
                     if (open) {
-                        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "host lasso menu full-screen=true")
-                        FloatingPenGuard.setFullScreenActive(true, PenGuardOwner.HOST_LASSO_MENU)
-                        
-                        
+
+                        if (MosaicLink.isBoardVisible()) {
+                            Log.i(TAG, "host lasso menu opened under the Mosaic board: no full-screen hold")
+                        } else {
+                            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "host lasso menu full-screen=true")
+                            FloatingPenGuard.setFullScreenActive(true, PenGuardOwner.HOST_LASSO_MENU)
+                        }
+
                         SubviewLogMonitor.clearLassoRelocating()
 
                         HostPenSignals.endInsertImageGuard()
                         onMultiInsertSelectionShown()
 
-                        
-                        
-                        
-                        
-                        
-                        if (!paletteApplyInFlight) HostPenSignals.endPaletteApplyGuard()
+                        if (!paletteApplyInFlight) FloatingPenGuard.setFullScreenActive(false, PenGuardOwner.PALETTE_APPLY)
                     } else {
                         if (paletteApplyInFlight) {
                             if (BuildConfig.ENABLE_DEBUG) {
@@ -421,20 +408,14 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                             }
                             return@post
                         }
-                        
-                        
-                        
-                        
+
                         if (SubviewLogMonitor.isLassoMenuOpen()) {
                             if (BuildConfig.ENABLE_DEBUG) {
                                 Log.i(TAG, "host lasso menu close: stale callback, newer lasso is open")
                             }
                             return@post
                         }
-                        
-                        
-                        
-                        
+
                         if ((paletteSelectionHold || multiInsertQueue.isNotEmpty()) &&
                             SubviewLogMonitor.isLassoRelocating()) {
                             if (BuildConfig.ENABLE_DEBUG) {
@@ -451,16 +432,23 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 monitorHandler.post {
                     if (!SubviewLogMonitor.isCurrentGeneration(generation)) return@post
                     if (paletteApplyInFlight || !(paletteSelectionHold || multiInsertQueue.isNotEmpty())) return@post
-                    
+
                     if (SubviewLogMonitor.isLassoMenuOpen()) return@post
-                    handleLassoMenuCancelled("moved lasso selection cancelled")
+                    handleLassoMenuCancelled("held lasso selection cancelled")
+                }
+            }
+
+            override fun onPluginImageCommitted(generation: Int) {
+                monitorHandler.post {
+                    if (!SubviewLogMonitor.isCurrentGeneration(generation)) return@post
+                    onNoteImageCommitted()
                 }
             }
 
             override fun onNativePenAreasChanged(rects: List<Rect>, generation: Int) {
                 if (!SubviewLogMonitor.isCurrentGeneration(generation)) return
                 HostPenSignals.onNativePenAreas(rects, rotationActive = rotationEpoch != 0L) {
-                    
+
                     if (multiInsertAwaitingSelection && !multiInsertDocLinks) {
                         onMultiInsertSelectionShown()
                         if (advanceMultiInsert("placed without selection")) return@onNativePenAreas
@@ -479,6 +467,17 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 HostPenSignals.onDocWriteAreaRebuilt()
             }
 
+            override fun onDocWritableEnabled(generation: Int) {
+                if (!SubviewLogMonitor.isCurrentGeneration(generation)) return
+                HostPenSignals.onDocWritableEnabled()
+            }
+
+            override fun onDocTextSelectedChanged(selected: Boolean, generation: Int) {
+                monitorHandler.post {
+                    if (SubviewLogMonitor.isCurrentGeneration(generation)) currentInstance?.refreshSmartLassoIcon()
+                }
+            }
+
             override fun onDocTextSelectionChanged(active: Boolean, generation: Int) {
                 monitorHandler.post {
                     if (!SubviewLogMonitor.isCurrentGeneration(generation)) return@post
@@ -492,26 +491,19 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             override fun onDocLassoReleased(reason: String, generation: Int) {
                 if (!SubviewLogMonitor.isCurrentGeneration(generation)) return
                 monitorHandler.post {
-                    
-                    
-                    
-                    
-                    
-                    
+                    if (docLassoSelected) {
+                        docLassoSelected = false
+                        onSmartLassoSelectionChanged(false)
+                    }
+
                     val pendingInsertedSticker = HostPenSignals.docStickerPending
-                    
-                    
-                    
+
                     HostPenSignals.releaseDocStickerHold(reason)
                     if (paletteApplyInFlight) return@post
                     HostPenSignals.releaseDocLassoHold(reason)
-                    
-                    
-                    
-                    
-                    
-                    
-                    if (!pendingInsertedSticker && paletteSelectionHold) {
+
+                    if (paletteSelectionHold && (!pendingInsertedSticker || selectionHoldFromPaste)) {
+                        if (selectionHoldFromPaste) HostPenSignals.clearDocStickerPending()
                         setPaletteSelectionHold(false)
                         scheduleRestore(RESTORE_DELAY_NORMAL, "doc lasso released")
                     }
@@ -522,64 +514,91 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 if (!SubviewLogMonitor.isCurrentGeneration(generation)) return
                 if (!docMode) return
                 HostPenSignals.armDocLassoHold("host selection", confirmed)
-            }
-
-            override fun onOwnedRotationDialogChanged(
-                open: Boolean,
-                token: Long,
-                generation: Int
-            ) {
-                if (!SubviewLogMonitor.isCurrentGeneration(generation)) return
-                if (token != rotationEpoch || rotationEpoch == 0L) return
-                rotationDialogShown = open
-                if (!open) rotationDialogArmed = false
                 monitorHandler.post {
-                    if (token != rotationEpoch || rotationEpoch == 0L) return@post
-                    if (open) {
-                        Log.i(TAG, "owned dialog shown epoch=$token")
-                    } else {
-                        Log.i(TAG, "owned dialog dismissed epoch=$token → destroyAll")
-                        currentInstance?.destroyAll()
-                    }
+                    if (!SubviewLogMonitor.isCurrentGeneration(generation) || !docMode) return@post
+                    docLassoSelected = true
+                    onSmartLassoSelectionChanged(true)
                 }
             }
         }
 
-        
         @JvmStatic
         private fun handleLassoMenuCancelled(reason: String) {
+
+            if (selectionHoldFromPaste) HostPenSignals.clearDocStickerPending()
             setPaletteSelectionHold(false)
+            restoreOverHostLasso = false
             if (BuildConfig.ENABLE_DEBUG) {
                 Log.i(TAG, "host lasso menu cancelled: release full-screen owner reason=$reason")
             }
             HostPenSignals.cancelLassoMenuRelease()
-            
-            
+
             HostPenSignals.cancelScheduledReasserts()
             FloatingPenGuard.setFullScreenActive(false, PenGuardOwner.HOST_LASSO_MENU)
-            HostPenSignals.endPaletteApplyGuard()
-            
+            FloatingPenGuard.setFullScreenActive(false, PenGuardOwner.PALETTE_APPLY)
+
             if (multiInsertAwaitingSelection) {
                 if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "multi insert: stale lasso close while awaiting selection")
                 return
             }
             HostPenSignals.endInsertImageGuard()
             if (advanceMultiInsert(reason)) return
+            if (pluginImageCommitPending) scheduleHostFlash(reason)
             scheduleRestore(RESTORE_DELAY_NORMAL, reason)
         }
 
-        
+        @JvmStatic
+        private fun onNoteImageCommitted() {
+            if (!noteImageFlashArmed) {
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "plugin image committed: not ours, no host flash")
+                return
+            }
+            noteImageFlashArmed = false
+            pluginImageCommitPending = true
+            if (!SubviewLogMonitor.isLassoMenuOpen() && multiInsertQueue.isEmpty() && !multiInsertAwaitingSelection) {
+                scheduleHostFlash("image committed, lasso already closed")
+            }
+        }
+
+        @JvmStatic
+        private fun scheduleHostFlash(reason: String) {
+            pluginImageCommitPending = false
+            monitorHandler.removeCallbacks(hostFlashRunnable)
+            monitorHandler.postDelayed(hostFlashRunnable, HOST_FLASH_DELAY_MS)
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "host flash scheduled in ${HOST_FLASH_DELAY_MS}ms reason=$reason")
+        }
+
+        @JvmStatic
+        private fun sendHostFlashScreen() {
+            if (isDocumentContext() || !isInNoteApp) {
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "host flash skipped: not on a note page")
+                return
+            }
+            val ctx = currentInstance?.reactApplicationContext ?: lastReactContext ?: return
+            try {
+                ctx.sendBroadcast(Intent(HOST_FLASH_ACTION))
+                Log.i(TAG, "host flash broadcast sent after image insert")
+            } catch (e: Exception) {
+                Log.w(TAG, "host flash broadcast failed: ${e.message}")
+            }
+        }
+
         private val multiInsertQueue = ArrayDeque<String>()
-        private var multiInsertFromReceived = false
+
+        private val multiInsertItems = HashMap<String, InsertItem>()
         private var multiInsertDocLinks = false
         private var activeDocLinkRequest: String? = null
         private var docLinkTargetFile = ""
         private var docLinkTargetPage = -1
 
-        
         private var multiInsertAwaitingSelection = false
 
-        
+        @Volatile private var noteImageFlashArmed = false
+
+        @Volatile private var pluginImageCommitPending = false
+
+        private val hostFlashRunnable = Runnable { sendHostFlashScreen() }
+
         private const val MULTI_INSERT_AWAIT_MAX_MS = 15_000L
 
         @JvmStatic
@@ -599,7 +618,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             monitorHandler.removeCallbacks(multiInsertAwaitTimeout)
         }
 
-        
         @JvmStatic
         private fun advanceMultiInsert(reason: String): Boolean {
             if (multiInsertQueue.isEmpty()) return false
@@ -621,6 +639,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             multiInsertDocLinks = false
             docLinkTargetFile = ""
             docLinkTargetPage = -1
+            multiInsertItems.clear()
             if (multiInsertQueue.isEmpty() && !multiInsertAwaitingSelection) return
             if (BuildConfig.ENABLE_DEBUG) {
                 Log.i(TAG, "multi insert cleared: $reason remaining=${multiInsertQueue.size}")
@@ -630,36 +649,94 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             monitorHandler.removeCallbacks(multiInsertAwaitTimeout)
         }
 
-        
         @Volatile @JvmStatic
         private var paletteApplyInFlight = false
 
-        
         @Volatile @JvmStatic
         private var paletteSelectionHold = false
 
+        @Volatile @JvmStatic
+        private var selectionHoldFromPaste = false
+
         @Volatile private var paletteOverlaysParked = false
+        private const val DOC_CAPTURE_HIDE_WAIT_MS = 400L
         @Volatile private var regionCaptureActive = false
 
-        @JvmStatic fun areFloatingOverlaysSuspendedForPalette(): Boolean =
-            paletteApplyInFlight || paletteSelectionHold || paletteOverlaysParked || regionCaptureActive
+        @Volatile private var restoreOverHostLasso = false
 
-        
+        private const val SMART_LASSO_ICON_IDLE = "icons/ic_tool_lasso_ai.xml"
+        private const val SMART_LASSO_ICON_TEXT = "icons/ic_tool_lasso_text.xml"
+        private const val SMART_LASSO_ICON_SEND = "icons/ic_tool_lasso_send.xml"
+        @Volatile private var lassoSelectionSendsText = false
+
+        @Volatile private var docLassoSelected = false
+
+        @JvmStatic
+        private fun hostLassoSelectionOpen(): Boolean = SubviewLogMonitor.isLassoMenuOpen() || docLassoSelected
+
+        private var lassoKindRequest = 0
+
+        @Volatile private var mosaicSelectionStrokes = 0
+        @Volatile private var mosaicSelectionTextCards = 0
+
+        internal fun onMosaicSelectionChanged(strokes: Int, textCards: Int) {
+            if (mosaicSelectionStrokes == strokes && mosaicSelectionTextCards == textCards) return
+            mosaicSelectionStrokes = strokes
+            mosaicSelectionTextCards = textCards
+            monitorHandler.post { currentInstance?.refreshSmartLassoIcon() }
+        }
+
+        @JvmStatic
+        private fun smartLassoIconAsset(): String =
+            when {
+
+                MosaicLink.isBoardVisible() -> when {
+                    mosaicSelectionStrokes > 0 -> SMART_LASSO_ICON_TEXT
+                    mosaicSelectionTextCards > 0 -> SMART_LASSO_ICON_SEND
+                    else -> SMART_LASSO_ICON_IDLE
+                }
+                isDocumentContext() && SubviewLogMonitor.isDocTextSelected() -> SMART_LASSO_ICON_SEND
+                !hostLassoSelectionOpen() -> SMART_LASSO_ICON_IDLE
+                lassoSelectionSendsText -> SMART_LASSO_ICON_SEND
+                else -> SMART_LASSO_ICON_TEXT
+            }
+
+        @JvmStatic
+        private fun onSmartLassoSelectionChanged(open: Boolean) {
+            lassoSelectionSendsText = false
+            val request = ++lassoKindRequest
+            val inst = currentInstance ?: return
+            inst.refreshSmartLassoIcon()
+
+            if (!open || inst.smartLassoIconView == null || paletteApplyInFlight || paletteSelectionHold ||
+                multiInsertQueue.isNotEmpty()) return
+            inst.emitEvent("onSmartLassoSelectionShown",
+                Arguments.createMap().apply { putInt("request", request) })
+        }
+
+        @JvmStatic fun areFloatingOverlaysSuspendedForPalette(): Boolean =
+            paletteApplyInFlight || paletteSelectionHold || paletteOverlaysParked || regionCaptureActive ||
+
+                LexiLink.isOpen() || MosaicLink.isMotion()
+
         private const val PALETTE_SELECTION_HOLD_MAX_MS = 120_000L
 
         @JvmStatic
         private val paletteSelectionHoldTimeoutRunnable = Runnable {
             if (!paletteSelectionHold) return@Runnable
             paletteSelectionHold = false
+            selectionHoldFromPaste = false
             Log.w(TAG, "palette selection hold timed out; restoring toolbar")
             HostPenSignals.releaseDocLassoHold("palette hold timeout")
+
+            if (!SubviewLogMonitor.isLassoMenuOpen()) HostPenSignals.scheduleLassoMenuRelease()
             currentInstance?.restoreToolbar()
         }
 
-        
         @JvmStatic
-        private fun setPaletteSelectionHold(hold: Boolean) {
+        private fun setPaletteSelectionHold(hold: Boolean, fromPaste: Boolean = false) {
             paletteSelectionHold = hold
+            selectionHoldFromPaste = hold && fromPaste
             monitorHandler.removeCallbacks(paletteSelectionHoldTimeoutRunnable)
             if (hold) {
                 monitorHandler.postDelayed(
@@ -669,38 +746,35 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             }
         }
 
-        
         @JvmStatic
         fun onNoteSubviewChanged(open: Boolean, generation: Int) {
             if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "onNoteSubviewChanged: open=$open gen=$generation")
             if (!SubviewLogMonitor.isCurrentGeneration(generation)) return
+            if (!open) {
+
+                monitorHandler.postDelayed({
+                    if (!SubviewLogMonitor.isCurrentGeneration(generation) ||
+                        SubviewLogMonitor.isSubviewOpen()) return@postDelayed
+                    FloatingPenGuard.setFullScreenActive(false, PenGuardOwner.NOTE_SUBVIEW)
+                }, RESTORE_DELAY_NORMAL)
+            }
             val inst = currentInstance ?: return
             val applyState = Runnable {
-                
+
                 if (!SubviewLogMonitor.isCurrentGeneration(generation) ||
                     SubviewLogMonitor.isSubviewOpen() != open) return@Runnable
-                
-                
-                
+
                 if (open) {
                     markToolbarForRestore()
                     if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "note subview opened, hiding overlays (toolbarRestorePending=$toolbarRestorePending)")
-                    
-                    
+
                     SubviewLogMonitor.closeLassoMenuFromFallback("subview opened")
                     FloatingPenGuard.setFullScreenActive(true, PenGuardOwner.NOTE_SUBVIEW)
                     if (rootView != null) inst.removeAll()
                     inst.suspendAllNativePanels()
-                    FloatingBubbleModule.hideStatic()
-                    AiBubbleModule.hideStatic()
-                    PaletteBubbleModule.hideStatic()
+                    hideSurfaceBubbles()
                     ScreenshotBubble.hideForSettings()
                 } else {
-                    FloatingPenGuard.setFullScreenActive(false, PenGuardOwner.NOTE_SUBVIEW)
-
-                    
-                    
-                    
                     if (!isPluginHostWindowShowing && ScreenshotBubble.hiddenBySettings) {
                         if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "note subviews closed, restoring ScreenshotBubble independently")
                         ScreenshotBubble.reshowIfHiddenBySettings()
@@ -708,9 +782,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
                     scheduleRestore(RESTORE_DELAY_NORMAL, "note subview closed")
                     DocChromeProbe.request("subview closed")
-                    
-                    
-                    
+
                     HostPenSignals.scheduleReassert(
                         reason = "note subview restored",
                         allowEmptyAtSchedule = true
@@ -720,9 +792,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             if (open) monitorHandler.post(applyState)
             else monitorHandler.postDelayed(applyState, RESTORE_DELAY_NORMAL)
         }
-
-        
-        
 
         @JvmStatic
         private fun handleToolbarMenuChanged(open: Boolean, pluginListMenu: Boolean, generation: Int) {
@@ -743,71 +812,57 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     }
                     markToolbarForRestore()
                     if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "toolbar menu open: hiding overlays toolbarRestorePending=$toolbarRestorePending")
-                    
-                    
+
                     FloatingPenGuard.setFullScreenActive(true, PenGuardOwner.HOST_TOOLBAR_MENU)
                     if (isDocumentContext()) DocChromeProbe.request("document toolbar menu opened")
                     if (rootView != null) inst.removeAll()
-                    FloatingBubbleModule.hideStatic()
-                    AiBubbleModule.hideStatic()
-                    PaletteBubbleModule.hideStatic()
+
+                    inst.suspendAllNativePanels()
+                    hideSurfaceBubbles()
                 }
             } else {
                 monitorHandler.post {
                     if (!SubviewLogMonitor.isCurrentGeneration(generation) ||
                         SubviewLogMonitor.isToolbarMenuOpen()) return@post
-                    
-                    
+
                     FloatingPenGuard.setFullScreenActive(false, PenGuardOwner.HOST_TOOLBAR_MENU)
                     DocChromeProbe.request("toolbar menu closed")
-                }
-                monitorHandler.postDelayed({
-                    if (!SubviewLogMonitor.isCurrentGeneration(generation)) {
-                        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "toolbar menu close: generation stale, skip")
-                        return@postDelayed
+                    if (!terminateAfterPluginMenuClose) {
+                        scheduleRestore(RESTORE_DELAY_LONG + RESTORE_DELAY_SHORT, "toolbar menu closed")
+                        return@post
                     }
-                    if (SubviewLogMonitor.isToolbarMenuOpen()) {
-                        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "toolbar menu close: still open (SubviewLogMonitor), skip restore")
-                        return@postDelayed
-                    }
-                    val inst = currentInstance ?: return@postDelayed
-                    if (terminateAfterPluginMenuClose) {
+                    monitorHandler.postDelayed({
+                        if (!SubviewLogMonitor.isCurrentGeneration(generation) ||
+                            SubviewLogMonitor.isToolbarMenuOpen() || !terminateAfterPluginMenuClose) return@postDelayed
+                        val inst = currentInstance ?: return@postDelayed
                         terminateAfterPluginMenuClose = false
                         toolbarRestorePending = false
                         cancelScheduledRestore()
                         if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "plugin list menu close: terminating Inkling")
-                        
-                        
                         inst.destroyAll()
-                        return@postDelayed
-                    }
-                    
-                    
-                    scheduleRestore(RESTORE_DELAY_SHORT, "toolbar menu closed")
-                }, RESTORE_DELAY_LONG)
+                    }, RESTORE_DELAY_LONG)
+                }
             }
         }
 
-        
         @JvmStatic
         private fun onNativePanelActiveEdge(anyShowing: Boolean) {
             val inst = currentInstance ?: return
             if (anyShowing) {
-                FloatingBubbleModule.hideStatic()
-                AiBubbleModule.hideStatic()
-                PaletteBubbleModule.hideStatic()
+                hideSurfaceBubbles()
             } else {
-                monitorHandler.postDelayed({
-                    if (ToolRegistry.anyPanelShowing()) return@postDelayed
-                    evaluateRestore("native panel closed")
-                }, RESTORE_DELAY_NORMAL)
+                scheduleRestore(RESTORE_DELAY_NORMAL, "native panel closed")
             }
         }
 
-        
         @JvmStatic
         internal fun anyNativeOverlayOwnsScreen(): Boolean =
             ToolRegistry.anyPanelShowing() || penLassoOverlay != null || regionCaptureActive
+
+        internal fun anyOtherNotipalUiShowing(): Boolean =
+            me.laumss.notipal.ui_common.PanelRegistry.anyLive() || anyNativeOverlayOwnsScreen() ||
+                FloatingBubbleModule.isShowing() || PaletteBubbleModule.isShowing() ||
+                ScreenshotBubble.isShowing || Dialog.isShowing() || LexiLink.isOpen()
 
         private val configFallbackRunnable = Runnable {
             val inst = currentInstance ?: return@Runnable
@@ -815,9 +870,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "configFallback: config panel active, skip")
                 return@Runnable
             }
-            
-            
-            
+
             if (isSelfInitiatedHostShow() || pendingScreen.isNotEmpty() ||
                 SendPanel.currentInstance?.isShowing == true) {
                 if (BuildConfig.ENABLE_DEBUG) Log.i(TAG,
@@ -870,19 +923,19 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "onPluginHostStateChanged: showing=$showing")
             isPluginHostWindowShowing = showing
             syncPluginHostGuard()
+            if (!showing) {
+                MosaicLink.onPluginHostHidden()
+
+                HostPenSignals.scheduleReassert(reason = "PluginHost hidden", allowEmptyAtSchedule = true)
+            }
 
             val inst = currentInstance
             if (inst == null) {
-                
-                
-                
+
                 if (rootView == null && !anyNativeOverlayOwnsScreen() && showing) {
                     FloatingPenGuard.reassert("host visible, module unavailable")
                 }
-                
-                
-                
-                
+
                 if (!showing && toolbarRestorePending) {
                     scheduleInklingRestoreBootstrap("PluginHost hidden without active module")
                 } else if (BuildConfig.ENABLE_DEBUG) {
@@ -900,23 +953,19 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     inst.closeHostPluginView()
                     return
                 }
-                
-                
-                
+
                 val toolbarOwnsHost = ownsHost && toolbarShowOwnsHostEntry()
                 val selfInitiated = ownsHost &&
                     (toolbarOwnsHost || isSelfInitiatedHostShow() || pendingScreen.isNotEmpty())
                 if (!ownsHost) {
-                    
+
                     ToolRegistry.suspendAll()
                 }
                 val rootAtShowEdge = rootView?.takeIf { it.isAttachedToWindow }
                 if (rootAtShowEdge != null && !toolbarOwnsHost) {
                     markToolbarForRestore()
                     monitorHandler.post {
-                        
-                        
-                        
+
                         if (currentInstance !== inst || !isPluginHostWindowShowing ||
                             rootView !== rootAtShowEdge) {
                             if (BuildConfig.ENABLE_DEBUG) {
@@ -926,9 +975,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                         }
                         inst.removeAll()
                         if (!selfInitiated) inst.suspendAllNativePanels()
-                        FloatingBubbleModule.hideStatic()
-                        AiBubbleModule.hideStatic()
-                        PaletteBubbleModule.hideStatic()
+                        hideSurfaceBubbles()
                     }
                 }
                 monitorHandler.removeCallbacks(configFallbackRunnable)
@@ -957,33 +1004,34 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 mosaicNoteRef != noteRef
             if (!stateChanged && rootView != null) return
             if (!visible && !mosaicMode) {
-                
-                
+
                 mosaicSurface = nextSurface
                 mosaicNoteRef = noteRef
                 return
             }
-            
+            if (mosaicMode != visible) closeSurfaceFloats(if (visible) "mosaic opened" else "mosaic closed")
+
             surfaceBubbleRaisePending = visible && (surfaceBubbleRaisePending || !mosaicMode)
             mosaicMode = visible
             syncDocumentTextSelectionGuard()
             syncPluginHostGuard()
+
+            if (!visible && isInNoteApp && SubviewLogMonitor.isLassoMenuOpen()) {
+                FloatingPenGuard.setFullScreenActive(true, PenGuardOwner.HOST_LASSO_MENU)
+            }
             mosaicSurface = nextSurface
             mosaicNoteRef = noteRef
-            if (visible && nextSurface == MosaicLink.SURFACE_BOARD) {
-                
-                
-                
-                
-                
+            if (visible) {
+
                 toolbarRestorePending = false
                 cancelScheduledRestore()
-                
-                
+
                 HostPenSignals.cancelLassoMenuRelease()
                 HostPenSignals.clearLassoWritableReset()
                 FloatingPenGuard.setFullScreenActive(false, PenGuardOwner.HOST_TOOLBAR_MENU)
                 FloatingPenGuard.setFullScreenActive(false, PenGuardOwner.HOST_LASSO_MENU)
+
+                if (!paletteApplyInFlight) setPaletteSelectionHold(false)
                 FloatingPenGuard.endPark("Mosaic board visible")
             }
             emitMosaicBoardVisible(visible, nextSurface, noteRef)
@@ -1001,18 +1049,43 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             inst.scheduleMosaicRebuild(visible, nextSurface, "board state")
         }
 
-        
         @JvmStatic
+        internal fun onMosaicToolbarRectsChanged() {
+            monitorHandler.post { currentInstance?.avoidMosaicToolbar("mosaic toolbar rects") }
+        }
+
+        internal fun onMosaicBoardImportRequested(kind: String, name: String, template: String): Boolean {
+            val inst = currentInstance ?: return false
+            if (inst.noteImportBusy) return false
+            inst.noteImportBusy = true
+            inst.handler.post { inst.importBoardFromMosaic(kind, name, template) }
+            return true
+        }
+
+        internal fun onMosaicOpenRequested(): Boolean {
+            val inst = currentInstance ?: return false
+            inst.handler.post { inst.openToolbarFromMosaic() }
+            return true
+        }
+
+        internal fun toolbarSessionForMosaic(): Boolean = currentInstance?.hasToolbarSession() == true
+
+        internal fun onMosaicSketchClipboardRequested(selection: Boolean): Boolean {
+            val inst = currentInstance ?: return false
+            inst.handler.post {
+                inst.emitEvent("mosaicSketchClipboard", Arguments.createMap().apply { putBoolean("selection", selection) })
+            }
+            return true
+        }
+
         internal fun onMosaicChromeMenuChanged(open: Boolean) {
             monitorHandler.post {
                 if (MosaicLink.isChromeMenuOpen() != open) return@post
                 val inst = currentInstance ?: return@post
                 if (open) {
-                    cancelScheduledRestore()
-                    markToolbarForRestore()
-                    if (rootView != null) inst.removeAll()
+                    inst.parkToolbar()
                     hideSurfaceBubbles()
-                    
+
                     ScreenshotBubble.hideForPalette()
                     if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Mosaic menu open: overlays hidden")
                 } else {
@@ -1022,9 +1095,125 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
 
         @JvmStatic
+        internal fun onMosaicMotionChanged(on: Boolean) {
+            monitorHandler.post {
+                if (MosaicLink.isMotion() != on) return@post
+                val inst = currentInstance ?: return@post
+                if (on) {
+                    hideSurfaceBubbles()
+                    ScreenshotBubble.hideForPalette()
+                    inst.suspendAllNativePanels()
+                    inst.collapseToolbarKept("mosaic motion")
+                    Log.i(TAG, "Mosaic motion: floats hidden, toolbar collapsed")
+                } else {
+                    scheduleRestore(RESTORE_DELAY_SHORT, "mosaic motion ended")
+                }
+            }
+        }
+
+        internal fun onMosaicTextEditingOpened() {
+            monitorHandler.post {
+                currentInstance?.suspendAllNativePanels()
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Mosaic text editing: panels put away")
+            }
+        }
+
+        @JvmStatic
+        internal fun onMosaicPadChanged(open: Boolean) {
+            monitorHandler.post {
+                if (MosaicLink.isPadOpen() != open) return@post
+                FloatingPenGuard.setFullScreenActive(open, PenGuardOwner.MOSAIC_PAD)
+                if (open) {
+                    putAwayOverlays()
+                    Log.i(TAG, "Mosaic pad open: overlays hidden")
+                } else {
+                    bringBackOverlays("mosaic pad closed")
+                    Log.i(TAG, "Mosaic pad closed: restore scheduled")
+                }
+            }
+        }
+
+        @JvmStatic
+        internal fun onMosaicQuickSwitchChanged(open: Boolean) {
+
+            FloatingPenGuard.setQuickSwitchOpen(open)
+            monitorHandler.post {
+                if (MosaicLink.isQuickSwitchOpen() != open) return@post
+                if (open) {
+                    putAwayOverlays()
+                    Log.i(TAG, "Mosaic quick switch open: overlays hidden")
+                } else {
+                    bringBackOverlays("mosaic quick switch closed")
+                    Log.i(TAG, "Mosaic quick switch closed: restore scheduled")
+                }
+            }
+        }
+
+        @JvmStatic
+        internal fun onLexiChanged(open: Boolean, full: Boolean) {
+            monitorHandler.post {
+                if (LexiLink.isOpen() != open || LexiLink.isFullScreen() != (open && full)) return@post
+                when {
+                    open && full -> {
+                        putAwayOverlays()
+                        Log.i(TAG, "Lexi full screen: overlays hidden")
+                    }
+                    open -> {
+                        putAwayForLexiSmall()
+                        Log.i(TAG, "Lexi small window: floats hidden, toolbar collapsed")
+                    }
+                    else -> {
+                        currentInstance?.unstowToolbarAfterLexi()
+                        bringBackOverlays("lexi closed")
+                        Log.i(TAG, "Lexi closed: restore scheduled")
+                    }
+                }
+            }
+        }
+
+        @JvmStatic
+        private fun putAwayForLexiSmall() {
+            val inst = currentInstance
+            inst?.suspendAllNativePanels()
+            hideSurfaceBubbles()
+            ScreenshotBubble.hideForPalette()
+            inst?.stowToolbarForLexi()
+        }
+
+        @JvmStatic
+        private fun putAwayOverlays() {
+            val inst = currentInstance
+            if (inst != null) {
+                inst.parkToolbar()
+                inst.suspendAllNativePanels()
+            } else {
+                cancelScheduledRestore()
+                markToolbarForRestore()
+            }
+            hideSurfaceBubbles()
+
+            ScreenshotBubble.hideForPalette()
+        }
+
+        @JvmStatic
+        private fun bringBackOverlays(reason: String) {
+            DocChromeProbe.request(reason)
+            HostPenSignals.scheduleReassert(reason = reason, allowEmptyAtSchedule = true)
+            if (currentInstance != null) scheduleRestore(RESTORE_DELAY_SHORT, reason)
+        }
+
+        @JvmStatic
+        private fun closeSurfaceFloats(reason: String) {
+            val relay = RelayInboxPanel.showing()
+            relay?.hide()
+            FloatingBubbleModule.hideAndForget()
+            PaletteBubbleModule.hideAndForget()
+            Log.i(TAG, "surface floats closed reason=$reason relay=${relay != null}")
+        }
+
+        @JvmStatic
         private fun hideSurfaceBubbles() {
             FloatingBubbleModule.hideStatic()
-            AiBubbleModule.hideStatic()
             PaletteBubbleModule.hideStatic()
         }
 
@@ -1045,11 +1234,11 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             }
         }
 
-        
         @JvmStatic
         private fun recreateSurfaceBubbles(reason: String, raise: Boolean) {
             val inst = currentInstance ?: return
-            if (anyNativeOverlayOwnsScreen() || MosaicLink.isChromeMenuOpen()) {
+            if (anyNativeOverlayOwnsScreen() || MosaicLink.isChromeMenuOpen() || MosaicLink.isPadOpen() ||
+                MosaicLink.isQuickSwitchOpen() || LexiLink.isOpen()) {
                 if (BuildConfig.ENABLE_DEBUG) {
                     Log.i(TAG, "recreateSurfaceBubbles[$reason]: skipped, overlay or Mosaic menu owns screen")
                 }
@@ -1061,7 +1250,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             }
             val ctx = inst.reactApplicationContext
             FloatingBubbleModule.reshowLast(ctx, force = raise)
-            AiBubbleModule.reshowLast(ctx, force = raise)
             PaletteBubbleModule.reshowLast(ctx, force = raise)
             if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "recreateSurfaceBubbles[$reason]: queued raise=$raise")
         }
@@ -1082,21 +1270,19 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         private const val PLUGIN_ID = "Inkling"
         private const val MONITOR_INTERVAL_MS = 800L
 
-        
-        
         private const val RESTORE_DELAY_SHORT = 150L
-        
+
         private const val RESTORE_DELAY_NORMAL = 350L
-        
+
+        private const val HOST_FLASH_ACTION = "com.ratta.supernote.launcher.flashscreen"
+        private const val HOST_FLASH_DELAY_MS = 500L
+
         private const val RESTORE_DELAY_LONG = 700L
-        
+
         private const val TOOLBAR_HOST_CLOSE_DELAY_MS = 150L
 
-        
-
-        
         internal const val CLIP_SLOT_COUNT = 8
-        
+
         private const val MAX_VISIBLE_CLIPS = 6
 
         @Volatile @JvmStatic
@@ -1117,13 +1303,8 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         private const val POSITION_STORE_KEY_X = "toolbar_pos_x"
         private const val POSITION_STORE_KEY_Y = "toolbar_pos_y"
 
-        @Volatile @JvmStatic
-        private var wasBubbleVisible = false
+        private const val TOOLBAR_MIN_VISIBLE_DP = 32
 
-        @Volatile @JvmStatic
-        private var insertNextChainActive = false
-
-        
         @Volatile @JvmStatic
         private var docScreenshotRoutePending = false
 
@@ -1143,10 +1324,13 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         private var rotationEpoch = 0L
         @Volatile @JvmStatic
         private var rotationStartForegroundKey: String? = null
-        @Volatile @JvmStatic
-        private var rotationDialogArmed = false
-        @Volatile @JvmStatic
-        private var rotationDialogShown = false
+
+        @JvmStatic
+        private var rotationForegroundChecked = false
+
+        @JvmStatic
+        private var rotationForegroundRetries = 0
+        private const val ROTATION_FOREGROUND_MAX_RETRIES = 4
 
         @JvmStatic
         private val rotationDisplaySettledRunnable = Runnable {
@@ -1154,21 +1338,22 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
 
         @JvmStatic
-        private val rotationDialogRetryRunnable = Runnable {
-            currentInstance?.showRotationDialogWhenReady(rotationEpoch)
+        private val monitorHandler = Handler(Looper.getMainLooper())
+
+        @JvmStatic
+        private val foregroundProbeExecutor = Executors.newSingleThreadExecutor { r ->
+            Thread(r, "notipal-fg-probe").apply { isDaemon = true }
         }
 
         @JvmStatic
-        private val monitorHandler = Handler(Looper.getMainLooper())
+        private val monitorTickSerial = AtomicLong()
 
         @Volatile @JvmStatic
         internal var currentInstance: FloatingToolbarModule? = null
 
-        
         @Volatile @JvmStatic
         private var lastReactContext: ReactApplicationContext? = null
 
-        
         @Volatile @JvmStatic
         private var restoreBootstrapPending = false
         @JvmStatic
@@ -1179,24 +1364,29 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             override fun run() {
                 if (!foregroundMonitorRunning) return
                 val inst = currentInstance ?: return
-                inst.runMonitorTick()
-                monitorHandler.postDelayed(this, MONITOR_INTERVAL_MS)
+                val self = this
+                val serial = monitorTickSerial.get()
+                foregroundProbeExecutor.execute {
+                    val foreground = inst.foregroundActivity()
+                    val hostFile = foreground?.takeIf { inst.isHostPage(it) }?.let { inst.hostFilePath() }
+                    monitorHandler.post {
+                        if (serial != monitorTickSerial.get() || !foregroundMonitorRunning ||
+                            currentInstance !== inst) return@post
+                        if (foreground != null) inst.runMonitorTick(foreground, hostFile)
+                        monitorHandler.postDelayed(self, MONITOR_INTERVAL_MS)
+                    }
+                }
             }
         }
 
-        
-
-        
         @JvmStatic
         private fun scheduleRestore(delay: Long, reason: String) {
-            pendingRestoreRunnable?.let { monitorHandler.removeCallbacks(it) }
-            val r = Runnable { pendingRestoreRunnable = null; evaluateRestore(reason) }
-            pendingRestoreRunnable = r
-            monitorHandler.postDelayed(r, delay)
+            pendingRestoreReason = reason
+            monitorHandler.removeCallbacks(restoreRunnable)
+            monitorHandler.postDelayed(restoreRunnable, delay)
             if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "scheduleRestore: delay=${delay}ms reason=$reason")
         }
 
-        
         @JvmStatic
         private fun scheduleInklingRestoreBootstrap(reason: String) {
             if (restoreBootstrapPending || currentInstance != null ||
@@ -1227,7 +1417,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             monitorHandler.postDelayed(task, RESTORE_DELAY_SHORT)
         }
 
-        
         @JvmStatic
         private fun showInklingHostForRestore(context: ReactApplicationContext): Boolean {
             val loader = context.classLoader
@@ -1293,14 +1482,11 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             }
         }
 
-        
         @JvmStatic
         private fun cancelScheduledRestore() {
-            pendingRestoreRunnable?.let { monitorHandler.removeCallbacks(it) }
-            pendingRestoreRunnable = null
+            monitorHandler.removeCallbacks(restoreRunnable)
         }
 
-        
         @JvmStatic
         private fun evaluateRestore(reason: String) {
             val inst = currentInstance ?: return
@@ -1310,7 +1496,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 return
             }
 
-            
             if (!isInNoteApp) {
                 if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "evaluateRestore[$reason]: blocked, not in note")
                 return
@@ -1323,10 +1508,11 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "evaluateRestore[$reason]: blocked, toolbar menu open")
                 return
             }
-            
-            
-            
-            
+
+            if (paletteSelectionHold && !paletteApplyInFlight && mosaicMode && MosaicLink.isBoardVisible()) {
+                setPaletteSelectionHold(false)
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "evaluateRestore[$reason]: palette selection hold dropped, Mosaic board visible")
+            }
             if (paletteApplyInFlight || paletteSelectionHold) {
                 if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "evaluateRestore[$reason]: blocked, palette selection held")
                 return
@@ -1335,8 +1521,20 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "evaluateRestore[$reason]: blocked, Mosaic menu open")
                 return
             }
-            
-            
+            if (MosaicLink.isPadOpen()) {
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "evaluateRestore[$reason]: blocked, Mosaic pad open")
+                return
+            }
+            if (MosaicLink.isQuickSwitchOpen()) {
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "evaluateRestore[$reason]: blocked, Mosaic quick switch open")
+                return
+            }
+
+            if (LexiLink.isFullScreen()) {
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "evaluateRestore[$reason]: blocked, Lexi full screen open")
+                return
+            }
+
             if (mosaicMode && MosaicLink.isBoardVisible()) {
                 paletteOverlaysParked = false
                 inst.resumeAllNativePanels()
@@ -1361,48 +1559,40 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "evaluateRestore[$reason]: blocked, doc screenshot route pending")
                 return
             }
-            
-            
+
             if (HostPenSignals.insertImageFlowActive) {
                 if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "evaluateRestore[$reason]: blocked, insert-image in flight")
                 return
             }
-            if (SubviewLogMonitor.isLassoMenuOpen()) {
+            if (SubviewLogMonitor.isLassoMenuOpen() && !restoreOverHostLasso) {
                 if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "evaluateRestore[$reason]: blocked, lasso menu open")
                 return
             }
 
-            
             paletteOverlaysParked = false
             inst.resumeAllNativePanels()
             val anyPanelOpen = anyNativeOverlayOwnsScreen()
 
-            
-            
             if (!anyPanelOpen) {
+                LexiLink.release("docCapture")
+                restoreOverHostLasso = false
+
                 if (toolbarRestorePending && rootView == null && tools.isNotEmpty()) {
                     if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "evaluateRestore[$reason]: restoring toolbar (collapsed=$collapsed)")
                     inst.restoreToolbarWindow()
                 }
                 toolbarRestorePending = false
-            }
-
-            if (!anyPanelOpen) {
                 val ctx = inst.reactApplicationContext
                 FloatingBubbleModule.reshowLast(ctx)
-                AiBubbleModule.reshowLast(ctx)
                 PaletteBubbleModule.reshowLast(ctx)
                 ScreenshotBubble.reshowIfHiddenByPalette()
-                
-                
+
                 FloatingPenGuard.endPark("restore evaluated[$reason]")
             }
 
-
-            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "evaluateRestore[$reason]: done anyPanel=$anyPanelOpen")
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "evaluateRestore[$reason]: done anyPanel=$anyPanelOpen guard=${FloatingPenGuard.debugState()}")
         }
 
-        
         @JvmStatic
         private fun markToolbarForRestore(parkGuards: Boolean = true) {
             if (parkGuards) FloatingPenGuard.beginPark("hide for restore")
@@ -1411,40 +1601,48 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     }
 
     init {
-        
-        
-        
+
         if (ConfigPanel.currentInstance?.isActuallyVisible != true) {
             ConfigPanel.currentInstance = null
             resetConfigPanelState()
         }
-        
-        
-        
-        
+
         if ((rootView == null || !rootView!!.isAttachedToWindow) &&
             !toolbarRestorePending) {
-            toolbarRestorePending = false
             toolbarHostClosePending = false
             toolbarHostCloseGeneration = -1L
         }
         lastReactContext = reactApplicationContext
+        NotipalDirs.attach(reactApplicationContext)
+        NotipalDirs.retireLegacy()
         MosaicLink.ensureRegistered(reactApplicationContext)
+        LexiLink.ensureRegistered(reactApplicationContext)
+        me.laumss.notipal.ui_common.filepicker.PickerCovers.noteRenderer = { path, page, name, done ->
+
+            val png = java.io.File(NotipalDirs.hostRender, name)
+            png.parentFile?.mkdirs()
+            val params = Arguments.createMap().apply {
+                putString("notePath", path); putInt("page", page); putInt("times", 1)
+                putString("pngPath", png.absolutePath); putInt("type", 1)
+            }
+            PageImageSource.callHost(reactApplicationContext, "generateNotePng", listOf(params)) { value, error ->
+                val ok = value == true && png.isFile
+                done(if (ok) png else null, if (ok) png.path else error ?: "generateNotePng failed")
+            }
+        }
+        TranslationService.ensureRegistered(reactApplicationContext)
         restoreBootstrapPending = false
         restoreBootstrapRunnable?.let { monitorHandler.removeCallbacks(it) }
         restoreBootstrapRunnable = null
         currentInstance = this
-        
-        
-        
-        
+
         val previousMonitor = windowStateMonitor
         if (previousMonitor == null || !previousMonitor.isFor(reactApplicationContext)) {
             previousMonitor?.stop()
             windowStateMonitor = WindowStateMonitor(reactApplicationContext)
         }
         windowStateMonitor?.start()
-        
+
         ToolRegistry.setPanelActiveEdgeListener { anyShowing -> onNativePanelActiveEdge(anyShowing) }
         knownStitchSessionActive = reactApplicationContext
             .getSharedPreferences(SCREENSHOT_STATE_PREFS, Context.MODE_PRIVATE)
@@ -1454,7 +1652,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             reactApplicationContext.applicationContext.registerComponentCallbacks(
                 object : android.content.ComponentCallbacks2 {
                     override fun onConfigurationChanged(newConfig: Configuration) {
-                        Handler(Looper.getMainLooper()).post {
+                        monitorHandler.post {
                             currentInstance?.handleOrientationChange("configuration")
                         }
                     }
@@ -1473,7 +1671,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                         override fun onDisplayRemoved(displayId: Int) {}
                         override fun onDisplayChanged(displayId: Int) {
                             if (displayId == android.view.Display.DEFAULT_DISPLAY) {
-                                Handler(Looper.getMainLooper()).post {
+                                monitorHandler.post {
                                     currentInstance?.handleOrientationChange("display-listener")
                                 }
                             }
@@ -1486,12 +1684,10 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 Log.w(TAG, "display listener registration failed: ${e.message}")
             }
         }
-        Handler(Looper.getMainLooper()).post {
+        monitorHandler.post {
             if (currentInstance === this) {
                 handleOrientationChange("module-init")
-                
-                
-                
+
                 if (toolbarRestorePending && !isPluginHostWindowShowing) {
                     scheduleRestore(RESTORE_DELAY_SHORT, "module init pending toolbar restore")
                 }
@@ -1513,14 +1709,17 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             toolbarRetryRunnable?.let(handler::removeCallbacks)
             toolbarRetryRunnable = null
             currentInstance = null
+            me.laumss.notipal.ui_common.filepicker.PickerCovers.noteRenderer = null
             foregroundMonitorRunning = false
+            monitorOnlyForRelay = false
+            LexiLink.onMonitorChanged(false)
             monitorHandler.removeCallbacks(staticMonitorRunnable)
             mosaicRebuildRunnable?.let(monitorHandler::removeCallbacks)
             mosaicRebuildRunnable = null
             HostPenSignals.releaseDocStickerHold("module invalidated")
-            
-            
-            
+
+            FloatingPenGuard.releaseScopes("module invalidated", PenGuardScope.HOST_UI)
+
             if (ConfigPanel.currentInstance?.isActuallyVisible != true) {
                 ConfigPanel.currentInstance = null
                 resetConfigPanelState()
@@ -1529,7 +1728,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         super.invalidate()
     }
 
-    
     private fun scheduleMosaicRebuild(visible: Boolean, surface: String, reason: String) {
         mosaicRebuildRunnable?.let(monitorHandler::removeCallbacks)
         var deferrals = 0
@@ -1539,11 +1737,8 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     mosaicMode != visible || mosaicSurface != surface) {
                     return
                 }
-                
-                
-                
-                
-                val forceBoardRebuild = visible && surface == MosaicLink.SURFACE_BOARD && deferrals >= 8
+
+                val forceBoardRebuild = visible && deferrals >= 8
                 if (isToolbarHandoffPending(visible) && !forceBoardRebuild) {
                     deferrals++
                     if (BuildConfig.ENABLE_DEBUG) {
@@ -1575,12 +1770,10 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         pendingShow || toolbarShowOwnsHostEntry() || hostCloseRunnable != null ||
             (visible && toolbarRestorePending && !mosaicMode)
 
-    private val handler = Handler(Looper.getMainLooper())
+    private val handler: Handler get() = monitorHandler
 
-    
     private var toolbarRetryRunnable: Runnable? = null
 
-    
     private var hostCloseRunnable: Runnable? = null
 
     private fun cancelScheduledHostClose() {
@@ -1594,7 +1787,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         toolbarHostCloseGeneration = -1L
     }
 
-    
     private fun armHostCloseForToolbarShow() {
         cancelScheduledHostClose()
         toolbarHostClosePending = true
@@ -1604,7 +1796,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    
     private fun scheduleHostCloseAfterToolbarShown() {
         if (!toolbarShowOwnsHostEntry()) return
         val generation = toolbarBuildGeneration
@@ -1669,7 +1860,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    
     private fun clearToolbarBuildForRetry() {
         val attachedRoot = rootView
         if (attachedRoot != null) {
@@ -1683,6 +1873,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         layoutParams = null
         textReceiveBtn = null
         paletteSidebarBtn = null
+        smartLassoIconView = null
         clipIconViews = arrayOfNulls(MAX_VISIBLE_CLIPS)
         pagedClipTools.clear()
         pendingShow = true
@@ -1697,16 +1888,14 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
     private val BTN_SIZE_DP = 54
     private val VERTICAL_BTN_SIZE_DP = 48
-    
+
     private val TOOLBAR_ICON_STROKE_DELTA_PX = -1f
     private val BTN_GAP_DP = 2
     private val PANEL_PAD_DP = 8
     private val BORDER_WIDTH = 2
     private val TITLE_ROW_H_DP = 38
-    private val TITLE_SEP_DP = 1
     private val CORNER_RADIUS_DP = 0f
     private val BTN_TEXT_SIZE_SP = 22f
-    private val TITLE_TEXT_SIZE_SP = 13f
 
     private val CLR_BTN_FG   = Color.parseColor("#1A1A1A")
     private val CLR_BTN_ACT  = Color.parseColor("#111111")
@@ -1714,17 +1903,10 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     private val CLR_SEP      = me.laumss.notipal.ui_common.FloatingChromeColors.dividerAndGrip
     private val CLR_BORDER   = Color.parseColor("#111111")
 
-    private val SIDE_INDICATOR_DP = 4
-    private val HANDLE_WIDTH_DP = 4
-    
     private val COLLAPSED_WIDTH_DP = 16
     private val COLLAPSED_HIT_WIDTH_DP = 24
     private val COLLAPSED_HEIGHT_DP = 72
 
-    private val SNAP_THRESHOLD = 40
-    
-    
-    private val EDGE_COLLAPSE_THRESHOLD = 20
     private val LONG_PRESS_MS = 600L
 
     data class ToolItem(
@@ -1747,18 +1929,112 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     }
 
     private val CLIP_ICON_DP = 32
-    
+
     private val CLIP_RADIUS_DP = 3
-    private val LAYER_BTN_DP = 20
     private var clipIconViews: Array<TextView?> = arrayOfNulls(MAX_VISIBLE_CLIPS)
     private val pagedClipTools = mutableListOf<View>()
     private var textReceiveBtn: View? = null
-    
+
     private var paletteSidebarBtn: View? = null
-    
+
+    private var smartLassoIconView: ImageView? = null
+    private var smartLassoIconShown: String? = null
+
+    private var smartLassoIconSpec: IntArray? = null
+
+    private fun refreshSmartLassoIcon() {
+        val view = smartLassoIconView ?: return
+        val spec = smartLassoIconSpec ?: return
+        val asset = smartLassoIconAsset()
+        if (asset == smartLassoIconShown) return
+        val icon = loadToolbarIcon(asset, spec[0], spec[1], spec[2]) ?: return
+        view.setImageDrawable(icon)
+        smartLassoIconShown = asset
+        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "smart lasso icon -> $asset")
+    }
+
     private var noteImportBusy = false
-    
+
     private var collapseBtn: View? = null
+
+    private var busyProgress: me.laumss.notipal.panels.NoteImportProgressPanel? = null
+
+    private var busyProgressPending: Runnable? = null
+
+    @ReactMethod
+    fun beginBusyProgress(kind: String, delayMs: Double) {
+        handler.post {
+            busyProgressPending?.let { handler.removeCallbacks(it) }
+            val pending = Runnable {
+                busyProgressPending = null
+                Log.i(TAG, "busy progress shown kind=$kind after ${delayMs.toLong()}ms")
+                showBusyProgress(kind)
+            }
+            busyProgressPending = pending
+            handler.postDelayed(pending, delayMs.toLong().coerceAtLeast(0L))
+        }
+    }
+
+    private fun showBusyProgress(kind: String) {
+        if (busyProgress != null) return
+        val panel = me.laumss.notipal.panels.NoteImportProgressPanel(reactApplicationContext, this)
+        busyProgress = panel
+        panel.show(
+            onCancel = null,
+            initialStatus = NativeLocale.t(if (kind == "palette") "palette_apply_processing" else "clip_paste_processing"),
+            titleText = NativeLocale.t("busy_processing_title"),
+        ) { shown -> if (!shown && busyProgress === panel) busyProgress = null }
+    }
+
+    private var clipSlotPanel: me.laumss.notipal.panels.ClipSlotPanel? = null
+
+    @ReactMethod
+    fun showClipSlotPicker(slotsJson: String, mode: String, promise: Promise) {
+        handler.post {
+            val slots = try {
+                val arr = org.json.JSONArray(slotsJson)
+                (0 until arr.length()).map { i ->
+                    val o = arr.getJSONObject(i)
+                    me.laumss.notipal.panels.ClipSlotPanel.Slot(
+                        o.getString("slot"), o.optBoolean("filled"),
+                        o.optString("thumb").takeIf { it.isNotEmpty() && !o.isNull("thumb") },
+                    )
+                }
+            } catch (e: org.json.JSONException) {
+                promise.reject("CLIP_SLOTS", e.message, e)
+                return@post
+            }
+
+            hideAllNativePanels()
+            suspendAllNativePanels()
+            parkToolbar()
+            ScreenshotBubble.hideForPalette()
+
+            if (SubviewLogMonitor.isLassoMenuOpen()) restoreOverHostLasso = true
+            val panel = me.laumss.notipal.panels.ClipSlotPanel(reactApplicationContext, this)
+            clipSlotPanel = panel
+            openNativePanel("clipSlots") {
+                panel.show(slots, paste = mode == "paste", onClear = { slot ->
+                    Log.i(TAG, "clip slot clear requested slot=$slot")
+                    emitEvent("onClipSlotClear", Arguments.createMap().apply { putString("slot", slot) })
+                }) { slot ->
+                    if (clipSlotPanel === panel) clipSlotPanel = null
+                    Log.i(TAG, "clip slot picker result=$slot")
+                    promise.resolve(slot)
+                }
+            }
+        }
+    }
+
+    @ReactMethod
+    fun endBusyProgress() {
+        handler.post {
+            busyProgressPending?.let { handler.removeCallbacks(it) }
+            busyProgressPending = null
+            busyProgress?.hide()
+            busyProgress = null
+        }
+    }
 
     @ReactMethod
     fun setOrientation(value: String) {
@@ -1766,11 +2042,9 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             val normalized = if (value == "vertical") "vertical" else "horizontal"
             if (normalized == orientation) return@post
             orientation = normalized
-            try {
-                reactApplicationContext
-                    .getSharedPreferences("quicktoolbar_presets", 0)
-                    .edit().putString(ORIENTATION_STORE_KEY, normalized).apply()
-            } catch (_: Exception) {}
+            reactApplicationContext
+                .getSharedPreferences(NotipalPrefs.PRESETS_FILE, 0)
+                .edit().putString(ORIENTATION_STORE_KEY, normalized).apply()
             if (rootView != null && !collapsed) {
                 removeAll()
                 createExpandedToolbar()
@@ -1786,23 +2060,20 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
     private fun loadOrientationFromPrefs() {
         orientation = "vertical"
-        try {
-            val prefs = reactApplicationContext.getSharedPreferences("quicktoolbar_presets", 0)
-            prefs.edit().putString(ORIENTATION_STORE_KEY, "vertical").apply()
-        } catch (_: Exception) {}
+        val prefs = reactApplicationContext.getSharedPreferences(NotipalPrefs.PRESETS_FILE, 0)
+        prefs.edit().putString(ORIENTATION_STORE_KEY, "vertical").apply()
     }
 
     private fun loadPositionFromPrefs() {
         if (positionLoaded) return
         try {
-            val prefs = reactApplicationContext.getSharedPreferences("quicktoolbar_presets", 0)
+            val prefs = reactApplicationContext.getSharedPreferences(NotipalPrefs.PRESETS_FILE, 0)
             stickyX = prefs.getInt(POSITION_STORE_KEY_X, -1)
             stickyY = prefs.getInt(POSITION_STORE_KEY_Y, -1)
         } catch (_: Exception) {}
         positionLoaded = true
     }
 
-    
     private fun refreshCollapseIconSide() {
         val btn = collapseBtn ?: return
         val lp = layoutParams ?: return
@@ -1813,35 +2084,29 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     private fun savePositionToPrefs(x: Int, y: Int) {
         stickyX = x; stickyY = y; positionLoaded = true
         refreshCollapseIconSide()
-        try {
-            reactApplicationContext.getSharedPreferences("quicktoolbar_presets", 0)
-                .edit().putInt(POSITION_STORE_KEY_X, x).putInt(POSITION_STORE_KEY_Y, y).apply()
-        } catch (_: Exception) {}
+        reactApplicationContext.getSharedPreferences(NotipalPrefs.PRESETS_FILE, 0)
+            .edit().putInt(POSITION_STORE_KEY_X, x).putInt(POSITION_STORE_KEY_Y, y).apply()
     }
 
     @ReactMethod
     fun hide() {
-        handler.post { try { removeAll() } catch (e: Exception) { if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "hide: ${e.message}", e) } }
+        handler.post { removeAll() }
     }
 
-    
     @ReactMethod
     fun toggleFromPluginButton(mode: String?) {
         handler.post {
-            
-            
+
             monitorHandler.removeCallbacks(configFallbackRunnable)
             val requestedDocMode = requestedToolbarDocMode(mode)
             val attachedRoot = rootView?.takeIf { it.isAttachedToWindow }
-            
-            
+
             if (rootView != null && attachedRoot == null) {
                 if (BuildConfig.ENABLE_DEBUG) {
                     Log.i(TAG, "toggleFromPluginButton: discard detached root")
                 }
                 removeAll()
             }
-
 
             val active = attachedRoot != null || toolbarRestorePending
             Log.i(TAG, "toggleFromPluginButton active=$active requestedDocMode=$requestedDocMode " +
@@ -1871,7 +2136,17 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    
+    private fun openToolbarFromMosaic() {
+        val session = hasToolbarSession()
+        Log.i(TAG, "open from Mosaic session=$session rootAttached=${rootView?.isAttachedToWindow == true}")
+        if (session) return
+        ensureEntryPermissions { granted ->
+            handler.post {
+                if (granted) showToolbarNow(null) else Log.w(TAG, "open from Mosaic: entry permissions denied")
+            }
+        }
+    }
+
     private fun ensureEntryPermissions(onResult: (Boolean) -> Unit) {
         if (entryPermissionInFlight) return
         entryPermissionInFlight = true
@@ -1895,7 +2170,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    
     @ReactMethod
     fun inspectAndFlushHostEntry(promise: Promise) {
         handler.post {
@@ -1957,14 +2231,12 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     private fun findDeclaredField(cls: Class<*>, name: String): java.lang.reflect.Field? =
         findDeclaredFieldStatic(cls, name)
 
-    
     @ReactMethod
     fun reportHostButtonChannel(working: Boolean) {
         hostButtonChannelBroken = !working
         if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "host button channel report working=$working")
     }
 
-    
     @ReactMethod
     fun reportHostButtonRaw(payload: String) {
         Log.i(TAG, "host button raw: $payload")
@@ -2007,10 +2279,10 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         docMode = document
         syncDocumentTextSelectionGuard()
         FloatingPenGuard.setAppContext(document)
-        
+
         DocChromeProbe.clear("app mode: $reason")
         DocChromeProbe.request("app mode: $reason")
-        
+
         if (appChanged) {
             emitEvent("onHostAppModeChanged", Arguments.createMap().apply {
                 putBoolean("document", document)
@@ -2025,7 +2297,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    
     private fun switchToolbarAppMode(document: Boolean, reason: String) {
         val hadSession = hasToolbarSession()
         val wasCollapsed = collapsed
@@ -2037,10 +2308,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             isPluginHostWindowShowing || anyNativeOverlayOwnsScreen()
         if (blocked) {
             toolbarRestorePending = true
-            if (rootView != null) {
-                markToolbarForRestore()
-                removeAll()
-            }
+            parkToolbar()
             return
         }
         toolbarRestorePending = false
@@ -2054,41 +2322,35 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    
     private fun mosaicExitSwapBlocked(): Boolean =
         !isInNoteApp || configPanelBlocksToolbar() || isPluginHostWindowShowing ||
             SubviewLogMonitor.isSubviewOpen() || SubviewLogMonitor.isToolbarMenuOpen() ||
             SubviewLogMonitor.isLassoMenuOpen() || anyNativeOverlayOwnsScreen() ||
             paletteApplyInFlight || paletteSelectionHold || paletteOverlaysParked ||
-            docScreenshotRoutePending || HostPenSignals.insertImageFlowActive
+            docScreenshotRoutePending || HostPenSignals.insertImageFlowActive ||
+            MosaicLink.isQuickSwitchOpen()
 
     internal fun rebuildForMosaic(visible: Boolean) {
         if (configPanelBlocksToolbar()) return
-        if (visible && MosaicLink.isChromeMenuOpen()) {
-            
-            if (rootView != null) {
-                markToolbarForRestore()
-                removeAll()
-            }
+        if (visible && (MosaicLink.isChromeMenuOpen() || MosaicLink.isQuickSwitchOpen())) {
+
+            parkToolbar()
             return
         }
         if (hasToolbarSession()) {
             tools.clear()
             if (!visible) {
-                
-                
-                
+
                 ensureToolsLoaded()
                 if (rootView != null && !mosaicExitSwapBlocked()) {
-                    
+
                     toolbarRestorePending = false
                     cancelScheduledRestore()
                     removeAll()
                     if (collapsed) createCollapsedHandle() else { pendingShow = true; createExpandedToolbar() }
                     Log.i(TAG, "toolbar swapped in place after mosaic closed tools=${tools.size}")
                 } else {
-                    markToolbarForRestore()
-                    removeAll()
+                    parkToolbar()
                     scheduleRestore(RESTORE_DELAY_SHORT, "mosaic closed")
                 }
                 monitorHandler.postDelayed(
@@ -2118,7 +2380,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     }
 
     private fun showToolbarNow(requestedDocMode: Boolean? = null) {
-        
+
         monitorHandler.removeCallbacks(configFallbackRunnable)
         if (configPanelBlocksToolbar()) {
             if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "showToolbarNow: config panel active, skip")
@@ -2137,10 +2399,9 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             collapsed = false
             removeAll()
             pendingShow = true
-            
+
             armHostCloseForToolbarShow()
-            
-            
+
             if (!foregroundMonitorRunning) startForegroundMonitor()
             createExpandedToolbar()
             requestLocalSendForActiveSession("toolbar show")
@@ -2151,7 +2412,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     }
     private fun ensureToolsLoaded() {
         if (tools.isNotEmpty()) return
-        val prefs = reactApplicationContext.getSharedPreferences("quicktoolbar_presets", 0)
+        val prefs = reactApplicationContext.getSharedPreferences(NotipalPrefs.PRESETS_FILE, 0)
         fun presetArray(key: String, fallback: String): JSONArray = try {
             prefs.getString(key, null)?.let { JSONObject(it).optJSONArray("tools") }
                 ?: JSONArray(fallback)
@@ -2191,19 +2452,23 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         appendMissingUtilityTools()
     }
 
-    
     private fun ensureMosaicCanvasTools() {
         val present = tools.mapTo(mutableSetOf()) { it.id }
         val catalog = listOf(
-            Triple("insert_image", "Im", "config_tool_image"),
-            Triple("insert_doc_screenshot", "Sc", "config_tool_doc"),
+            Triple("insert_doc_screenshot", "Sc", "config_tool_image_capture"),
             Triple(SMART_LASSO_TOOL_ID, "AI", "config_tool_smart_lasso"),
             Triple(AI_RELAY_TOOL_ID, "Rl", "config_tool_ai_relay"),
+            Triple(CLIP_MANAGER_TOOL_ID, "Cm", "config_tool_clip_manager"),
         )
         for ((id, icon, nameKey) in catalog) {
             if (id in present) continue
             val item = ToolItem(id, NativeLocale.t(nameKey), icon, id, nameKey = nameKey)
-            if (id == "insert_image") tools.add(0, item) else tools.add(item)
+            when (id) {
+                CLIP_MANAGER_TOOL_ID -> tools.add(0, item)
+                "insert_doc_screenshot" ->
+                    tools.add(if (tools.firstOrNull()?.id == CLIP_MANAGER_TOOL_ID) 1 else 0, item)
+                else -> tools.add(item)
+            }
             present.add(id)
         }
     }
@@ -2213,7 +2478,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         val defaults = listOf(
             ToolItem(CLIPBOARD_TOOL_ID, NativeLocale.t("config_tool_clipboard"), "Cl", CLIPBOARD_TOOL_ID, nameKey = "config_tool_clipboard"),
             ToolItem(COLLAPSE_TOOL_ID, NativeLocale.t("config_tool_collapse"), "⋯", COLLAPSE_TOOL_ID, nameKey = "config_tool_collapse"),
-            ToolItem(GOTO_NOTE_TOOL_ID, NativeLocale.t("config_tool_goto_note"), "N", GOTO_NOTE_TOOL_ID, nameKey = "config_tool_goto_note"),
             ToolItem(INSERT_TEXT_TOOL_ID, NativeLocale.t("config_tool_text"), "Tx", INSERT_TEXT_TOOL_ID, nameKey = "config_tool_text")
         )
         for (tool in defaults) {
@@ -2256,45 +2520,80 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     @ReactMethod(isBlockingSynchronousMethod = true)
     fun isShowingSync(): Boolean = rootView?.isAttachedToWindow == true
 
-    
+    @ReactMethod
+    fun readTextFile(path: String, promise: Promise) {
+        Thread({
+            try {
+                val file = java.io.File(path)
+                promise.resolve(if (file.isFile) file.readText(Charsets.UTF_8) else null)
+            } catch (error: java.io.IOException) {
+                promise.reject("READ_FAILED", error.message, error)
+            }
+        }, "NotipalReadText").start()
+    }
+
     @ReactMethod(isBlockingSynchronousMethod = true)
     fun isMosaicBoardVisible(): Boolean = MosaicLink.isBoardVisible()
 
-    
     @ReactMethod(isBlockingSynchronousMethod = true)
     fun isDocumentMode(): Boolean = docMode
 
-    
     @ReactMethod(isBlockingSynchronousMethod = true)
-    fun isMosaicBoardSurface(): Boolean = MosaicLink.isBoardSurface()
+    fun isHostLassoMenuOpen(): Boolean = SubviewLogMonitor.isLassoMenuOpen()
 
-    
+    @ReactMethod
+    fun releaseStaleLassoMenu(reason: String) {
+        SubviewLogMonitor.closeLassoMenuFromFallback(reason)
+    }
+
+    @ReactMethod(isBlockingSynchronousMethod = true)
+    fun isDocTextSelected(): Boolean = isDocumentContext() && SubviewLogMonitor.isDocTextSelected()
+
+    @ReactMethod
+    fun setSmartLassoSelectionKind(request: Int, sendsText: Boolean) {
+        handler.post {
+            if (request != lassoKindRequest || !hostLassoSelectionOpen()) return@post
+            lassoSelectionSendsText = sendsText
+            refreshSmartLassoIcon()
+        }
+    }
+
     @ReactMethod(isBlockingSynchronousMethod = true)
     fun getMosaicSurface(): String = MosaicLink.getSurface()
 
-    
     @ReactMethod(isBlockingSynchronousMethod = true)
     fun getMosaicNoteRef(): String = MosaicLink.getNoteRef() ?: ""
 
-    
+    @ReactMethod
+    fun finishMosaicSketchClipboard(outcome: String) {
+        MosaicLink.sendSketchClipboardResult(reactApplicationContext, outcome)
+    }
+
     @ReactMethod
     fun requestMosaicPasteStrokes() {
         MosaicLink.requestPasteStrokes(reactApplicationContext)
     }
 
-    
     @ReactMethod
     fun requestMosaicClearSelection(delete: Boolean) {
         MosaicLink.requestClearSelection(reactApplicationContext, delete)
     }
 
-    
+    @ReactMethod
+    fun showOwnedTipDialog(message: String) {
+        Dialog.tip(reactApplicationContext, message)
+    }
+
+    @ReactMethod
+    fun showOwnedConfirmDialog(message: String, leftText: String, rightText: String, isSuccess: Boolean, promise: Promise) {
+        Dialog.confirmResult(reactApplicationContext, message, leftText, rightText, isSuccess) { promise.resolve(it) }
+    }
+
     @ReactMethod
     fun requestMosaicTextCard(text: String, anchorScreenX: Int, anchorScreenY: Int) {
         MosaicLink.requestTextCard(reactApplicationContext, text, anchorScreenX, anchorScreenY)
     }
 
-    
     @ReactMethod
     fun enqueueMosaicImage(path: String, source: String, promise: Promise) {
         kotlin.concurrent.thread(isDaemon = true) {
@@ -2303,21 +2602,20 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    
-    internal fun enqueueImageToMosaic(path: String, source: String, after: (() -> Unit)? = null) {
+    internal fun enqueueImageToMosaic(path: String, source: String, deleteAfterInsert: String? = null, after: ((Boolean) -> Unit)? = null) {
         kotlin.concurrent.thread(isDaemon = true) {
             val ok = MosaicLink.enqueueImage(path, source)
             if (BuildConfig.ENABLE_DEBUG) {
                 Log.i(TAG, "[INSERT-DBG/Kt] enqueueImageToMosaic ok=$ok source=$source path=$path")
             }
+            if (ok && deleteAfterInsert != null) java.io.File(deleteAfterInsert).delete()
             handler.post {
-                after?.invoke()
+                after?.invoke(ok)
                 restoreToolbar()
             }
         }
     }
 
-    
     @ReactMethod
     fun notifyStickerInserted() {
         val document = docMode
@@ -2372,11 +2670,42 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    
-    
     private fun openNativePanel(name: String, show: () -> Unit) {
         emitEvent("onNativePanelOpen", Arguments.createMap().apply { putString("panel", name) })
         show()
+    }
+
+    internal fun openRelayWindow(forPage: Boolean, onResult: (Boolean) -> Unit) {
+        handler.post {
+            if (LexiLink.isFullScreen()) {
+                Log.i(TAG, "AIRelay window not opened: Lexi full screen open")
+                onResult(false)
+                return@post
+            }
+            val panel = RelayInboxPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule)
+            if (panel.isShowing) {
+
+                if (LexiLink.isOpen()) LexiLink.hold("panel:${panel.panelName}")
+                panel.openWindow(forPage, onResult)
+                return@post
+            }
+            ToolRegistry.hideAllExcept(panel)
+            openNativePanel("airRelay") { panel.openWindow(forPage, onResult) }
+        }
+    }
+
+    internal fun relayLexiQuestion(text: String) {
+        handler.post {
+            val core = AIRelayCore.get(reactApplicationContext)
+            if (core.stageText(text)) {
+                Log.i(TAG, "lexi question: staged in the AIRelay small window")
+                return@post
+            }
+            val panel = RelayInboxPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule)
+            ToolRegistry.hideAllExcept(panel)
+            openNativePanel("airRelay") { panel.showCompose(text) }
+            Log.i(TAG, "lexi question: AIRelay compose window, relay ${if (core.isEnabled()) "on" else "off"}")
+        }
     }
 
     @ReactMethod
@@ -2384,10 +2713,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         handler.post {
             if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[LASSO-DBG/Kt] openPanel screen=$screen (prev pendingScreen=$pendingScreen)")
 
-            
-            
-            
-            
             if (screen == "config" || screen == "main") {
                 val existingConfig = ConfigPanel.currentInstance
                 if (configPanelBlocksToolbar() || existingConfig?.isActuallyVisible == true) {
@@ -2411,6 +2736,19 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 return@post
             }
 
+            if (screen == "airRelay" || screen.startsWith("airRelayDetail:")) {
+                pendingScreen = ""
+
+                val panel = RelayInboxPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule)
+                ToolRegistry.hideAllExcept(panel)
+                if (!panel.isMini) removeAll()
+                val detailId = screen.removePrefix("airRelayDetail:").takeIf { screen.startsWith("airRelayDetail:") }
+                openNativePanel("airRelay") {
+                    if (detailId == null) panel.showList() else panel.showDetail(detailId)
+                }
+                return@post
+            }
+
             hideAllNativePanels()
 
             if (screen == "nativeSendClipboard") {
@@ -2420,24 +2758,11 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     SendPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show(syncClipboard = true)
                 }
                 handler.postDelayed({
-                    
-                    
-                    
+
                     if (pendingScreen != "nativeSendHelper") return@postDelayed
-                    callShowPluginView()
+                    showPluginViewForSend()
                     emitOpenMainWithRetries("nativeSendHelper")
                 }, 150)
-                return@post
-            }
-
-            if (screen == "airRelay" || screen.startsWith("airRelayDetail:")) {
-                pendingScreen = ""
-                removeAll()
-                val detailId = screen.removePrefix("airRelayDetail:").takeIf { screen.startsWith("airRelayDetail:") }
-                openNativePanel("airRelay") {
-                    val panel = RelayInboxPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule)
-                    if (detailId == null) panel.showList() else panel.showDetail(detailId)
-                }
                 return@post
             }
 
@@ -2455,7 +2780,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     fun forceClosePluginView() {
         handler.post {
             if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[LASSO-DBG/Kt] forceClosePluginView called")
-            insertPluginViewClosed = true
             callClosePluginView()
         }
     }
@@ -2487,7 +2811,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun savePreset(num: Int, json: String, promise: Promise) {
         try {
-            val prefs = reactApplicationContext.getSharedPreferences("quicktoolbar_presets", 0)
+            val prefs = reactApplicationContext.getSharedPreferences(NotipalPrefs.PRESETS_FILE, 0)
             prefs.edit().putString("preset_$num", json).apply()
             promise.resolve(true)
         } catch (e: Exception) {
@@ -2496,16 +2820,10 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    
-    @ReactMethod
-    fun paletteSnapshotsChanged() {
-        me.laumss.notipal.panels.PalettePanel.currentInstance?.reloadSnapshots()
-    }
-
     @ReactMethod
     fun loadPreset(num: Int, promise: Promise) {
         try {
-            val prefs = reactApplicationContext.getSharedPreferences("quicktoolbar_presets", 0)
+            val prefs = reactApplicationContext.getSharedPreferences(NotipalPrefs.PRESETS_FILE, 0)
             val json = prefs.getString("preset_$num", null)
             promise.resolve(json)
         } catch (e: Exception) {
@@ -2545,6 +2863,11 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         kotlin.concurrent.thread(isDaemon = true) {
             try {
                 val f = java.io.File(path)
+                if (f.parentFile?.absolutePath != DocScreenshotService.QUEUE_DIR) {
+                    Log.w(TAG, "[INSERT-DBG/Kt] deleteQueueFile refused, not a queue file: $path")
+                    promise.resolve(false)
+                    return@thread
+                }
                 val fileName = f.name
                 DocScreenshotService.unmarkInsertNext(fileName)
                 if (f.exists()) {
@@ -2562,7 +2885,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    
     @ReactMethod
     fun resizeInsertedSticker(rect: ReadableMap, promise: Promise) {
         PageImageSource.resizeLassoRectAfterInsert(reactApplicationContext, rect) { ok, error ->
@@ -2573,7 +2895,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    
     @ReactMethod
     fun hasHostLasso(promise: Promise) {
         try {
@@ -2645,10 +2966,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         openPluginSettingsFor(PLUGIN_ID)
     }
 
-    internal fun openMosaicPluginSettings() {
-        openPluginSettingsFor(MOSAIC_PLUGIN_ID)
-    }
-
     private fun openPluginSettingsFor(pluginId: String) {
         try {
             val intent = Intent(SETTINGS_PLUGIN_DETAIL_ACTION).apply {
@@ -2672,48 +2989,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    fun openPluginSettingsAfterFileReadDenied() {
-        if (shouldOpenPluginSettingsAfterDenied(PLUGIN_FILE_READ_PERMISSION)) openPluginSettings()
-    }
-
-    fun openPluginSettingsAfterFileWriteDenied() {
-        if (shouldOpenPluginSettingsAfterDenied(PLUGIN_FILE_WRITE_PERMISSION)) openPluginSettings()
-    }
-
-    @ReactMethod
-    fun openPluginSettingsAfterFileWritePermissionDenied() {
-        openPluginSettingsAfterFileWriteDenied()
-    }
-
-    private fun shouldOpenPluginSettingsAfterDenied(permission: String): Boolean {
-        return if (deniedPluginPermissions.contains(permission)) {
-            true
-        } else {
-            deniedPluginPermissions.add(permission)
-            false
-        }
-    }
-
-    private fun clearPluginPermissionDenied(permission: String) {
-        deniedPluginPermissions.remove(permission)
-    }
-
-    private fun parsePermissionStatus(value: Any?): Int {
-        return when (value) {
-            is Number -> value.toInt()
-            is String -> value.toIntOrNull() ?: 0
-            else -> 0
-        }
-    }
-
-    
-    
-    
-    
-    private fun isPluginPermissionGranted(status: Int): Boolean =
-        status == PLUGIN_PERMISSION_STATUS_ALWAYS || status == PLUGIN_PERMISSION_STATUS_SESSION
-
-    
     private fun permissionRequestDesc(permission: String): String = when (permission) {
         PLUGIN_INTERNET_PERMISSION -> NativeLocale.t("perm_desc_internet")
         PLUGIN_FILE_WRITE_PERMISSION -> NativeLocale.t("perm_desc_file_write")
@@ -2721,7 +2996,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         else -> NativeLocale.t("perm_desc_file_read")
     }
 
-    
     internal fun requestMosaicPluginPermissions(
         onResult: ((MosaicPermissionResult) -> Unit)? = null,
     ) {
@@ -2801,6 +3075,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             if (BuildConfig.ENABLE_DEBUG) {
                 Log.i(TAG, "Mosaic permission has $permission status=$status")
             }
+
             if (status == PLUGIN_PERMISSION_STATUS_ALWAYS || status == PLUGIN_PERMISSION_STATUS_SESSION) {
                 onResult(true)
                 return
@@ -2875,14 +3150,11 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    
     private fun closeHostPluginView() {
-        
-        
+
         callClosePluginView()
     }
 
-    
     private fun requestDirectHostPermission(permission: String, onResult: ((Boolean) -> Unit)?) {
         handler.post {
             try {
@@ -2911,105 +3183,14 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    fun requestPluginPermission(
-        permission: String,
-        onResult: ((Boolean) -> Unit)? = null,
-        requestIfMissing: Boolean = true
-    ) {
-        requestDirectHostPermission(permission, onResult)
-        return
-        handler.post {
-            try {
-                val storedStatus = readStoredPermissionStatus(permission)
-                if (storedStatus == PLUGIN_PERMISSION_STATUS_ALWAYS) {
-                    clearPluginPermissionDenied(permission)
-                    if (BuildConfig.ENABLE_DEBUG) {
-                        Log.i(TAG, "requestPluginPermission($permission): stored status=2 (always) granted")
-                    }
-                    onResult?.invoke(true)
-                    return@post
-                }
-                val pm = reactApplicationContext.catalystInstance.getNativeModule("NativePluginManager") ?: run {
-                    Log.w(TAG, "requestPluginPermission($permission): NativePluginManager not found")
-                    onResult?.invoke(false)
-                    return@post
-                }
-                val hasMethod = pm::class.java.methods.firstOrNull {
-                    it.name == "hasPermission" && it.parameterCount == 2 && it.parameterTypes[0] == String::class.java
-                } ?: run {
-                    Log.w(TAG, "requestPluginPermission($permission): hasPermission(String, Promise) not found")
-                    onResult?.invoke(false)
-                    return@post
-                }
-                
-                
-                
-                val requestMethod = if (requestIfMissing) {
-                    pm::class.java.methods.firstOrNull {
-                        it.name == "requestPermission" && it.parameterCount == 3 && it.parameterTypes[0] == String::class.java
-                    } ?: pm::class.java.methods.firstOrNull {
-                        it.name == "requestPermission" && it.parameterCount == 2 && it.parameterTypes[0] == String::class.java
-                    } ?: run {
-                        Log.w(TAG, "requestPluginPermission($permission): requestPermission(String, [String,] Promise) not found")
-                        onResult?.invoke(false)
-                        return@post
-                    }
-                } else {
-                    null
-                }
-                val requestPromise = PromiseImpl(
-                    Callback { args ->
-                        val status = parsePermissionStatus(args.firstOrNull())
-                        val granted = isPluginPermissionGranted(status)
-                        if (granted) clearPluginPermissionDenied(permission)
-                        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "requestPluginPermission($permission) request resolved: status=$status granted=$granted")
-                        handler.post { onResult?.invoke(granted) }
-                    },
-                    Callback { args ->
-                        if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "requestPluginPermission($permission) rejected: ${args.joinToString()}")
-                        handler.post { onResult?.invoke(false) }
-                    }
-                )
-                fun doRequest() {
-                    Log.i(TAG, "requestPluginPermission($permission): invoking requestPermission parameterCount=${requestMethod!!.parameterCount}")
-                    if (requestMethod!!.parameterCount == 3) {
-                        
-                        
-                        
-                        requestMethod.invoke(pm, permission, permissionRequestDesc(permission), requestPromise)
-                    } else {
-                        requestMethod.invoke(pm, permission, requestPromise)
-                    }
-                    Log.i(TAG, "requestPluginPermission($permission): requestPermission invoked")
-                }
-                val hasPromise = PromiseImpl(
-                    Callback { args ->
-                        val status = parsePermissionStatus(args.firstOrNull())
-                        val alreadyGranted = isPluginPermissionGranted(status)
-                        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "requestPluginPermission($permission) hasPermission resolved: status=$status alreadyGranted=$alreadyGranted")
-                        if (alreadyGranted) {
-                            clearPluginPermissionDenied(permission)
-                            handler.post { onResult?.invoke(true) }
-                        } else if (requestIfMissing) {
-                            doRequest()
-                        } else {
-                            handler.post { onResult?.invoke(false) }
-                        }
-                    },
-                    Callback { args ->
-                        if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "requestPluginPermission($permission) hasPermission rejected: ${args.joinToString()}")
-                        if (requestIfMissing) {
-                            doRequest()
-                        } else {
-                            handler.post { onResult?.invoke(false) }
-                        }
-                    }
-                )
-                hasMethod.invoke(pm, permission, hasPromise)
-            } catch (e: Exception) {
-                if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "requestPluginPermission($permission): ${e.message}", e)
-                onResult?.invoke(false)
+    fun requestPluginPermission(permission: String, onResult: ((Boolean) -> Unit)? = null) {
+        requestDirectHostPermission(permission) { granted ->
+            if (granted) {
+                deniedPluginPermissions.remove(permission)
+            } else if (!deniedPluginPermissions.add(permission)) {
+                openPluginSettings()
             }
+            onResult?.invoke(granted)
         }
     }
 
@@ -3029,16 +3210,13 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         handler.post {
             val storedStatus = readStoredPermissionStatus(permission)
             if (storedStatus == PLUGIN_PERMISSION_STATUS_ALWAYS) {
-                
-                
-                
+
                 if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "checkPluginPermission($permission): stored status=2 (always) → granted")
                 onResult?.invoke(true)
                 return@post
             }
-            
-            
-            requestPluginPermission(permission, onResult, requestIfMissing = true)
+
+            requestPluginPermission(permission, onResult)
         }
     }
 
@@ -3076,21 +3254,20 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     private fun requestScreenshotStoragePermissions(
         action: String,
         onGranted: () -> Unit,
-        onDenied: () -> Unit
+        onDenied: () -> Unit,
+        showDeniedFeedback: Boolean = true,
     ) {
         requestPluginFileReadPermission { readGranted ->
             if (!readGranted) {
                 if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "[CROP-DBG/Kt] $action denied: FILE:READ")
-                showScreenshotMessage("file_read_permission_needed")
-                openPluginSettingsAfterFileReadDenied()
+                if (showDeniedFeedback) showScreenshotMessage("file_read_permission_needed")
                 onDenied()
                 return@requestPluginFileReadPermission
             }
             requestPluginFileWritePermission { writeGranted ->
                 if (!writeGranted) {
                     if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "[CROP-DBG/Kt] $action denied: FILE:WRITE")
-                    showScreenshotMessage("file_write_permission_needed")
-                    openPluginSettingsAfterFileWriteDenied()
+                    if (showDeniedFeedback) showScreenshotMessage("file_write_permission_needed")
                     onDenied()
                     return@requestPluginFileWritePermission
                 }
@@ -3144,7 +3321,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     }
 
     private fun callShowPluginView() = withNativePluginManager("callShowPluginView") { pm ->
-        
+
         selfShowPluginViewAt = android.os.SystemClock.elapsedRealtime()
         val allMethods = pm::class.java.methods.filter { it.name == "showPluginView" }
         if (allMethods.isEmpty()) return@withNativePluginManager
@@ -3154,12 +3331,16 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         if (singleArg != null) { singleArg.invoke(pm, PromiseImpl(null, null)); return@withNativePluginManager }
     }
 
+    private fun showPluginViewForSend() {
+        if (MosaicLink.isBoardVisible()) {
+            Log.i(TAG, "send helper: showPluginView skipped, Mosaic board owns PluginContainer")
+            return
+        }
+        callShowPluginView()
+    }
+
     private fun callClosePluginView() = withNativePluginManager("callClosePluginView") { pm ->
-        
-        
-        
-        
-        
+
         if (MosaicLink.isBoardVisible()) {
             Log.i(TAG, "callClosePluginView skipped: Mosaic board owns PluginContainer")
             return@withNativePluginManager
@@ -3170,9 +3351,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             if (methods.isEmpty()) continue
             val noArg = methods.firstOrNull { it.parameterCount == 0 }
             if (noArg != null) { noArg.invoke(pm); if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "$name() called"); return@withNativePluginManager }
-            
-            
-            
+
             val singleArg = methods.firstOrNull {
                 it.parameterCount == 1 && (
                     it.parameterTypes[0].isAssignableFrom(PromiseImpl::class.java) ||
@@ -3184,7 +3363,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "callClosePluginView: no suitable method found")
     }
 
-    private fun getHostPluginApp(pm: Any): Any? =
+    private fun getHostPluginApp(pm: NativeModule): Any? =
         pm.javaClass.methods.firstOrNull {
             it.name == "getPluginApp" && it.parameterCount == 0
         }?.invoke(pm) ?: findDeclaredField(pm.javaClass, "pluginApp")
@@ -3195,8 +3374,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             it.name == "getClientUid" && it.parameterCount == 0
         }?.invoke(pluginApp) as? Number)?.toInt() ?: -1
 
-    
-    private fun notifySettingsClientClosed(pm: Any) {
+    private fun notifySettingsClientClosed(pm: NativeModule) {
         try {
             val pa = getHostPluginApp(pm) ?: return
             val clientUid = getHostClientUid(pa)
@@ -3247,24 +3425,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    
-    private val autoCollapseRunnable = Runnable { }
-
-    private fun cancelAutoCollapse() {
-        handler.removeCallbacks(autoCollapseRunnable)
-    }
-
-    private fun isNearEdge(): Boolean {
-        val lp = layoutParams ?: return false
-        val vw = expandedRoot?.measuredWidth?.takeIf { it > 0 }
-            ?: expandedRoot?.width?.takeIf { it > 0 }
-            ?: return false
-        refreshScreenDimensions()
-        val flushLeft = lp.x <= DOCK_FLUSH_TOLERANCE
-        val flushRight = (screenWidth - (lp.x + vw)) <= DOCK_FLUSH_TOLERANCE
-        return flushLeft || flushRight
-    }
-
     private fun inferDockSideFromPosition() {
         val lp = layoutParams ?: return
         val vw = expandedRoot?.measuredWidth?.takeIf { it > 0 }
@@ -3275,24 +3435,28 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         dockSide = if (distLeft <= distRight) "left" else "right"
     }
 
-    private fun resetAutoCollapse() {
-        handler.removeCallbacks(autoCollapseRunnable)
-    }
-
     private fun switchToCollapsed() {
         if (collapsed && collapsedRoot != null) return
-        cancelAutoCollapse()
         val lp = layoutParams as? WindowManager.LayoutParams
         if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "switchToCollapsed: x=${lp?.x} y=${lp?.y} side=$dockSide screen=${screenWidth}x${screenHeight}")
         inferDockSideFromPosition()
         collapsed = true
+        relayStowed = false
+        lexiStowed = false
         removeAll()
         createCollapsedHandle()
         emitCollapseChange()
+        LexiLink.release(LEXI_TOOLBAR_HOLD)
     }
 
     private fun switchToExpanded() {
         if (!collapsed && expandedRoot != null) return
+        relayStowed = false
+        lexiStowed = false
+
+        if (LexiLink.isSmallOpen()) LexiLink.hold(LEXI_TOOLBAR_HOLD)
+
+        if (RelayInboxPanel.smallUp()) RelayInboxPanel.closeSmall()
         if (preDockX >= 0) {
             savePositionToPrefs(preDockX, preDockY)
             preDockX = -1; preDockY = -1
@@ -3302,7 +3466,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         createExpandedToolbar()
         emitCollapseChange()
 
-        expandedRoot?.post { resetAutoCollapse() }
+        PaletteBubbleModule.unstowStatic(reactApplicationContext)
     }
 
     private fun emitCollapseChange() {
@@ -3334,11 +3498,9 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         Surface.ROTATION_0
     }
 
-    
     private fun toolbarWindowVisible(): Boolean =
         rootView?.let { it.isAttachedToWindow && it.visibility == View.VISIBLE } == true
 
-    
     private fun handleOrientationChange(reason: String) {
         val oldW = screenWidth; val oldH = screenHeight
         val oldRotation = lastDisplayRotation
@@ -3348,10 +3510,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         val displayChanged = oldW != screenWidth || oldH != screenHeight || oldRotation != rotation
 
         val foreground = if (displayChanged) foregroundActivity() else null
-        val supportsHandwriting = foreground?.let {
-            (it.packageName == NOTE_PACKAGE && it.activityName == NOTE_INSIDE_PAGES_ACTIVITY) ||
-                it.packageName == DOC_PACKAGE
-        } == true
+        val supportsHandwriting = foreground?.let(::isHandwritingForeground) == true
         val foregroundKey = foreground?.let { "${it.packageName}/${it.activityName}" }
         val toolbarVisible = toolbarWindowVisible()
         val startRotationSync = displayChanged && oldRotation >= 0 && supportsHandwriting &&
@@ -3368,12 +3527,11 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
         if (startRotationSync) {
             rotationEpoch += 1L
+            rotationForegroundChecked = false
+            rotationForegroundRetries = 0
+            HostPenSignals.resetRotationBaseline()
             rotationStartForegroundKey = foregroundKey
             monitorHandler.removeCallbacks(rotationDisplaySettledRunnable)
-            monitorHandler.removeCallbacks(rotationDialogRetryRunnable)
-            if (rotationDialogArmed || rotationDialogShown) {
-                SubviewLogMonitor.retargetOwnedRotationDialog(rotationEpoch)
-            }
             FloatingPenGuard.beginRotationSync(rotationEpoch, reason)
             monitorHandler.postDelayed(
                 rotationDisplaySettledRunnable,
@@ -3387,6 +3545,10 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 Log.i(TAG, "rotation sync skipped: toolbar window hidden reason=$reason")
             }
         }
+
+        val lastKey = lastForegroundKey
+        val wasOnPage = lastKey == "$NOTE_PACKAGE/$NOTE_INSIDE_PAGES_ACTIVITY" || lastKey?.startsWith("$DOC_PACKAGE/") == true
+        if (oldRotation >= 0 && oldRotation != rotation && (supportsHandwriting || wasOnPage)) closeFloatsForRotation()
 
         val hadPanelOpen = ToolRegistry.handleRotation()
 
@@ -3403,21 +3565,63 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             try { windowManager?.updateViewLayout(rootView, lp) } catch (_: Exception) {}
         } else if (lp != null && !collapsed && expandedRoot != null) {
             try { windowManager?.updateViewLayout(rootView, lp) } catch (_: Exception) {}
+            keepToolbarReachable("display changed")
         }
 
         FloatingBubbleModule.handleOrientationChange()
-        AiBubbleModule.handleOrientationChange()
         PaletteBubbleModule.handleOrientationChange()
         DocChromeProbe.request("display: $reason")
     }
 
+    private fun closeFloatsForRotation() {
+        val relay = RelayInboxPanel.showing()
+        val relayFull = relay != null && !relay.isMini
+        if (relay != null && !relayFull) relay.hide()
+        FloatingBubbleModule.hideAndForget()
+        PaletteBubbleModule.hideAndForget()
+        val shot = ScreenshotBubble.isShowing
+        if (shot) ScreenshotBubble.hide()
+        emitEvent("onFloatsClosed", Arguments.createMap().apply {
+            putString("reason", "rotation")
+            putBoolean("ai", !relayFull)
+        })
+        collapseToolbarKept("rotation")
+
+        if (shot && rootView == null) restoreToolbar()
+        Log.i(TAG, "rotation: floats closed (relay=${relay != null && !relayFull} shot=$shot), toolbar collapsed")
+    }
+
     private fun onRotationDisplaySettled(epoch: Long) {
         if (epoch == 0L || epoch != rotationEpoch) return
-        val foreground = foregroundActivity()
-        val currentKey = foreground?.let { "${it.packageName}/${it.activityName}" }
-        if (currentKey != rotationStartForegroundKey) {
-            cancelRotationSync("foreground changed during display settle")
-            return
+        if (!rotationForegroundChecked) {
+            val foreground = foregroundActivity()
+            val currentKey = foreground?.let { "${it.packageName}/${it.activityName}" }
+            if (currentKey != rotationStartForegroundKey) {
+                when {
+
+                    foreground == null && rotationForegroundRetries < ROTATION_FOREGROUND_MAX_RETRIES -> {
+                        rotationForegroundRetries += 1
+                        Log.i(TAG, "display settled epoch=$epoch: no resumed activity yet, " +
+                            "retry=$rotationForegroundRetries")
+                        monitorHandler.postDelayed(
+                            rotationDisplaySettledRunnable,
+                            PenGuardTiming.ROTATION_DISPLAY_SETTLE_MS
+                        )
+                        return
+                    }
+
+                    foreground != null && isHandwritingForeground(foreground) -> {
+                        Log.i(TAG, "display settled epoch=$epoch: foreground " +
+                            "$rotationStartForegroundKey → $currentKey, still handwriting")
+                        rotationStartForegroundKey = currentKey
+                    }
+                    else -> {
+                        cancelRotationSync("foreground changed during display settle")
+                        return
+                    }
+                }
+            }
+            rotationForegroundChecked = true
         }
         val viewsReady = FloatingPenGuard.refreshAllForRotation(epoch)
         Log.i(TAG, "display settled epoch=$epoch viewsReady=$viewsReady")
@@ -3428,44 +3632,20 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             )
             return
         }
-        showRotationDialogWhenReady(epoch)
-    }
 
-    private fun showRotationDialogWhenReady(epoch: Long) {
-        if (epoch == 0L || epoch != rotationEpoch || rotationDialogShown || rotationDialogArmed) return
-        if (SubviewLogMonitor.isSubviewOpen() || SubviewLogMonitor.isToolbarMenuOpen() ||
-            SubviewLogMonitor.isLassoMenuOpen() || ToolRegistry.anyPanelShowing() ||
-            FloatingPenGuard.hasBlockingOwnerForRotation()) {
-            monitorHandler.postDelayed(rotationDialogRetryRunnable, PenGuardTiming.ROTATION_DIALOG_RETRY_MS)
-            return
-        }
-        if (!SubviewLogMonitor.armOwnedRotationDialog(epoch)) {
-            monitorHandler.postDelayed(rotationDialogRetryRunnable, PenGuardTiming.ROTATION_DIALOG_RETRY_MS)
-            return
-        }
-        rotationDialogArmed = true
-        Log.i(TAG, "rotation state WAIT_DIALOG epoch=$epoch")
-        me.laumss.notipal.ui_common.Dialog.tip(
-            reactApplicationContext,
-            NativeLocale.t("rotation_sync_message")
-        ) {
-            monitorHandler.post {
-                if (epoch != rotationEpoch || rotationEpoch == 0L) return@post
-                Log.i(TAG, "rotation dialog confirmed epoch=$epoch → destroyAll")
-                destroyAll()
-            }
-        }
+        Log.i(TAG, "rotation state DONE epoch=$epoch")
+        HostPenSignals.onRotationSettled()
+        cancelRotationSync("rotation complete")
+        HostPenSignals.scheduleReassert("rotation complete")
     }
 
     private fun cancelRotationSync(reason: String) {
-        val epoch = rotationEpoch
-        if (epoch != 0L) SubviewLogMonitor.cancelOwnedRotationDialog(epoch)
         monitorHandler.removeCallbacks(rotationDisplaySettledRunnable)
-        monitorHandler.removeCallbacks(rotationDialogRetryRunnable)
         rotationEpoch = 0L
         rotationStartForegroundKey = null
-        rotationDialogArmed = false
-        rotationDialogShown = false
+        rotationForegroundChecked = false
+        rotationForegroundRetries = 0
+        HostPenSignals.resetRotationBaseline()
         FloatingPenGuard.cancelRotationSync(reason)
     }
 
@@ -3499,7 +3679,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 override fun draw(canvas: android.graphics.Canvas) {
                     val b = bounds
                     val half = strokeW / 2f
-                    
+
                     val rect = if (dockLeft) {
                         android.graphics.RectF(b.left - radius, b.top + half, b.right - half, b.bottom - half)
                     } else {
@@ -3525,8 +3705,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             }
         }
 
-        
-        
         collapsedRoot = android.widget.FrameLayout(ctx).apply {
             addView(stripe, android.widget.FrameLayout.LayoutParams(w, h).apply {
                 gravity = if (dockLeft) Gravity.START else Gravity.END
@@ -3573,14 +3751,15 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 }
                 MotionEvent.ACTION_UP -> {
                     handler.removeCallbacks(collapsedLongPressRunnable)
+                    val swiped = isDragging
+
+                    isDragging = false
                     if (!longPressTriggered) {
-                        if (isDragging) {
+                        if (swiped) {
                             val dx = event.rawX - startRawX
                             val inward = if (dockSide == "left") dx > SWIPE_THRESHOLD else dx < -SWIPE_THRESHOLD
                             if (inward) switchToExpanded()
                         } else {
-                            
-                            
                             switchToExpanded()
                         }
                     }
@@ -3588,6 +3767,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 }
                 MotionEvent.ACTION_CANCEL -> {
                     handler.removeCallbacks(collapsedLongPressRunnable)
+                    isDragging = false
                     true
                 }
                 else -> false
@@ -3600,6 +3780,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         try {
             wm.addView(handle, lp)
             rootView = handle
+            handle.post { avoidMosaicToolbar("collapsed shown") }
         } catch (t: Throwable) {
             if (BuildConfig.ENABLE_DEBUG) {
                 Log.w(TAG, "collapsed handle addView failed: ${t.message}", t)
@@ -3614,7 +3795,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "collapsed handle shown, side=$dockSide")
     }
 
-    
     private fun createExpandedToolbar() {
         if (regionCaptureActive) return
         if (currentInstance !== this) {
@@ -3631,8 +3811,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             return
         }
         if (rootView != null) {
-            
-            
+
             if (BuildConfig.ENABLE_DEBUG) {
                 Log.i(TAG, "createExpandedToolbar: clearing detached root")
             }
@@ -3659,8 +3838,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
     private fun createExpandedToolbarInternal() {
         if (regionCaptureActive) return
-        
-        
+
         val ctx = android.view.ContextThemeWrapper(reactApplicationContext, android.R.style.Theme_DeviceDefault_Light)
         if (BuildConfig.ENABLE_DEBUG) {
             Log.i(TAG, "createExpandedToolbar package=${ctx.packageName}")
@@ -3672,22 +3850,15 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         val borderPx = dpToPx(BORDER_WIDTH)
         val cornerR  = dpToPx(CORNER_RADIUS_DP.toInt()).toFloat()
         val titleH   = dpToPx(TITLE_ROW_H_DP)
-        val titleSep = dpToPx(TITLE_SEP_DP)
-        
-        
-        val showClipboard = true
-        
-        
+
         val showTextReceive = mosaicMode || !docMode
-        val showGotoNote = docMode && !mosaicMode
-        val showReturnNote = false
+        val showDocShare = docMode && !mosaicMode
+        val showDocToMosaic = docMode && !mosaicMode
         val showNoteToMosaic = !docMode && !mosaicMode
         val showMosaicPalette = mosaicMode
-        val showCollapse = true
-        val hasSidebarItems = showClipboard || showTextReceive ||
-            showGotoNote || showReturnNote || showNoteToMosaic || showMosaicPalette || showCollapse
         textReceiveBtn = null
         paletteSidebarBtn = null
+        smartLassoIconView = null
         clipIconViews.fill(null)
         pagedClipTools.clear()
 
@@ -3743,13 +3914,14 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                             val lp = layoutParams as? WindowManager.LayoutParams ?: return true
                             try { windowManager?.updateViewLayout(rootView, lp) } catch (_: Exception) {}
                             if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "dragEnd: x=${lp.x} y=${lp.y} expanded=true")
-                            
+
                             FloatingDragRefresh.end(this)
                             savePositionToPrefs(lp.x, lp.y)
                             emitEvent("onToolbarDragEnd", Arguments.createMap().apply {
                                 putInt("x", lp.x)
                                 putInt("y", lp.y)
                             })
+                            avoidMosaicToolbar("drag end")
                         }
                     }
                 }
@@ -3768,7 +3940,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
 
         val clipIconSz = dpToPx(CLIP_ICON_DP)
-        val clipIconGap = dpToPx(3)
         fun makeClipIcon(i: Int): TextView {
             val slot = i + 1
             val filled = titleClipFilled.getOrElse(i) { false }
@@ -3789,11 +3960,9 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     }
                 }
                 setOnClickListener {
-                    resetAutoCollapse()
                     emitEvent("onTitleClipTap", Arguments.createMap().apply { putString("slot", slot.toString()) })
                 }
                 setOnLongClickListener {
-                    resetAutoCollapse()
                     emitEvent("onTitleClipLongPress", Arguments.createMap().apply { putString("slot", slot.toString()) })
                     true
                 }
@@ -3819,18 +3988,23 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 }
             }
             view.background = null
-            if (iconId == NOTE_TO_MOSAIC_TOOL_ID) {
-                view.contentDescription = NativeLocale.t("mosaic_note_import")
-                view.tooltipText = NativeLocale.t("mosaic_note_import")
+            val descriptionKey = when (iconId) {
+                NOTE_TO_MOSAIC_TOOL_ID -> "mosaic_note_import"
+                DOC_TO_MOSAIC_TOOL_ID -> "doc_mosaic_import"
+                DOC_SHARE_TOOL_ID -> "doc_share_localsend"
+                else -> null
+            }
+            if (descriptionKey != null) {
+                view.contentDescription = NativeLocale.t(descriptionKey)
+                view.tooltipText = null
             }
             view.layoutParams = LinearLayout.LayoutParams(sidebarBtnSz, sidebarBtnSz).apply {
                 marginEnd = dpToPx(1)
             }
-            view.setOnClickListener { resetAutoCollapse(); action() }
+            view.setOnClickListener { action() }
             return view
         }
 
-        
         fun makeLatchSidebarBtn(iconId: String, fallbackText: String, topMargin: Int, bottomMargin: Int): View {
             val iconDrawable = loadIconFromAssets(iconId, clipIconSz, Color.BLACK, dpToPx(5))
             val btn: View = if (iconDrawable != null) {
@@ -3858,9 +4032,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
         fun addTextReceiveBtn(parent: LinearLayout, topMargin: Int = 0, bottomMargin: Int = 0) {
             val btn = makeLatchSidebarBtn("insert_text", "Tx", topMargin, bottomMargin)
-            
-            btn.translationY = -dpToPx(4).toFloat()
-            btn.setOnClickListener { resetAutoCollapse(); handleTextReceiveTap() }
+            btn.setOnClickListener { handleTextReceiveTap() }
             textReceiveBtn = btn
             refreshTextReceiveBtn()
             parent.addView(btn)
@@ -3900,7 +4072,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             }
             collapseBtn = view
             refreshCollapseIconSide()
-            
+
             view.post { refreshCollapseIconSide() }
             return view
         }
@@ -3910,7 +4082,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         if (orientation == "vertical") {
 
             val titleColW = dpToPx(CLIP_ICON_DP + 6)
-            
+
             val sidebarTopPadding = dpToPx(3)
 
             val bodyRow = LinearLayout(ctx).apply {
@@ -3939,11 +4111,10 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
                 setBackgroundColor(CLR_SIDEBAR_BG)
                 layoutParams = LinearLayout.LayoutParams(titleColW, LinearLayout.LayoutParams.MATCH_PARENT)
-                
+
                 val noteMode = !docMode && !mosaicMode
                 setPadding(dpToPx(3), sidebarTopPadding,
                     dpToPx(3), dpToPx(if (noteMode) 4 else 2))
-                visibility = if (hasSidebarItems) View.VISIBLE else View.GONE
             }
 
             dragSpacer = View(ctx)
@@ -3961,7 +4132,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                             clipSwipeStartX = ev.rawX
                             clipSwipeStartY = ev.rawY
                             clipSwipeCaptured = false
-                            
+
                             parent?.requestDisallowInterceptTouchEvent(true)
                         }
                         android.view.MotionEvent.ACTION_MOVE -> {
@@ -3971,7 +4142,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                                 clipSwipeCaptured = true
                                 return true
                             } else if (!clipSwipeCaptured && dx > dpToPx(12) && dx >= dy) {
-                                
+
                                 parent?.requestDisallowInterceptTouchEvent(false)
                             }
                         }
@@ -4025,11 +4196,11 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 clipIconViews[vi] = tv
                 clipCol.addView(tv)
             }
-            if (showClipboard) titleCol.addView(clipCol)
+            titleCol.addView(clipCol)
 
             val sidebarToolParent = if (pageSidebarTools) clipCol else titleCol
             if (showTextReceive) {
-                
+
                 addTextReceiveBtn(sidebarToolParent, topMargin = dpToPx(6),
                     bottomMargin = if (pageSidebarTools && !mosaicMode) 0 else dpToPx(1))
                 if (pageSidebarTools) textReceiveBtn?.let {
@@ -4058,23 +4229,39 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 sidebarToolParent.addView(paletteButton)
             }
 
-            if (showGotoNote) {
-                titleCol.addView(makeSidebarIconBtn(GOTO_NOTE_TOOL_ID, "N") {
-                    launchNoteApp()
+            if (showDocShare) {
+                val shareButton = makeSidebarIconBtn(DOC_SHARE_TOOL_ID, "N") {
+                    shareCurrentDocViaLocalSend()
+                }.apply {
+                    (layoutParams as LinearLayout.LayoutParams).topMargin = dpToPx(6)
+                }
+                if (pageSidebarTools) {
+                    pagedClipTools.add(shareButton)
+                    shareButton.visibility = if (clipPage == 0) View.VISIBLE else View.GONE
+                }
+                sidebarToolParent.addView(shareButton)
+            }
+
+            if (showDocToMosaic) {
+                val importButton = makeSidebarIconBtn(DOC_TO_MOSAIC_TOOL_ID, "Dm") {
+                    importSelectedDocPagesToMosaic()
                 }.apply {
                     val lp = layoutParams as LinearLayout.LayoutParams
                     lp.topMargin = dpToPx(6)
-                    
+
                     lp.bottomMargin = dpToPx(2)
-                })
+                }
+                if (pageSidebarTools) {
+                    pagedClipTools.add(importButton)
+                    importButton.visibility = if (clipPage == 0) View.VISIBLE else View.GONE
+                }
+                sidebarToolParent.addView(importButton)
             }
 
-            if (showCollapse) {
-                titleCol.addView(makeSidebarSwapBtn(clipIconSz).apply {
-                    (layoutParams as LinearLayout.LayoutParams).topMargin =
-                        if (showTextReceive || showGotoNote || showReturnNote || showNoteToMosaic || showMosaicPalette) dpToPx(6) else dpToPx(1)
-                })
-            }
+            titleCol.addView(makeSidebarSwapBtn(clipIconSz).apply {
+                (layoutParams as LinearLayout.LayoutParams).topMargin =
+                    if (showTextReceive || showDocShare || showNoteToMosaic || showMosaicPalette) dpToPx(6) else dpToPx(1)
+            })
             bodyRow.addView(titleCol)
 
             expandedRoot!!.addView(bodyRow)
@@ -4089,7 +4276,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     LinearLayout.LayoutParams.MATCH_PARENT, titleH
                 )
                 setBackgroundColor(CLR_SIDEBAR_BG)
-                visibility = if (hasSidebarItems) View.VISIBLE else View.GONE
             }
             val clipRow = LinearLayout(ctx).apply {
                 this.orientation = LinearLayout.HORIZONTAL
@@ -4108,17 +4294,15 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 clipIconViews[i] = tv
                 clipRow.addView(tv)
             }
-            if (showClipboard) titleRow.addView(clipRow)
+            titleRow.addView(clipRow)
 
-            if (showClipboard && (showTextReceive || showGotoNote || showReturnNote || showNoteToMosaic || showMosaicPalette || showCollapse)) {
-                titleRow.addView(View(ctx).apply {
-                    setBackgroundColor(CLR_SEP)
-                    layoutParams = LinearLayout.LayoutParams(dpToPx(1), (titleH * 0.6f).toInt()).apply {
-                        marginStart = dpToPx(2)
-                        marginEnd = dpToPx(2)
-                    }
-                })
-            }
+            titleRow.addView(View(ctx).apply {
+                setBackgroundColor(CLR_SEP)
+                layoutParams = LinearLayout.LayoutParams(dpToPx(1), (titleH * 0.6f).toInt()).apply {
+                    marginStart = dpToPx(2)
+                    marginEnd = dpToPx(2)
+                }
+            })
 
             dragSpacer = View(ctx)
 
@@ -4132,9 +4316,15 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
             if (showMosaicPalette) titleRow.addView(makeSidebarPaletteBtn())
 
-            if (showGotoNote) {
-                titleRow.addView(makeSidebarIconBtn(GOTO_NOTE_TOOL_ID, "N") {
-                    launchNoteApp()
+            if (showDocToMosaic) {
+                titleRow.addView(makeSidebarIconBtn(DOC_TO_MOSAIC_TOOL_ID, "Dm") {
+                    importSelectedDocPagesToMosaic()
+                })
+            }
+
+            if (showDocShare) {
+                titleRow.addView(makeSidebarIconBtn(DOC_SHARE_TOOL_ID, "N") {
+                    shareCurrentDocViaLocalSend()
                 })
             }
 
@@ -4142,7 +4332,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 layoutParams = LinearLayout.LayoutParams(0, titleH, 1f)
             })
 
-            if (showCollapse) titleRow.addView(makeSidebarSwapBtn(sidebarBtnSz))
+            titleRow.addView(makeSidebarSwapBtn(sidebarBtnSz))
             expandedRoot!!.addView(titleRow)
 
             toolContainer = LinearLayout(ctx).apply {
@@ -4182,9 +4372,12 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             ?: throw IllegalStateException("WindowManager unavailable")
         try {
             wm.addView(toolbarRoot, toolbarParams)
-            
-            
+
             rootView = toolbarRoot
+            toolbarRoot.post {
+                keepToolbarReachable("expanded shown")
+                avoidMosaicToolbar("expanded shown")
+            }
         } catch (t: Throwable) {
             Log.w(TAG, "createExpandedToolbar addView failed: ${t.message}", t)
             try { wm.removeView(toolbarRoot) } catch (_: Throwable) {}
@@ -4198,8 +4391,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             Log.i(TAG, "createExpandedToolbar addView complete type=$wmType " +
                 "x=${toolbarParams.x} y=${toolbarParams.y}")
         }
-        
-        
+
         try {
             startForegroundMonitor()
         } catch (t: Throwable) {
@@ -4212,33 +4404,32 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
         if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "expanded toolbar shown, ${tools.size} tools")
 
-        
-        
         scheduleHostCloseAfterToolbarShown()
-
-        
-        
-        toolbarRoot.post { resetAutoCollapse() }
     }
 
-    
     private fun loadIconFromAssets(toolId: String, sizePx: Int, tintColor: Int, padPx: Int): android.graphics.drawable.Drawable? {
         val assetName = when (toolId) {
-            "insert_image"          -> "icons/ic_tool_image.xml"
-            
-            "insert_doc_screenshot" -> if (docMode) "icons/ic_tool_doc_capture.xml" else "icons/ic_tool_doc.xml"
+
+            "insert_doc_screenshot" -> if (docMode && !mosaicMode) "icons/ic_tool_doc_capture.xml" else "icons/ic_tool_image.xml"
+            CLIP_MANAGER_TOOL_ID    -> "icons/ic_tool_doc.xml"
             INSERT_TEXT_TOOL_ID     -> "icons/ic_tool_text.xml"
             "insert_link"           -> "icons/ic_tool_link.xml"
             AI_RELAY_TOOL_ID         -> "icons/ic_tool_ai_relay.xml"
             INK_PALETTE_TOOL_ID      -> "icons/ic_tool_palette.xml"
-            SMART_LASSO_TOOL_ID, "screenshot_ai" -> "icons/ic_tool_lasso_ai.xml"
+            SMART_LASSO_TOOL_ID     -> smartLassoIconAsset()
+            "screenshot_ai"         -> "icons/ic_tool_lasso_ai.xml"
             "more_vert"             -> "icons/ic_tool_more.xml"
             COLLAPSE_TOOL_ID        -> "icons/ic_tool_collapse.xml"
-            GOTO_NOTE_TOOL_ID       -> "icons/ic_edit_to_note.xml"
+            DOC_SHARE_TOOL_ID       -> "icons/ic_edit_to_note.xml"
             NOTE_TO_MOSAIC_TOOL_ID  -> "icons/ic_tool_note_to_mosaic.xml"
+            DOC_TO_MOSAIC_TOOL_ID   -> "icons/ic_tool_doc_to_mosaic.xml"
             else                    -> return null
         }
-        
+        return loadToolbarIcon(assetName, sizePx, tintColor, padPx)
+    }
+
+    private fun loadToolbarIcon(assetName: String, sizePx: Int, tintColor: Int, padPx: Int): android.graphics.drawable.Drawable? {
+
         val drawPx = (sizePx - padPx * 2).coerceAtLeast(1)
         val icon = me.laumss.notipal.ui_common.UiUtils.loadAssetIcon(
             reactApplicationContext, assetName, drawPx, tintColor, strokeDeltaPx = TOOLBAR_ICON_STROKE_DELTA_PX)
@@ -4250,7 +4441,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         reactApplicationContext.hasActiveReactInstance()
     } catch (_: Throwable) { false }
 
-    
     private var paletteEntryRequest = 0L
 
     internal fun openPaletteSettingsFromBubble(view: View) {
@@ -4261,16 +4451,15 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
     private fun handleInkPaletteEntry(tool: ToolItem, view: View, forcePanel: Boolean) {
         val request = ++paletteEntryRequest
-        resetAutoCollapse()
         if (forcePanel) {
             handleToolTap(tool, view)
             return
         }
-        val mosaic = MosaicLink.isBoardSurface()
+        val mosaic = MosaicLink.isBoardVisible()
         if (mosaic) {
             MosaicLink.requestPalette(reactApplicationContext) { result ->
                 handler.post {
-                    if (request != paletteEntryRequest || !MosaicLink.isBoardSurface()) return@post
+                    if (request != paletteEntryRequest || !MosaicLink.isBoardVisible()) return@post
                     if (!result.optBoolean("success")) {
                         Dialog.tip(reactApplicationContext, NativeLocale.t("palette_mosaic_retry"))
                     } else if ((result.optJSONArray("strokeIds")?.length() ?: 0) > 0) {
@@ -4284,7 +4473,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
         fun resolved(hasSelection: Boolean) {
             handler.post {
-                if (request != paletteEntryRequest || MosaicLink.isBoardSurface()) return@post
+                if (request != paletteEntryRequest || MosaicLink.isBoardVisible()) return@post
                 if (hasSelection) handleToolTap(tool, view)
                 else PaletteBubbleModule.toggleStatic()
             }
@@ -4344,6 +4533,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             return
         }
         c.removeAllViews()
+        smartLassoIconView = null
         try {
         val ctx = reactApplicationContext
         val btnSz = dpToPx(if (orientation == "vertical") VERTICAL_BTN_SIZE_DP else BTN_SIZE_DP)
@@ -4392,12 +4582,17 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             view.layoutParams = LinearLayout.LayoutParams(btnSz, btnSz).apply {
                 marginStart = gap / 2; marginEnd = gap - gap / 2
             }
+            if (tool.id == SMART_LASSO_TOOL_ID && view is ImageView) {
+                smartLassoIconView = view
+                smartLassoIconShown = smartLassoIconAsset()
+                smartLassoIconSpec = intArrayOf(btnSz, if (isActive) Color.WHITE else inactiveFg, iconPad)
+            }
             if (tool.action == INK_PALETTE_TOOL_ID) {
                 bindInkPaletteButton(view, tool)
                 return view
             }
             view.setOnClickListener { handleToolTap(tool, view) }
-            val hasLongPressAction = tool.action == "insert_doc_screenshot" ||
+            val hasLongPressAction = (tool.action == "insert_doc_screenshot" && !docMode) ||
                 tool.action == SMART_LASSO_TOOL_ID
             val pressGuardOwner = PenGuardOwner.toolbarPress(tool.id)
             if (hasLongPressAction) {
@@ -4415,7 +4610,8 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             }
             view.setOnLongClickListener {
                 if (tool.action == "insert_doc_screenshot") {
-                    openDocScreenshotPanel()
+
+                    if (!docMode) showImagePanel()
                 } else if (tool.action == SMART_LASSO_TOOL_ID) {
                     handleSendLongPress()
                 } else {
@@ -4465,8 +4661,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         } catch (_: Exception) {}
         if (rootView != null) pendingShow = false
         } catch (t: Throwable) {
-            
-            
+
             Log.w(TAG, "rebuildButtons deferred: ${t.message}", t)
             pendingShow = true
             scheduleToolbarRetry(
@@ -4476,24 +4671,132 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    private fun snapToEdge() {
-        refreshScreenDimensions()
-        val lp = layoutParams ?: return; val root = rootView ?: return
+    internal fun avoidMosaicToolbar(reason: String) {
+        if (!mosaicMode) return
+        val rects = MosaicLink.mosaicToolbarRects()
+        if (rects.isEmpty()) return
+        val lp = layoutParams ?: return
+        val root = rootView ?: return
+        if (!root.isAttachedToWindow) return
         val vw = root.measuredWidth.takeIf { it > 0 } ?: root.width
         val vh = root.measuredHeight.takeIf { it > 0 } ?: root.height
-        if (vw <= 0 || vh <= 0) return
-        val cx = lp.x + vw / 2
+        if (vw <= 0 || vh <= 0) {
+            root.post { avoidMosaicToolbar("$reason:measured") }
+            return
+        }
+        refreshScreenDimensions()
+        val margin = dpToPx(8)
+        fun overlaps(x: Int, y: Int): Boolean {
+            val me = android.graphics.Rect(x - margin, y - margin, x + vw + margin, y + vh + margin)
+            return rects.any { android.graphics.Rect.intersects(me, it) }
+        }
+        if (!overlaps(lp.x, lp.y)) return
+        val maxX = (screenWidth - vw).coerceAtLeast(0)
+        val maxY = (screenHeight - vh).coerceAtLeast(0)
+        var best: IntArray? = null
+        var bestCost = Int.MAX_VALUE
+        for (r in rects) {
+            val candidates = mutableListOf(
+                intArrayOf(lp.x, (r.bottom + margin).coerceIn(0, maxY)),
+                intArrayOf(lp.x, (r.top - margin - vh).coerceIn(0, maxY)),
+            )
+            if (!collapsed) {
+                candidates += intArrayOf((r.right + margin).coerceIn(0, maxX), lp.y)
+                candidates += intArrayOf((r.left - margin - vw).coerceIn(0, maxX), lp.y)
+            }
+            for (c in candidates) {
+                if (overlaps(c[0], c[1])) continue
+                val cost = abs(c[0] - lp.x) + abs(c[1] - lp.y)
+                if (cost < bestCost) { bestCost = cost; best = c }
+            }
+        }
+        val target = best ?: return
+        lp.x = target[0]
+        lp.y = target[1]
+        try { windowManager?.updateViewLayout(root, lp) } catch (_: Exception) {}
+        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "avoidMosaicToolbar[$reason]: moved to x=${lp.x} y=${lp.y} rects=$rects")
+    }
 
-        if (lp.x < SNAP_THRESHOLD) lp.x = 0
-        else if (screenWidth - (lp.x + vw) < SNAP_THRESHOLD) lp.x = screenWidth - vw
-        else if (abs(cx - screenWidth / 2) < SNAP_THRESHOLD) lp.x = screenWidth / 2 - vw / 2
+    private fun keepToolbarReachable(reason: String) {
+        if (collapsed) return
+        val lp = layoutParams ?: return
+        val root = rootView ?: return
+        if (!root.isAttachedToWindow) return
+        val vw = root.measuredWidth.takeIf { it > 0 } ?: root.width
+        val vh = root.measuredHeight.takeIf { it > 0 } ?: root.height
+        if (vw <= 0 || vh <= 0) {
+            root.post { keepToolbarReachable("$reason:measured") }
+            return
+        }
+        refreshScreenDimensions()
+        val minVisible = dpToPx(TOOLBAR_MIN_VISIBLE_DP)
+        val x = when {
+            lp.x > screenWidth - minVisible -> (screenWidth - vw).coerceAtLeast(0)
+            lp.x + vw < minVisible -> 0
+            else -> lp.x
+        }
+        val y = when {
+            lp.y > screenHeight - minVisible -> (screenHeight - vh).coerceAtLeast(0)
+            lp.y + vh < minVisible -> 0
+            else -> lp.y
+        }
+        if (x == lp.x && y == lp.y) return
+        Log.i(TAG, "toolbar off screen[$reason]: ${lp.x},${lp.y} -> $x,$y size=${vw}x$vh screen=${screenWidth}x$screenHeight")
+        lp.x = x
+        lp.y = y
+        try { windowManager?.updateViewLayout(root, lp) } catch (_: Exception) {}
+    }
 
-        if (lp.y < SNAP_THRESHOLD) lp.y = 0
-        else if (screenHeight - (lp.y + vh) < SNAP_THRESHOLD) lp.y = screenHeight - vh
+    private fun onTwoFingerDoubleTap() {
+        val fg = lastForegroundKey
+        val onPage = fg == "$NOTE_PACKAGE/$NOTE_INSIDE_PAGES_ACTIVITY" || fg?.startsWith("$DOC_PACKAGE/") == true
 
-        lp.x = lp.x.coerceIn(0, (screenWidth - vw).coerceAtLeast(0))
-        lp.y = lp.y.coerceIn(0, (screenHeight - vh).coerceAtLeast(0))
-        try { windowManager?.updateViewLayout(rootView, lp) } catch (_: Exception) {}
+        val onMosaic = MosaicLink.isBoardVisible() && !MosaicLink.isPadOpen() &&
+            !MosaicLink.isChromeMenuOpen() && !MosaicLink.isQuickSwitchOpen()
+        val pluginCovers = isPluginHostWindowShowing && !onMosaic
+        if (onPage && !SystemKeyboard.shown && !pluginCovers && RelayInboxPanel.smallUp()) {
+
+            relayStowed = false
+            PaletteBubbleModule.stowStatic()
+            if (RelayInboxPanel.stowSmall()) {
+                Log.i(TAG, "two-finger double tap: AIRelay small window to its bubble, toolbar collapsed")
+
+                HostPenSignals.scheduleForegroundReassert("two-finger double tap")
+                return
+            }
+        }
+        val root = rootView
+        val skip = when {
+            !onPage -> "not on a note or document ($fg)"
+            collapsed -> "already collapsed"
+            root == null || !root.isAttachedToWindow || root.visibility != View.VISIBLE || expandedRoot == null -> "toolbar not shown"
+            pluginCovers -> "plugin view showing"
+            ToolRegistry.anyPanelShowing() -> "panel showing"
+            SystemKeyboard.shown -> "keyboard up"
+            isDragging -> "toolbar dragging"
+            else -> null
+        }
+        if (skip != null) {
+            Log.i(TAG, "two-finger double tap ignored: $skip")
+            return
+        }
+        Log.i(TAG, "two-finger double tap: toolbar collapses, palette bubble put away")
+        PaletteBubbleModule.stowStatic()
+        dockToNearestEdge()
+        HostPenSignals.scheduleForegroundReassert("two-finger double tap")
+    }
+
+    private fun stowHeldToolbar() {
+        refreshScreenDimensions()
+        loadPositionFromPrefs()
+        if (stickyX >= 0) {
+            dockSide = if (stickyX <= screenWidth / 2) "left" else "right"
+            preDockX = stickyX
+            preDockY = stickyY
+        }
+        collapsed = true
+        emitCollapseChange()
+        LexiLink.release(LEXI_TOOLBAR_HOLD)
     }
 
     private fun dockToNearestEdge() {
@@ -4529,7 +4832,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         applySidebarLatchState(view, activeModeIds.contains(INSERT_TEXT_TOOL_ID))
     }
 
-    
     private fun refreshPaletteSidebarBtn() {
         val view = paletteSidebarBtn ?: return
         applySidebarLatchState(view, activeModeIds.contains(INK_PALETTE_TOOL_ID))
@@ -4549,11 +4851,8 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     }
 
     private fun handleToolTap(tool: ToolItem, view: View) {
-        if (tool.action == GOTO_NOTE_TOOL_ID) {
-            launchNoteApp()
-            return
-        }
         if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[BUBBLE-DBG] handleToolTap id=${tool.id} action=${tool.action} latches=${tool.latches}")
+        if (tool.action == AI_RELAY_TOOL_ID && !activeModeIds.contains(tool.id)) RelayOpenTrace.begin("tool tapped")
         if (tool.latches) {
             if (activeModeIds.contains(tool.id)) {
                 activeModeIds.remove(tool.id)
@@ -4572,7 +4871,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
 
         if (tool.action == INK_PALETTE_TOOL_ID) {
-            if (MosaicLink.isBoardSurface()) {
+            if (MosaicLink.isBoardVisible()) {
                 MosaicLink.requestPalette(reactApplicationContext) { result ->
                     if (result.optBoolean("success")) showPalettePanel(result.toString())
                     else Dialog.tip(reactApplicationContext, NativeLocale.t("palette_mosaic_retry"))
@@ -4586,10 +4885,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             return
         }
 
-        
-        
-        
-        if (docMode && !MosaicLink.isBoardSurface() && tool.action == "insert_doc_screenshot") {
+        if (docMode && !MosaicLink.isBoardVisible() && tool.action == "insert_doc_screenshot") {
             handleDocScreenshotCrop()
             return
         }
@@ -4600,11 +4896,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             removeAll()
             when {
                 tool.action == "lasso_send" -> {
-                    
-                    
-                    
-                    
-                    
+
                     requestPluginFileReadPermission { granted ->
                         handler.post {
                             if (!granted) {
@@ -4613,7 +4905,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                                     NativeLocale.t("file_read_permission_needed"),
                                     android.widget.Toast.LENGTH_LONG
                                 ).show()
-                                openPluginSettingsAfterFileReadDenied()
                                 restoreToolbar()
                                 return@post
                             }
@@ -4622,10 +4913,9 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                                 SendPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show()
                             }
                             handler.postDelayed({
-                                
-                                
+
                                 if (pendingScreen != "nativeSendHelper") return@postDelayed
-                                callShowPluginView()
+                                showPluginViewForSend()
                                 emitOpenMainWithRetries("nativeSendHelper")
                             }, 150)
                         }
@@ -4634,6 +4924,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             }
         } else {
             if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[BUBBLE-DBG] emit onToolTap id=${tool.id} action=${tool.action}")
+            if (tool.action == AI_RELAY_TOOL_ID) RelayOpenTrace.mark("tap sent to JS")
             emitEvent("onToolTap", Arguments.createMap().apply {
                 putString("toolId", tool.id); putString("toolAction", tool.action)
                 putString("toolName", tool.name)
@@ -4699,7 +4990,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         if (changed) {
             UiThreadUtil.runOnUiThread {
                 if (collapsed || toolContainer == null) return@runOnUiThread
-                
+
                 if (tools.any { it.id == toolId || it.action == toolId }) {
                     rebuildButtons()
                 } else {
@@ -4730,8 +5021,9 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         try {
             for (i in 0 until arr.length()) {
                 val o = arr.optJSONObject(i) ?: continue
-                val id = o.optString("id", "")
-                val action = o.optString("action", "")
+                var id = o.optString("id", "")
+                var action = o.optString("action", "")
+                if (id == LEGACY_INSERT_IMAGE_ID) { id = CLIP_MANAGER_TOOL_ID; action = CLIP_MANAGER_TOOL_ID }
                 if (!isCatalogTool(id, action) || result.any { it.first.id == id }) continue
                 result.add(
                     ToolItem(
@@ -4750,13 +5042,102 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         return result
     }
 
+    private fun parkToolbar() {
+        cancelScheduledRestore()
+        markToolbarForRestore()
+        removeAll()
+    }
+
+    internal fun parkToolbarUnderPanel() {
+        markToolbarForRestore(parkGuards = false)
+        removeAll()
+    }
+
+    internal fun stowToolbarForRelay() {
+        if (!collapsed) {
+            if (rootView != null && expandedRoot != null) {
+                dockToNearestEdge()
+                relayStowed = collapsed
+                return
+            }
+            stowHeldToolbar()
+            relayStowed = true
+        }
+        if (rootView == null) restoreToolbar()
+    }
+
+    internal fun unstowToolbarAfterRelay() {
+        if (!relayStowed) return
+        relayStowed = false
+        if (!collapsed) return
+
+        if (LexiLink.isSmallOpen()) {
+            lexiStowed = true
+            return
+        }
+        if (rootView != null && collapsedRoot != null) {
+            switchToExpanded()
+            return
+        }
+        if (preDockX >= 0) {
+            savePositionToPrefs(preDockX, preDockY)
+            preDockX = -1; preDockY = -1
+        }
+        collapsed = false
+        emitCollapseChange()
+        restoreToolbar()
+    }
+
+    internal fun stowToolbarForLexi() {
+        if (!toolbarSessionActive && rootView == null) return
+        if (!collapsed) {
+            if (rootView != null && expandedRoot != null) {
+                dockToNearestEdge()
+                lexiStowed = collapsed
+                return
+            }
+            stowHeldToolbar()
+            lexiStowed = true
+        }
+        if (rootView == null) restoreToolbar()
+    }
+
+    internal fun unstowToolbarAfterLexi() {
+        if (!lexiStowed) return
+        lexiStowed = false
+        if (!collapsed) return
+
+        if (RelayInboxPanel.showing()?.isMini == true) {
+            relayStowed = true
+            return
+        }
+        if (rootView != null && collapsedRoot != null) {
+            switchToExpanded()
+            return
+        }
+        if (preDockX >= 0) {
+            savePositionToPrefs(preDockX, preDockY)
+            preDockX = -1; preDockY = -1
+        }
+        collapsed = false
+        emitCollapseChange()
+        restoreToolbar()
+    }
+
+    internal fun collapseToolbarKept(reason: String) {
+        if (collapsed) return
+        if (rootView != null && expandedRoot != null) dockToNearestEdge()
+        else if (toolbarSessionActive) stowHeldToolbar()
+        else return
+        Log.i(TAG, "toolbar collapsed ($reason)")
+    }
+
     private fun removeAll() {
         toolbarBuildGeneration += 1L
         toolbarRetryRunnable?.let(handler::removeCallbacks)
         toolbarRetryRunnable = null
         cancelHostCloseIntent()
         pendingShow = false
-        handler.removeCallbacks(autoCollapseRunnable)
         if (rootView != null) {
             rootView?.let { FloatingDragRefresh.endNow(it) }
             try { windowManager?.removeView(rootView) } catch (_: Exception) {}
@@ -4765,12 +5146,13 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         expandedRoot = null; toolContainer = null; collapsedRoot = null; layoutParams = null
         textReceiveBtn = null
         paletteSidebarBtn = null
+        smartLassoIconView = null
 
         clipIconViews = arrayOfNulls(MAX_VISIBLE_CLIPS)
         pagedClipTools.clear()
     }
 
-    private fun hideAllNativePanels() = ToolRegistry.hideAll()
+    private fun hideAllNativePanels() = ToolRegistry.hideForPanel()
     private fun suspendAllNativePanels() {
         if (configPanelBlocksToolbar()) {
             if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "suspendAllNativePanels: config panel active, skip")
@@ -4784,13 +5166,9 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
     private fun parkAllOverlaysForPalette() {
         paletteOverlaysParked = true
-        cancelScheduledRestore()
-        markToolbarForRestore()
-        if (rootView != null) removeAll()
+        parkToolbar()
         suspendAllNativePanels()
-        FloatingBubbleModule.hideStatic()
-        AiBubbleModule.hideStatic()
-        PaletteBubbleModule.hideStatic()
+        hideSurfaceBubbles()
         ScreenshotBubble.hideForPalette()
     }
 
@@ -4816,7 +5194,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    private inline fun withNativePluginManager(label: String, block: (Any) -> Unit) {
+    private inline fun withNativePluginManager(label: String, block: (NativeModule) -> Unit) {
         try {
             val pm = reactApplicationContext.catalystInstance.getNativeModule("NativePluginManager") ?: run {
                 if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "$label: NativePluginManager not found"); return
@@ -4837,22 +5215,27 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     override fun onCatalystInstanceDestroy() {
         if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "onCatalystInstanceDestroy — keeping toolbar alive (rootView=${rootView != null})")
 
-
-        HostPenSignals.endPaletteApplyGuard()
+        FloatingPenGuard.setFullScreenActive(false, PenGuardOwner.PALETTE_APPLY)
         super.onCatalystInstanceDestroy()
     }
 
     private var activeImageInsertId: String? = null
 
+    internal fun canPromptReceivedImage(): Boolean =
+        (MosaicLink.isBoardVisible() || isNoteCanvasForeground()) &&
+            ImagePickerPanel.currentInstance?.isShowing != true
+
+    internal fun isReceivedTextPromptSurface(): Boolean =
+        MosaicLink.isBoardVisible() || isNoteCanvasForeground()
+
     internal fun prepareForImageReceive(onReady: (Boolean) -> Unit) {
         handler.post {
-            if (MosaicLink.isBoardSurface()) {
+            if (MosaicLink.isBoardVisible()) {
                 onReady(true)
                 return@post
             }
-            
+
             clearMultiInsert("incoming image dialog")
-            insertNextChainActive = false
             val completed = java.util.concurrent.atomic.AtomicBoolean(false)
             val timeout = Runnable {
                 if (completed.compareAndSet(false, true)) {
@@ -4865,8 +5248,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     if (!completed.compareAndSet(false, true)) return@post
                     handler.removeCallbacks(timeout)
                     Log.i(TAG, "[INSERT-DBG/Kt] receive preparation: lasso close success=$success")
-                    
-                    
+
                     if (success) handler.postDelayed({ onReady(true) }, 650L)
                     else onReady(false)
                 }
@@ -4879,7 +5261,12 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 else comm.setLassoBoxState(2.0, PromiseImpl(
                     Callback { args ->
                         val result = args.firstOrNull() as? ReadableMap
-                        finish(result?.hasKey("success") == true && result.getBoolean("success"))
+                        val success = result?.hasKey("success") == true && result.getBoolean("success")
+                        val error = if (result?.hasKey("error") == true && !result.isNull("error"))
+                            result.getMap("error") else null
+
+                        val alreadyClosed = error?.hasKey("code") == true && error.getInt("code") == 904
+                        finish(success || alreadyClosed)
                     },
                     Callback { finish(false) },
                 ))
@@ -4904,41 +5291,49 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    private fun abortInsertImage(reason: String, showTip: Boolean) {
+        activeImageInsertId = null
+        clearMultiInsert(reason)
+        HostPenSignals.endInsertImageGuard()
+        Log.w(TAG, "[INSERT-DBG/Kt] $reason; release guard and restore toolbar")
+        if (hasToolbarSession()) {
+            toolbarRestorePending = true
+            scheduleRestore(RESTORE_DELAY_NORMAL, reason)
+        }
+        if (showTip) Dialog.tip(reactApplicationContext, NativeLocale.t("image_insert_failed"))
+    }
+
     @ReactMethod
     fun imageInsertFinished(requestId: String, path: String, success: Boolean) {
         handler.post {
             if (activeImageInsertId != requestId) return@post
             activeImageInsertId = null
-            if (success) return@post 
-            synchronized(ImagePanel::class.java) { ImagePanel.pendingReceivedDeletes.remove(path) }
-            clearMultiInsert("image insertion failed")
-            insertNextChainActive = false
-            HostPenSignals.endInsertImageGuard()
-            Log.w(TAG, "[INSERT-DBG/Kt] insertion failed; release guard and restore toolbar: $path")
-            if (hasToolbarSession()) {
-                toolbarRestorePending = true
-                scheduleRestore(RESTORE_DELAY_NORMAL, "image insertion failed")
-            }
-            Dialog.tip(reactApplicationContext, NativeLocale.t("image_insert_failed"))
+            if (success) return@post
+            abortInsertImage("image insertion failed: $path", showTip = true)
         }
     }
 
-    @ReactMethod(isBlockingSynchronousMethod = true)
-    fun consumeReceivedImageDelete(path: String): Boolean =
-        synchronized(ImagePanel::class.java) { ImagePanel.pendingReceivedDeletes.remove(path) }
+    private var insertRequestGen = 0L
 
-    fun requestInsertImage(path: String) {
+    fun requestInsertImage(path: String, deleteAfterInsert: String? = null, fromInsertNext: Boolean = false) {
         if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[INSERT-DBG/Kt] requestInsertImage: $path (currentInstance=${currentInstance === this})")
-        insertPluginViewClosed = false
 
-
-        
-        
-        if (!MosaicLink.isBoardSurface()) HostPenSignals.beginInsertImageGuard()
+        val toMosaic = MosaicLink.isBoardVisible()
+        if (!toMosaic) {
+            HostPenSignals.beginInsertImageGuard()
+            noteImageFlashArmed = true
+        }
 
         handler.post {
             val requestId = System.nanoTime().toString()
             activeImageInsertId = requestId
+            insertRequestGen++
+            val gen = insertRequestGen
+            handler.postDelayed({
+                if (gen != insertRequestGen) return@postDelayed
+                if (activeImageInsertId != requestId && !HostPenSignals.insertImageFlowActive) return@postDelayed
+                abortInsertImage("image insertion watchdog: $path", showTip = false)
+            }, INSERT_IMAGE_WATCHDOG_MS)
             val retryDelays = longArrayOf(0, 300, 750)
             for (delay in retryDelays) {
                 handler.postDelayed({
@@ -4947,7 +5342,9 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     emitEvent("nativeInsertImage", Arguments.createMap().apply {
                         putString("path", path)
                         putString("requestId", requestId)
-                        if (insertNextChainActive) putBoolean("fromInsertNext", true)
+                        putBoolean("toMosaic", toMosaic)
+                        if (fromInsertNext) putBoolean("fromInsertNext", true)
+                        if (deleteAfterInsert != null) putString("deletePath", deleteAfterInsert)
                     })
                 }, delay)
             }
@@ -4956,50 +5353,54 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
     @ReactMethod
     override fun beginPaletteApply() {
-        if (paletteApplyInFlight) {
-            if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "beginPaletteApply ignored: transaction already in flight")
-            return
+
+        handler.post {
+            if (paletteApplyInFlight) {
+                if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "beginPaletteApply ignored: transaction already in flight")
+                return@post
+            }
+            paletteApplyInFlight = true
+            setPaletteSelectionHold(false)
+            FloatingPenGuard.setFullScreenActive(true, PenGuardOwner.PALETTE_APPLY)
+            parkAllOverlaysForPalette()
+            handler.removeCallbacks(paletteApplyWatchdog)
+            handler.postDelayed(paletteApplyWatchdog, PALETTE_SELECTION_HOLD_MAX_MS)
         }
-        paletteApplyInFlight = true
-        setPaletteSelectionHold(false)
-        HostPenSignals.beginPaletteApplyGuard()
-        if (Looper.myLooper() == Looper.getMainLooper()) parkAllOverlaysForPalette()
-        else handler.post { parkAllOverlaysForPalette() }
     }
 
+    private val paletteApplyWatchdog = Runnable {
+        if (!paletteApplyInFlight) return@Runnable
+        Log.w(TAG, "palette apply watchdog: no paletteApplyFinished within ${PALETTE_SELECTION_HOLD_MAX_MS}ms")
+        PalettePanel.currentInstance?.takeIf { it.isShowing }?.hide()
+        completePaletteApply()
+    }
 
     @ReactMethod
     fun paletteApplyFinished() {
-        
-        
-        
-        
         handler.post {
-            paletteApplyInFlight = false
-            if (paletteSelectionHold && docMode) {
-                HostPenSignals.armDocLassoHold("palette guard handoff", confirmed = true)
-            }
-            HostPenSignals.endPaletteApplyGuard()
-            if (!paletteSelectionHold) {
-                
-                
-                
-                
-                HostPenSignals.releaseDocLassoHold("palette apply finished without selection")
-            }
-            if (!paletteSelectionHold && !SubviewLogMonitor.isLassoMenuOpen()) {
-                
-                
-                
-                
-                HostPenSignals.scheduleLassoMenuRelease()
-                scheduleRestore(RESTORE_DELAY_NORMAL, "palette apply finished")
-            }
-            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "palette-apply guard released by JS")
+            handler.removeCallbacks(paletteApplyWatchdog)
+            completePaletteApply()
         }
     }
 
-    
+    private fun completePaletteApply() {
+        paletteApplyInFlight = false
+        if (paletteSelectionHold && docMode) {
+            HostPenSignals.armDocLassoHold("palette guard handoff", confirmed = true)
+        }
+        FloatingPenGuard.setFullScreenActive(false, PenGuardOwner.PALETTE_APPLY)
+        if (!paletteSelectionHold) {
+
+            HostPenSignals.releaseDocLassoHold("palette apply finished without selection")
+        }
+        if (!paletteSelectionHold && !SubviewLogMonitor.isLassoMenuOpen()) {
+
+            HostPenSignals.scheduleLassoMenuRelease()
+            scheduleRestore(RESTORE_DELAY_NORMAL, "palette apply finished")
+        }
+        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "palette-apply guard released")
+    }
+
     @ReactMethod
     fun finishPaletteApply() {
         handler.post {
@@ -5011,28 +5412,26 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    
-    
-    
-    
-    
     @ReactMethod
-    fun parkToolbarForLasso(holdForSelection: Boolean) {
-        
-        
-        
-        setPaletteSelectionHold(holdForSelection)
-        
-        
+    fun parkToolbarForLasso(holdForSelection: Boolean) = parkForHeldSelection(holdForSelection, fromPaste = false)
+
+    @ReactMethod
+    fun parkToolbarForPastedClip(holdForSelection: Boolean) = parkForHeldSelection(holdForSelection, fromPaste = true)
+
+    private fun parkForHeldSelection(holdForSelection: Boolean, fromPaste: Boolean) {
+        val what = if (fromPaste) "clip paste" else "palette apply"
+
+        setPaletteSelectionHold(holdForSelection, fromPaste)
+
         if (holdForSelection && docMode) {
-            HostPenSignals.armDocLassoHold("palette reselected", confirmed = true)
+            HostPenSignals.armDocLassoHold(if (fromPaste) "clip pasted" else "palette reselected", confirmed = true)
         }
         handler.post {
             parkAllOverlaysForPalette()
             if (BuildConfig.ENABLE_DEBUG) {
-                Log.i(TAG, "toolbar parked for palette apply hold=$holdForSelection pending=$toolbarRestorePending")
+                Log.i(TAG, "toolbar parked for $what hold=$holdForSelection pending=$toolbarRestorePending")
             }
-            if (!holdForSelection) scheduleRestore(RESTORE_DELAY_NORMAL, "palette apply done (no selection)")
+            if (!holdForSelection) scheduleRestore(RESTORE_DELAY_NORMAL, "$what done (no selection)")
         }
     }
 
@@ -5040,15 +5439,13 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     override fun restoreToolbar() {
         handler.post {
             if (currentInstance !== this@FloatingToolbarModule) return@post
-            
-            
+
             toolbarRestorePending = toolbarRestorePending || rootView != null || tools.isNotEmpty()
             if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[INSERT-DBG/Kt] restoreToolbar: tools=${tools.size} currentInstance=${currentInstance === this} rootView=${rootView != null} collapsed=$collapsed")
             evaluateRestore("restoreToolbar request")
         }
     }
 
-    
     internal fun restoreToolbarWindow() {
         if (regionCaptureActive) return
         if (collapsed) createCollapsedHandle() else createExpandedToolbar()
@@ -5087,14 +5484,13 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             if (panel != null) {
                 panel.updateLassoData(text, paths, linkedFiles)
             } else {
-                
+
                 SendPanel.stageLassoData(text, paths, linkedFiles)
             }
             pendingScreen = ""
         }
     }
 
-    
     @ReactMethod(isBlockingSynchronousMethod = true)
     fun getNoteForegroundElapsedMs(): Double {
         if (!isInNoteApp()) return -1.0
@@ -5103,58 +5499,44 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         return (android.os.SystemClock.elapsedRealtime() - since).toDouble()
     }
 
-    
-    fun startMultiImageInsert(paths: List<String>, fromReceived: Boolean) {
-        if (paths.isEmpty()) return
-        if (MosaicLink.isBoardSurface()) {
-            if (fromReceived) synchronized(ImagePanel::class.java) { ImagePanel.pendingReceivedDeletes.addAll(paths) }
+    data class InsertItem(val path: String, val deleteAfter: Boolean = false, val fromQueue: Boolean = false)
+
+    fun startMultiImageInsert(items: List<InsertItem>) {
+        if (items.isEmpty()) return
+        if (MosaicLink.isBoardVisible()) {
             kotlin.concurrent.thread(isDaemon = true) {
-                for (p in paths) {
-                    val ok = MosaicLink.enqueueImage(p, "inkling-insert-image")
-                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[INSERT-DBG/Kt] multi enqueue to Mosaic ok=$ok path=$p")
+                for (item in items) {
+                    val ok = MosaicLink.enqueueImage(item.path, "inkling-insert-image")
+                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[INSERT-DBG/Kt] multi enqueue to Mosaic ok=$ok path=${item.path}")
+                    if (!ok) continue
+                    if (item.fromQueue) DocScreenshotService.unmarkInsertNext(java.io.File(item.path).name)
+                    if (item.deleteAfter || item.fromQueue) java.io.File(item.path).delete()
                 }
                 handler.post { restoreToolbar() }
             }
             return
         }
         clearMultiInsert("new multi insert")
-        multiInsertQueue.addAll(paths.drop(1))
-        multiInsertFromReceived = fromReceived
+        items.forEach { multiInsertItems[it.path] = it }
+        multiInsertQueue.addAll(items.drop(1).map { it.path })
         HostPenSignals.beginInsertImageGuard()
-        handler.postDelayed({ insertMultiImage(paths.first()) }, 300)
+        handler.postDelayed({ insertMultiImage(items.first().path) }, 300)
     }
 
     private fun insertMultiImage(path: String) {
-        if (multiInsertFromReceived) {
-            
-            synchronized(ImagePanel::class.java) { ImagePanel.pendingReceivedDeletes.add(path) }
-        }
         multiInsertAwaitingSelection = true
         monitorHandler.removeCallbacks(multiInsertAwaitTimeout)
         monitorHandler.postDelayed(multiInsertAwaitTimeout, MULTI_INSERT_AWAIT_MAX_MS)
-        requestInsertImage(path)
-    }
-
-    @ReactMethod(isBlockingSynchronousMethod = true)
-    fun drainReceivedDeletes(): String? {
-        synchronized(ImagePanel::class.java) {
-            val list = ImagePanel.pendingReceivedDeletes
-            if (list.isEmpty()) return null
-            val json = org.json.JSONArray(list).toString()
-            list.clear()
-            return json
-        }
+        val item = multiInsertItems.remove(path)
+        requestInsertImage(path, deleteAfterInsert = path.takeIf { item?.deleteAfter == true }, fromInsertNext = item?.fromQueue == true)
     }
 
     fun startMultiDocLinkInsert(paths: List<String>) {
         if (paths.isEmpty()) return
         clearMultiInsert("new document link insert")
         multiInsertDocLinks = true
-        multiInsertFromReceived = false
         multiInsertQueue.addAll(paths.drop(1))
-        cancelScheduledRestore()
-        markToolbarForRestore()
-        if (rootView != null) removeAll()
+        parkToolbar()
         HostPenSignals.beginInsertImageGuard()
         handler.postDelayed({ insertMultiDocLink(paths.first()) }, 300L)
     }
@@ -5195,16 +5577,11 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    @ReactMethod
-    fun showImagePanel() {
+    private fun showImagePanel() {
         handler.post {
-            
-            
-            
-            markToolbarForRestore()
-            removeAll()
+            parkToolbar()
             openNativePanel("image") {
-                ImagePanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show()
+                ImagePickerPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show()
             }
         }
     }
@@ -5223,10 +5600,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     fun showPalettePanel(infoJson: String) {
         handler.post {
 
-
-
-            markToolbarForRestore()
-            removeAll()
+            parkToolbar()
             openNativePanel("palette") {
                 PalettePanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show(infoJson)
             }
@@ -5237,8 +5611,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     fun toggleScreenshotBubble(mode: String?) {
         handler.post {
             if (requestedToolbarDocMode(mode)) {
-                
-                
+
                 setToolbarAppMode(true, "doc toolbar button")
                 showToolbarNow(true)
                 return@post
@@ -5249,15 +5622,12 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 ScreenshotBubble.hide()
             } else {
                 if (stitchCommitPending || screenshotCapturePending || ScreenshotBubble.pendingReshow) {
-                    
-                    
+
                     if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "toggleScreenshotBubble: ignored, screenshot flow pending")
                     return@post
                 }
                 if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "toggleScreenshotBubble: showing")
-                
-                
-                
+
                 startForegroundMonitor()
                 isInNoteApp = checkIsNoteAppForeground()
                 ScreenshotBubble.show(reactApplicationContext, this@FloatingToolbarModule)
@@ -5273,17 +5643,23 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 return@post
             }
             screenshotCapturePending = true
-            markToolbarForRestore()
+
+            parkAllOverlaysForPalette()
+
+            LexiLink.hold("docCapture")
             if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[CROP-DBG/Kt] handleDocScreenshotCrop: starting screencap")
-            removeAll()
             val cacheDir = reactApplicationContext.cacheDir.absolutePath
             kotlin.concurrent.thread(isDaemon = false) {
                 try {
                     val ts = System.currentTimeMillis()
                     val outPath = "$cacheDir/screenshot_crop_$ts.png"
+
+                    Thread.sleep(DOC_CAPTURE_HIDE_WAIT_MS)
                     val process = Runtime.getRuntime().exec(arrayOf("screencap", "-p", outPath))
                     val completed = process.waitFor(15, TimeUnit.SECONDS)
                     if (!completed) process.destroyForcibly()
+
+                    paletteOverlaysParked = false
                     val exitCode = if (completed) process.exitValue() else -1
                     val file = java.io.File(outPath)
                     if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[CROP-DBG/Kt] screencap completed=$completed exit=$exitCode size=${file.length()}")
@@ -5370,19 +5746,18 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    
     fun startDocScreenshotLasso() {
         handler.post {
             if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "startDocScreenshotLasso")
-            markToolbarForRestore()
-            removeAll()
+            parkAllOverlaysForPalette()
+            LexiLink.hold("docCapture")
             emitEvent("onNativePanelOpen", Arguments.createMap().apply { putString("panel", "lassoScreenshot") })
             try {
                 penLassoOverlay?.dismissSilently()
                 penLassoOverlay = null
                 val overlay = PenLassoOverlay(reactApplicationContext)
                 penLassoOverlay = overlay
-                
+
                 overlay.show(
                     actions = listOf(PenLassoOverlay.Action.CONFIRM),
                     autoConfirm = true,
@@ -5397,13 +5772,15 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                         val cacheDir = reactApplicationContext.cacheDir.absolutePath
                         kotlin.concurrent.thread(isDaemon = false) {
                             try {
-                                
+
                                 Thread.sleep(500)
                                 val ts = System.currentTimeMillis()
                                 val outPath = "$cacheDir/screenshot_crop_$ts.png"
                                 val process = Runtime.getRuntime().exec(arrayOf("screencap", "-p", outPath))
                                 val completed = process.waitFor(15, java.util.concurrent.TimeUnit.SECONDS)
                                 if (!completed) process.destroyForcibly()
+
+                                paletteOverlaysParked = false
                                 val exitCode = if (completed) process.exitValue() else -1
                                 val file = java.io.File(outPath)
                                 if (!completed || exitCode != 0 || !file.exists() || file.length() <= 500) {
@@ -5454,24 +5831,8 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    
-    private fun launchNoteApp() {
-        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "launchNoteApp: switching to note")
-        try {
-            val intent = android.content.Intent(android.content.Intent.ACTION_MAIN).apply {
-                component = android.content.ComponentName(
-                    NOTE_PACKAGE,
-                    NOTE_INSIDE_PAGES_ACTIVITY
-                )
-                addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            reactApplicationContext.startActivity(intent)
-        } catch (e: Exception) {
-            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "launchNoteApp failed: ${e.message}", e)
-        }
-    }
-
     private fun restoreAfterCropFlow() {
+        LexiLink.release("docCapture")
         ScreenshotBubble.reshowIfPending()
         scheduleRestore(RESTORE_DELAY_SHORT, "crop flow done")
     }
@@ -5492,7 +5853,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             .getSharedPreferences(SCREENSHOT_STATE_PREFS, Context.MODE_PRIVATE)
             .getLong(STITCH_ARMED_AT_KEY, 0L)
 
-    
     private fun isRecentLongScreenshot(): Boolean {
         if (!knownStitchSessionActive) return false
         val armedAt = stitchArmedAt()
@@ -5514,7 +5874,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         if (BuildConfig.ENABLE_DEBUG) {
             Log.i(TAG, "[CROP-DBG/Kt] discard stale stitch session reason=$reason armedAt=${stitchArmedAt()}")
         }
-        try { DocScreenshotService.clearSession() } catch (_: Exception) {}
+        DocScreenshotService.clearSession()
         setKnownStitchSessionActive(false)
     }
 
@@ -5557,6 +5917,12 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                         restoreAfterCropFlow()
                     } else if (!stitchCommitPending) {
                         stitchCommitPending = true
+
+                        cropPanel.beginHandoff()
+                        val handoff = cropPanel.handoffToken()
+                        fun closeCrop() {
+                            if (handoff == null || !cropPanel.finishHandoff(handoff, close = true)) cropPanel.hide()
+                        }
                         if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[CROP-DBG/Kt] long screenshot: committing stitch session")
                         requestScreenshotStoragePermissions(
                             action = "start long screenshot",
@@ -5570,15 +5936,20 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                                     }
                                     handler.post {
                                         stitchCommitPending = false
-                                        CropPanel.currentInstance?.hide()
                                         if (session != null) {
                                             setKnownStitchSessionActive(true)
                                             if (existing != null && session.images.size >= 2) {
-                                                openStitchPanel(session)
+                                                openStitchPanel(session) { shown ->
+                                                    val stitchPanel = StitchPanel.currentInstance
+                                                    if (shown && stitchPanel != null) stitchPanel.runAfterFirstDraw { closeCrop() }
+                                                    else closeCrop()
+                                                }
                                             } else {
+                                                closeCrop()
                                                 restoreAfterCropFlow()
                                             }
                                         } else {
+                                            closeCrop()
                                             showScreenshotMessage("screenshot_save_failed")
                                             restoreAfterCropFlow()
                                         }
@@ -5587,18 +5958,32 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                             },
                             onDenied = {
                                 stitchCommitPending = false
-                                CropPanel.currentInstance?.hide()
+                                closeCrop()
                                 restoreAfterCropFlow()
                             }
                         )
                     }
                 },
                 onSendToOtherDevices = sendToOtherDevices@ { crop ->
-                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[CROP-DBG/Kt] send crop: ${crop.width}x${crop.height}")
+                    val handoff = cropPanel.handoffToken() ?: return@sendToOtherDevices
+                    fun resumeCrop(reason: String) {
+                        if (cropPanel.finishHandoff(handoff, close = false)) {
+                            Log.i(TAG, "[CROP-SEND] resume crop token=$handoff reason=$reason")
+                        }
+                    }
+                    fun clearSentStitchSession() {
+                        if (fromStitch) {
+                            kotlin.concurrent.thread(isDaemon = true) {
+                                val cleared = DocScreenshotService.clearSession()
+                                if (cleared) handler.post { setKnownStitchSessionActive(false) }
+                            }
+                        }
+                    }
+                    Log.i(TAG, "[CROP-SEND] begin token=$handoff size=${crop.width}x${crop.height}")
                     if (!isWifiConnected()) {
                         me.laumss.notipal.ui_common.Dialog.tip(
                             reactApplicationContext, NativeLocale.t("no_wifi"))
-                        restoreAfterCropFlow()
+                        resumeCrop("wifi")
                         return@sendToOtherDevices
                     }
                     if (!LocalSendModule.staticIsRunning) {
@@ -5608,29 +5993,50 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     val cameFromScreenshotBubble = ScreenshotBubble.pendingReshow
                     kotlin.concurrent.thread(isDaemon = true) {
                         val croppedPath = "${reactApplicationContext.cacheDir.absolutePath}/doc_crop_send_${System.currentTimeMillis()}.png"
-                        val saved = DocScreenshotService.cropAndSave(screenshotPath, crop, croppedPath)
-                        if (fromStitch) {
-                            val cleared = DocScreenshotService.clearSession()
-                            if (cleared) handler.post { setKnownStitchSessionActive(false) }
+                        val saved = try {
+                            DocScreenshotService.cropAndSave(screenshotPath, crop, croppedPath)
+                        } catch (e: Exception) {
+                            Log.w(TAG, "[CROP-SEND] crop save failed token=$handoff", e)
+                            false
                         }
-                        handler.post {
+                        handler.post cropSaved@ {
+                            if (!cropPanel.isHandoffActive(handoff)) {
+                                java.io.File(croppedPath).delete()
+                                return@cropSaved
+                            }
                             if (saved) {
                                 val defaultPeer = LocalSendModule.getDefaultPeer(reactApplicationContext)
                                 if (defaultPeer != null) {
                                     kotlin.concurrent.thread(isDaemon = true) {
+                                        var sent = false
                                         try {
                                             LocalSendModule.sendFileDirect(
                                                 defaultPeer.ip, defaultPeer.port, croppedPath, defaultPeer.useTls)
-                                            me.laumss.notipal.ui_common.Dialog.tip(
-                                                reactApplicationContext, NativeLocale.t("send_success"))
+                                            sent = true
+                                            handler.post {
+                                                me.laumss.notipal.ui_common.Dialog.tip(
+                                                    reactApplicationContext, NativeLocale.t("send_success"))
+                                            }
                                         } catch (e: Exception) {
                                             val msg = if (e.message?.contains("403") == true)
                                                 NativeLocale.t("image_send_rejected")
                                             else "${NativeLocale.t("send_failed")}: ${e.message}"
-                                            me.laumss.notipal.ui_common.Dialog.tip(reactApplicationContext, msg)
+                                            handler.post {
+                                                me.laumss.notipal.ui_common.Dialog.tip(reactApplicationContext, msg)
+                                            }
                                         } finally {
                                             try { java.io.File(croppedPath).delete() } catch (_: Exception) {}
-                                            handler.post { restoreAfterCropFlow() }
+                                            handler.post {
+                                                if (sent) {
+                                                    if (cropPanel.finishHandoff(handoff, close = true)) {
+                                                        Log.i(TAG, "[CROP-SEND] direct send complete token=$handoff")
+                                                        clearSentStitchSession()
+                                                        restoreAfterCropFlow()
+                                                    }
+                                                } else {
+                                                    resumeCrop("direct-send")
+                                                }
+                                            }
                                         }
                                     }
                                 } else {
@@ -5640,16 +6046,24 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                                         onShowResult = { shown ->
                                             if (shown) {
                                                 sendPanel.updateLassoData("", listOf(croppedPath))
+                                                sendPanel.runAfterFirstDraw {
+                                                    if (cropPanel.finishHandoff(handoff, close = true)) {
+                                                        Log.i(TAG, "[CROP-SEND] send panel ready; close crop token=$handoff")
+                                                        clearSentStitchSession()
+                                                    }
+                                                }
                                             } else {
+                                                java.io.File(croppedPath).delete()
                                                 showScreenshotMessage("screenshot_panel_failed")
-                                                restoreAfterCropFlow()
+                                                resumeCrop("send-panel")
                                             }
                                         }
                                     )
                                 }
                             } else {
+                                java.io.File(croppedPath).delete()
                                 showScreenshotMessage("screenshot_save_failed")
-                                restoreAfterCropFlow()
+                                resumeCrop("save")
                             }
                         }
                     }
@@ -5702,7 +6116,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             )
     }
 
-    
     private fun hideAfterShown(from: PanelBase?, to: PanelBase?) {
         if (from == null) return
         if (to == null) {
@@ -5712,14 +6125,17 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         to.runAfterFirstDraw { if (from.isShowing) from.hide() }
     }
 
-    private fun openStitchPanel(session: DocScreenshotService.StitchSessionData) {
+    private fun openStitchPanel(
+        session: DocScreenshotService.StitchSessionData,
+        onShown: ((Boolean) -> Unit)? = null,
+    ) {
         StitchPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule)
             .show(
                 session = session,
                 onConfirm = { finalSession ->
                     if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[CROP-DBG/Kt] stitch confirm: compositing ${finalSession.images.size} images...")
                     kotlin.concurrent.thread(isDaemon = false) {
-                        
+
                         if (!DocScreenshotService.updateSession(finalSession)) {
                             handler.post {
                                 StitchPanel.currentInstance?.hide()
@@ -5733,7 +6149,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                         handler.post {
                             val stitchPanel = StitchPanel.currentInstance
                             if (size != null) {
-                                
+
                                 openCropPanelForDoc(outPath, size.first, size.second, fromStitch = true) { crop ->
                                     hideAfterShown(stitchPanel, crop)
                                 }
@@ -5772,6 +6188,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     }
                 },
                 onShowResult = { shown ->
+                    onShown?.invoke(shown)
                     if (!shown) {
                         showScreenshotMessage("screenshot_panel_failed")
                         restoreAfterCropFlow()
@@ -5785,61 +6202,48 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         handler.post {
             docScreenshotRoutePending = true
             if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[INSERT-DBG/Kt] doc screenshot route pending=true")
-            
-            if (!MosaicLink.isBoardSurface()) HostPenSignals.beginInsertImageGuard()
-            markToolbarForRestore()
-            removeAll()
+
+            if (!MosaicLink.isBoardVisible()) HostPenSignals.beginInsertImageGuard()
+            parkToolbar()
             kotlin.concurrent.thread(isDaemon = true) {
-                val nextFile = try {
-                    DocScreenshotService.firstInsertNextFile()
-                } catch (e: Exception) {
-                    handler.post {
-                        docScreenshotRoutePending = false
-                        HostPenSignals.endInsertImageGuard()
-                        if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "[INSERT-DBG/Kt] doc screenshot route failed: ${e.message}", e)
-                        scheduleRestore(RESTORE_DELAY_NORMAL, "doc screenshot route failed")
-                    }
-                    return@thread
-                }
+                val nextFile = DocScreenshotService.firstInsertNextFile()
                 handler.post {
                     if (nextFile != null) {
                         val path = nextFile.absolutePath
                         if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[INSERT-DBG/Kt] handleDocScreenshot: insertNext=$path")
-                        insertNextChainActive = true
-                        if (MosaicLink.isBoardSurface()) {
-                            
-                            enqueueImageToMosaic(path, "inkling-doc-screenshot") {
-                                DocScreenshotService.unmarkInsertNext(nextFile.name)
-                                try { nextFile.delete() } catch (_: Exception) {}
-                                insertNextChainActive = false
+                        if (MosaicLink.isBoardVisible()) {
+
+                            enqueueImageToMosaic(path, "inkling-doc-screenshot") { ok ->
+                                if (ok) {
+                                    DocScreenshotService.unmarkInsertNext(nextFile.name)
+                                    try { nextFile.delete() } catch (_: Exception) {}
+                                } else {
+
+                                    Dialog.tip(reactApplicationContext, NativeLocale.t("image_insert_failed"))
+                                }
                                 docScreenshotRoutePending = false
                             }
                             return@post
                         }
-                        kotlin.concurrent.thread(isDaemon = true) {
-                            ImagePanel.saveToInsertCacheStatic(path, lastNotePath, lastPageNum)
-                        }
                         handler.postDelayed({
                             try {
-                                
-                                
-                                requestInsertImage(path)
+
+                                requestInsertImage(path, fromInsertNext = true)
                                 docScreenshotRoutePending = false
                                 if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[INSERT-DBG/Kt] doc screenshot route handed to insert-image")
                             } catch (e: Exception) {
                                 docScreenshotRoutePending = false
                                 if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "requestInsertImage failed: ${e.message}")
                                 HostPenSignals.endInsertImageGuard()
-                                insertNextChainActive = false; restoreToolbar()
+                                restoreToolbar()
                             }
                         }, 500)
                     } else {
-                        insertNextChainActive = false
                         if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[INSERT-DBG/Kt] handleDocScreenshot: no insertNext, opening panel")
-                        openNativePanel("screenshot") {
-                            val panel = DocScreenshotPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule)
+                        openNativePanel("image") {
+                            val panel = ImagePickerPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule)
                             try {
-                                panel.show("queue") { shown ->
+                                panel.show { shown ->
                                     docScreenshotRoutePending = false
                                     if (shown && SubviewLogMonitor.isSubviewOpen()) {
                                         panel.suspendVisibility()
@@ -5923,8 +6327,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         handler.post {
             if (text.isBlank()) return@post
             monitorHandler.removeCallbacks(configFallbackRunnable)
-            markToolbarForRestore()
-            removeAll()
+            parkToolbar()
             openNativePanel("send") {
                 val panel = SendPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule)
                 panel.show(allowAutoSend = false) { shown ->
@@ -5950,46 +6353,27 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    fun openDocScreenshotPanel() {
-        handler.post {
-            
-            markToolbarForRestore()
-            removeAll()
-            openNativePanel("screenshot") {
-                DocScreenshotPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show("queue")
-            }
-        }
-    }
-
-    
     private fun startRegionCapture(mode: String, fromBubble: Boolean) {
         handler.post {
             if (regionCaptureActive) return@post
             regionCaptureActive = true
             if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "startRegionCapture mode=$mode fromBubble=$fromBubble")
-            
-            
-            
+
             parkAllOverlaysForPalette()
             ToolRegistry.suspendAll()
             emitEvent("onNativePanelOpen", Arguments.createMap().apply { putString("panel", "lassoScreenshot") })
             try {
-                
-                
+
                 penLassoOverlay?.dismissSilently()
                 penLassoOverlay = null
                 val overlay = PenLassoOverlay(reactApplicationContext)
                 penLassoOverlay = overlay
                 val actions = when (mode) {
-                    "send" -> listOf(
+
+                    "smart" -> listOfNotNull(
                         PenLassoOverlay.Action.SEND_TO_DEVICES,
                         PenLassoOverlay.Action.ADD_TO_DOC_SCREENSHOTS,
-                        PenLassoOverlay.Action.CANCEL,
-                    )
-                    "smart" -> listOf(
-                        PenLassoOverlay.Action.SEND_TO_DEVICES,
-                        PenLassoOverlay.Action.ADD_TO_DOC_SCREENSHOTS,
-                        PenLassoOverlay.Action.OPEN_MOSAIC_CARD,
+                        PenLassoOverlay.Action.OPEN_MOSAIC_CARD.takeUnless { MosaicLink.isBoardVisible() },
                         PenLassoOverlay.Action.CANCEL,
                     )
                     else -> listOf(
@@ -6014,13 +6398,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                             }
                             PenLassoOverlay.Action.OPEN_MOSAIC_CARD -> "mosaic"
                             PenLassoOverlay.Action.CANCEL -> return@show
-                        }
-                        
-                        if (action == PenLassoOverlay.Action.OPEN_MOSAIC_CARD && MosaicLink.isBoardSurface()) {
-                            RegionCaptureFlow.capture(
-                                reactApplicationContext, this@FloatingToolbarModule,
-                                captureMode, fromBubble, l, t, r, b)
-                            return@show
                         }
                         if (action == PenLassoOverlay.Action.ADD_TO_DOC_SCREENSHOTS ||
                             action == PenLassoOverlay.Action.OPEN_MOSAIC_CARD) {
@@ -6075,19 +6452,18 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
     }
 
-
     @ReactMethod
     fun showSendPanelFromBubble() {
         handler.post {
             if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "showSendPanelFromBubble")
+            restoreOverHostLasso = true
             pendingScreen = "nativeSendHelper"
             emitEvent("onNativePanelOpen", Arguments.createMap().apply { putString("panel", "send") })
             SendPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show(fromBubble = true, useStaged = true)
             handler.postDelayed({
-                
-                
+
                 if (pendingScreen != "nativeSendHelper") return@postDelayed
-                callShowPluginView()
+                showPluginViewForSend()
                 emitOpenMainWithRetries("nativeSendHelper")
             }, 150)
         }
@@ -6099,12 +6475,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun showLassoScreenshotPanelForSendFromBubble() {
-        startRegionCapture(mode = "send", fromBubble = true)
-    }
-
-    
-    @ReactMethod
     fun showSmartLassoCapture() {
         startRegionCapture(mode = "smart", fromBubble = false)
     }
@@ -6114,102 +6484,561 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         paletteOverlaysParked = false
     }
 
-    
     private fun importCurrentNoteToMosaic() {
-        if (noteImportBusy) return
-        if (docMode || mosaicMode) return
+        if (noteImportBusy || docMode || mosaicMode) return
         noteImportBusy = true
-        val finishFailed = {
+        val ctx = reactApplicationContext
+        val cancelled = java.util.concurrent.atomic.AtomicBoolean(false)
+        val progress = NoteImportProgressPanel(ctx, this)
+        var finished = false
+
+        fun finish(messageKey: String?) {
+            if (finished) return
+            finished = true
+            progress.hide()
             noteImportBusy = false
-            handler.post { Dialog.tip(reactApplicationContext, NativeLocale.t("mosaic_note_import_failed")) }
-            Unit
+            if (messageKey == null) restoreToolbar()
+            else Dialog.result(ctx, NativeLocale.t(messageKey)) { restoreToolbar() }
         }
+        val finishFailed = { finish("mosaic_note_import_failed") }
         requestScreenshotStoragePermissions(
-            action = NativeLocale.t("mosaic_note_import"),
+            action = NativeLocale.t("mosaic_note_import"), showDeniedFeedback = false,
             onGranted = {
                 requestMosaicPluginPermissions { mosaicResult ->
                     if (mosaicResult != MosaicPermissionResult.GRANTED) {
-                        noteImportBusy = false
-                        showMosaicPermissionReminder(mosaicResult)
+                        finish(if (mosaicResult == MosaicPermissionResult.PLUGIN_UNAVAILABLE)
+                            "mosaic_plugin_needed" else "mosaic_permission_needed")
                         return@requestMosaicPluginPermissions
                     }
-                    val pagesFile = MosaicLink.newNoteImportFile()
-                        ?: return@requestMosaicPluginPermissions finishFailed()
-                    showScreenshotMessage("mosaic_note_importing")
-                    NoteMosaicExport.exportCurrentNote(reactApplicationContext, pagesFile,
-                        onProgress = { page, total -> handler.post {
-                            Dialog.tip(reactApplicationContext, NativeLocale.t("mosaic_note_import_progress", page, total))
-                        } },
-                    ) { exported, error ->
-                        if (exported == null) {
-                            Log.w(TAG, "note import export failed: $error")
-                            finishFailed()
-                            return@exportCurrentNote
+                    PageImageSource.callHost(ctx, "getCurrentFilePath", emptyList()) { pathValue, _ ->
+                        val path = (pathValue as? String)?.takeIf { it.endsWith(".note", ignoreCase = true) }
+                            ?: return@callHost finishFailed()
+                        PageImageSource.callHost(ctx, "getNoteTotalPageNum", listOf(path)) { totalValue, totalError ->
+                            val total = (totalValue as? Number)?.toInt()?.takeIf { it > 0 } ?: run {
+                                Log.w(TAG, "[NOTE-MOSAIC] page count unavailable: $totalError")
+                                return@callHost finishFailed()
+                            }
+                            PageImageSource.callHost(ctx, "getCurrentPageNum", emptyList()) { pageValue, _ ->
+                                val current = (pageValue as? Number)?.toInt()?.takeIf { it in 0 until total } ?: 0
+                                parkToolbar()
+                                openNativePanel("note-page-picker") {
+                                    DocPagePickerPanel(ctx, this).show(path, total, current, done = { pages ->
+                                        if (pages == null) finish(null)
+                                        else convertNoteForMosaic(path, pages, total, progress, cancelled, ::finish) {
+                                            finished = true; noteImportBusy = false
+                                        }
+                                    }) { shown -> if (!shown) finishFailed() }
+                                }
+                            }
                         }
-                        val title = java.io.File(exported.notePath).nameWithoutExtension
-                        if (!MosaicLink.enqueueNote(pagesFile, title, "inkling-note-import")) {
-                            pagesFile.delete()
-                            finishFailed()
-                            return@exportCurrentNote
-                        }
-                        noteImportBusy = false
-                        Dialog.tip(reactApplicationContext, NativeLocale.t("mosaic_note_import_ready", exported.pageCount))
-                        openMosaicPluginForPending()
                     }
                 }
-            },
-            onDenied = { noteImportBusy = false },
+            }, onDenied = finishFailed,
         )
     }
 
-    
-    internal fun openMosaicPluginForPending() {
-        handler.post {
-            var opened = false
-            try {
-                val loader = reactApplicationContext.classLoader
-                val eventClass = Class.forName(
-                    "com.ratta.supernote.pluginhost.eventbus.PluginShowEvent", false, loader)
-                val event = eventClass.getConstructor(String::class.java, Integer.TYPE)
-                    .newInstance(MOSAIC_PLUGIN_ID, 1)
-                val eventBusClass = Class.forName("org.greenrobot.eventbus.EventBus", false, loader)
-                val eventBus = eventBusClass.getMethod("getDefault").invoke(null)
-                eventBusClass.getMethod("post", Any::class.java).invoke(eventBus, event)
-                opened = true
-                if (BuildConfig.ENABLE_DEBUG) {
-                    Log.i(TAG, "Mosaic opened via PluginShowEvent($MOSAIC_PLUGIN_ID, 1)")
+    private fun convertNoteForMosaic(
+        path: String,
+        pages: List<Int>,
+        total: Int,
+        progress: NoteImportProgressPanel,
+        cancelled: java.util.concurrent.atomic.AtomicBoolean,
+        finish: (String?) -> Unit,
+        imported: () -> Unit,
+    ) {
+        val ctx = reactApplicationContext
+        val pagesFile = MosaicLink.newNoteImportFile() ?: return finish("mosaic_note_import_failed")
+        val name = java.io.File(path).nameWithoutExtension
+        val title = if (pages.size >= total) name else name + "\n" + NativeLocale.t("doc_mosaic_pages_label", pageRanges(pages))
+        progress.show(onCancel = { cancelled.set(true) }) shown@ { shown ->
+            if (!shown) { finish("mosaic_note_import_failed"); return@shown }
+            MosaicNotePreparation.convert(ctx, pagesFile, pages,
+                onProgress = { page, count ->
+                    progress.setStatus(NativeLocale.t("mosaic_note_import_progress", page, count))
+                    Log.i(TAG, "[NOTE-MOSAIC] reading page=$page/$count")
+                },
+                onFinalProgress = { percent -> progress.setStatus(NativeLocale.t("mosaic_note_finalizing", percent)) },
+                cancelled = { cancelled.get() },
+            ) converted@ { exported, error ->
+                if (exported == null || cancelled.get()) {
+                    Log.w(TAG, "[NOTE-MOSAIC] conversion stopped: $error")
+                    MosaicNotePreparation.discard(pagesFile)
+                    finish(if (cancelled.get()) null else "mosaic_note_import_failed")
+                    return@converted
                 }
-            } catch (e: Exception) {
-                if (BuildConfig.ENABLE_DEBUG) {
-                    Log.w(TAG, "Mosaic PluginShowEvent unavailable: ${e.message}")
+                progress.hide()
+
+                if (!MosaicLink.enqueueNote(pagesFile, title, "inkling-note-import")) {
+                    MosaicNotePreparation.discard(pagesFile)
+                    finish("mosaic_note_import_failed")
+                    return@converted
+                }
+                awaitNoteImportResult(pagesFile) { outcome ->
+                    if (outcome == NoteImportCompletion.Outcome.SUCCESS) imported()
+                    else finish(if (outcome == NoteImportCompletion.Outcome.OPEN_FAILED)
+                        "mosaic_note_open_failed" else "mosaic_note_import_failed")
+                }
+                openMosaicPluginForPending()
+            }
+        }
+    }
+
+    private fun shareCurrentDocViaLocalSend() {
+        if (noteImportBusy || !docMode || mosaicMode) return
+        noteImportBusy = true
+        val ctx = reactApplicationContext
+        fun fail(messageKey: String) {
+            noteImportBusy = false
+            Dialog.result(ctx, NativeLocale.t(messageKey)) { restoreToolbar() }
+        }
+        requestPluginFileReadPermission { granted ->
+            handler.post {
+                if (!granted) {
+                    fail("file_read_permission_needed")
+                    return@post
+                }
+                PageImageSource.callHost(ctx, "getCurrentFilePath", emptyList()) { pathValue, pathError ->
+                    val path = (pathValue as? String)?.takeIf { java.io.File(it).isFile } ?: run {
+                        Log.w(TAG, "[DOC-SHARE] no readable document: value=$pathValue error=$pathError")
+                        return@callHost fail("doc_share_failed")
+                    }
+                    val annotated = path.endsWith(".pdf", ignoreCase = true) && java.io.File("$path.mark").isFile
+                    if (annotated && isHostPluginInstalled(DOCUCRAFT_PLUGIN_ID)) {
+                        exportAnnotatedDocForShare(path)
+                    } else {
+                        noteImportBusy = false
+                        openDocSendPanel(path)
+                    }
                 }
             }
-            if (!opened) {
-                try {
-                    val loader = reactApplicationContext.classLoader
-                    val managerClass = Class.forName(
-                        "com.ratta.supernote.pluginhost.manager.PluginManager", false, loader)
-                    val manager = managerClass.methods.firstOrNull {
-                        it.name == "getInstance" && it.parameterCount == 0
-                    }?.invoke(null)
-                    val show = managerClass.methods.firstOrNull {
-                        it.name == "showPluginView" && it.parameterCount == 2 &&
-                            it.parameterTypes[0].isAssignableFrom(String::class.java) &&
-                            (it.parameterTypes[1] == Integer.TYPE || it.parameterTypes[1] == Integer::class.java)
+        }
+    }
+
+    private fun exportAnnotatedDocForShare(path: String) {
+        val ctx = reactApplicationContext
+        val root = java.io.File(ctx.cacheDir, "notipal_doc_share")
+        root.deleteRecursively()
+        val dir = java.io.File(root, System.nanoTime().toString())
+        if (!dir.mkdirs()) {
+            noteImportBusy = false
+            openDocSendPanel(path)
+            return
+        }
+        val output = java.io.File(dir, java.io.File(path).name)
+        val progress = NoteImportProgressPanel(ctx, this)
+        var cancelExport: () -> Unit = {}
+        var finished = false
+        fun sendOriginal(messageKey: String) {
+            dir.deleteRecursively()
+            progress.hide()
+            Dialog.result(ctx, NativeLocale.t(messageKey)) { openDocSendPanel(path) }
+        }
+        parkToolbar()
+        progress.show(
+            onCancel = {
+                if (!finished) {
+                    finished = true
+                    noteImportBusy = false
+                    cancelExport()
+                    progress.hide()
+                    restoreToolbar()
+                }
+            },
+            initialStatus = NativeLocale.t("doc_share_exporting"),
+            titleText = NativeLocale.t("doc_share_localsend"),
+        ) shown@ { shown ->
+            if (!shown) {
+                finished = true
+                noteImportBusy = false
+                dir.deleteRecursively()
+                openDocSendPanel(path)
+                return@shown
+            }
+            cancelExport = DocuCraftLink.exportAnnotated(ctx, path, output.absolutePath, {
+                showHostPluginView(DOCUCRAFT_PLUGIN_ID)
+            }) { failure ->
+                if (finished) return@exportAnnotated
+                finished = true
+                noteImportBusy = false
+                when {
+                    failure == null && output.length() > 0L -> openDocSendPanel(output.absolutePath, dir, progress)
+                    failure == DocuCraftLink.ExportFailure.OUTDATED -> sendOriginal("doc_share_docucraft_outdated")
+                    else -> sendOriginal("doc_share_export_failed")
+                }
+            }
+        }
+    }
+
+    private fun openDocSendPanel(
+        path: String,
+        tempDir: java.io.File? = null,
+        progress: NoteImportProgressPanel? = null,
+    ) {
+        parkToolbar()
+        openNativePanel("send") {
+            val panel = SendPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule)
+            panel.show(allowAutoSend = false) { shown ->
+                if (shown) {
+                    tempDir?.let(panel::deleteOnClose)
+                    panel.updateLassoData("", emptyList(), listOf(Triple(path, -1, "")))
+                    if (progress != null) panel.runAfterFirstDraw { progress.hide() }
+                } else {
+                    tempDir?.deleteRecursively()
+                    progress?.hide()
+                    restoreToolbar()
+                }
+            }
+        }
+    }
+
+    private fun importSelectedDocPagesToMosaic() {
+        if (noteImportBusy || !docMode || mosaicMode) return
+        noteImportBusy = true
+        val ctx = reactApplicationContext
+        var finished = false
+
+        fun finish(messageKey: String?) {
+            if (finished) return
+            finished = true
+            noteImportBusy = false
+            if (messageKey == null) restoreToolbar()
+            else Dialog.result(ctx, NativeLocale.t(messageKey)) { restoreToolbar() }
+        }
+        requestScreenshotStoragePermissions(
+            action = NativeLocale.t("doc_mosaic_import"), showDeniedFeedback = false,
+            onGranted = {
+                requestMosaicPluginPermissions { mosaicResult ->
+                    if (mosaicResult != MosaicPermissionResult.GRANTED) {
+                        finish(if (mosaicResult == MosaicPermissionResult.PLUGIN_UNAVAILABLE)
+                            "mosaic_plugin_needed" else "mosaic_permission_needed")
+                        return@requestMosaicPluginPermissions
                     }
-                    if (manager != null && show != null) {
-                        show.invoke(manager, MOSAIC_PLUGIN_ID, 1)
-                        opened = true
-                        if (BuildConfig.ENABLE_DEBUG) {
-                            Log.i(TAG, "Mosaic opened via PluginManager.showPluginView($MOSAIC_PLUGIN_ID, 1)")
+                    PageImageSource.callHost(ctx, "getCurrentFilePath", emptyList()) { pathValue, _ ->
+                        val path = (pathValue as? String)?.takeIf {
+                            it.endsWith(".pdf", ignoreCase = true) && java.io.File(it).isFile
+                        } ?: return@callHost offerDocuCraftConversion(::finish) {
+                            finished = true
+                            noteImportBusy = false
+                        }
+                        PageImageSource.callHost(ctx, "getCurrentTotalPages", emptyList()) { totalValue, totalError ->
+                            val total = (totalValue as? Number)?.toInt()?.takeIf { it > 0 } ?: run {
+                                Log.w(TAG, "[DOC-MOSAIC] page count unavailable: $totalError")
+                                return@callHost finish("doc_mosaic_import_failed")
+                            }
+                            PageImageSource.callHost(ctx, "getCurrentPageNum", emptyList()) { pageValue, _ ->
+                                val current = (pageValue as? Number)?.toInt()?.takeIf { it in 0 until total } ?: 0
+                                parkToolbar()
+                                openNativePanel("doc-page-picker") {
+                                    DocPagePickerPanel(ctx, this).show(path, total, current, done = { pages ->
+                                        if (pages == null) finish(null)
+                                        else exportDocPagesToMosaic(path, pages, ::finish) { finished = true; noteImportBusy = false }
+                                    }) { shown -> if (!shown) finish("doc_mosaic_import_failed") }
+                                }
+                            }
                         }
                     }
-                } catch (e: Exception) {
-                    if (BuildConfig.ENABLE_DEBUG) {
-                        Log.w(TAG, "Mosaic manager showPluginView unavailable: ${e.message}")
+                }
+            }, onDenied = { finish("doc_mosaic_import_failed") },
+        )
+    }
+
+    private fun offerDocuCraftConversion(finish: (String?) -> Unit, askKey: String = "doc_mosaic_docucraft_ask", handedOff: () -> Unit) {
+        val ctx = reactApplicationContext
+        val pdfOnly = NativeLocale.t("doc_mosaic_pdf_only")
+        if (!isHostPluginInstalled(DOCUCRAFT_PLUGIN_ID)) {
+            Dialog.result(ctx, pdfOnly + "\n" + NativeLocale.t("doc_mosaic_docucraft_intro")) { finish(null) }
+            return
+        }
+        Dialog.confirmResult(
+            ctx,
+            pdfOnly + "\n" + NativeLocale.t(askKey),
+            NativeLocale.t("cancel"),
+            NativeLocale.t("doc_mosaic_open_docucraft"),
+        ) { open ->
+            if (!open) return@confirmResult finish(null)
+            handedOff()
+            handler.post {
+                DocuCraftLink.openConversion(ctx) {
+                    if (!showHostPluginView(DOCUCRAFT_PLUGIN_ID)) {
+                        Log.w(TAG, "[DOC-MOSAIC] DocuCraft did not open")
+                        Dialog.result(ctx, NativeLocale.t("doc_mosaic_docucraft_open_failed")) { restoreToolbar() }
                     }
                 }
             }
+        }
+    }
+
+    private fun importBoardFromMosaic(kind: String, boardName: String, template: String) {
+        val ctx = reactApplicationContext
+        var finished = false
+
+        fun finish(messageKey: String?) {
+            if (finished) return
+            finished = true
+            noteImportBusy = false
+            if (messageKey == null) openMosaicPluginForPending()
+            else Dialog.result(ctx, NativeLocale.t(messageKey)) { openMosaicPluginForPending() }
+        }
+        val failedKey = if (kind == "doc") "doc_mosaic_import_failed" else "mosaic_note_import_failed"
+        whenMosaicClosed {
+            requestScreenshotStoragePermissions(
+                action = NativeLocale.t("mosaic_board_import"), showDeniedFeedback = false,
+                onGranted = {
+                    requestMosaicPluginPermissions { mosaicResult ->
+                        if (mosaicResult != MosaicPermissionResult.GRANTED) {
+                            finish(if (mosaicResult == MosaicPermissionResult.PLUGIN_UNAVAILABLE)
+                                "mosaic_plugin_needed" else "mosaic_permission_needed")
+                            return@requestMosaicPluginPermissions
+                        }
+                        parkToolbar()
+                        openNativePanel("mosaic-board-file") {
+                            me.laumss.notipal.panels.MosaicBoardFilePanel(ctx, this).show(
+                                extensions = if (kind == "doc") me.laumss.notipal.panels.DocLinkPanel.DOC_EXTS - "note" else setOf("note"),
+                                title = NativeLocale.t(if (kind == "doc") "mosaic_board_pick_doc" else "mosaic_board_pick_note"),
+                                done = { path ->
+                                    when {
+                                        path == null -> finish(null)
+                                        kind == "doc" -> pickDocPagesForBoard(path, boardName, template, ::finish) { finished = true; noteImportBusy = false }
+                                        else -> pickNotePagesForBoard(path, boardName, template, ::finish) { finished = true; noteImportBusy = false }
+                                    }
+                                },
+                            ) { shown -> if (!shown) finish(failedKey) }
+                        }
+                    }
+                }, onDenied = { finish(failedKey) },
+            )
+        }
+    }
+
+    private fun whenMosaicClosed(attempt: Int = 0, then: () -> Unit) {
+        if ((MosaicLink.isBoardVisible() || isPluginHostWindowShowing) && attempt < MOSAIC_CLOSE_POLLS) {
+            handler.postDelayed({ whenMosaicClosed(attempt + 1, then) }, MOSAIC_CLOSE_POLL_MS)
+            return
+        }
+        handler.postDelayed({ then() }, MOSAIC_CLOSE_SETTLE_MS)
+    }
+
+    private fun pickNotePagesForBoard(path: String, boardName: String, template: String, finish: (String?) -> Unit, imported: () -> Unit) {
+        val ctx = reactApplicationContext
+
+        val failedKey = if (docMode) "mosaic_board_note_in_doc" else "mosaic_note_import_failed"
+        PageImageSource.callHost(ctx, "getNoteTotalPageNum", listOf(path)) { totalValue, totalError ->
+            val total = (totalValue as? Number)?.toInt()?.takeIf { it > 0 } ?: run {
+                Log.w(TAG, "[BOARD-IMPORT] note page count unavailable: $totalError")
+                finish(failedKey)
+                return@callHost
+            }
+            DocPagePickerPanel(ctx, this).show(path, total, -1, selectAll = true, done = { pages ->
+                if (pages == null) finish(null)
+                else convertNoteForBoard(path, pages, boardName, template, failedKey, finish, imported)
+            }) { shown -> if (!shown) finish(failedKey) }
+        }
+    }
+
+    private fun convertNoteForBoard(path: String, pages: List<Int>, boardName: String, template: String, failedKey: String,
+                                    finish: (String?) -> Unit, imported: () -> Unit) {
+        val ctx = reactApplicationContext
+        val pagesFile = MosaicLink.newNoteImportFile() ?: return finish(failedKey)
+        val name = java.io.File(path).nameWithoutExtension
+        val cancelled = java.util.concurrent.atomic.AtomicBoolean(false)
+        val progress = NoteImportProgressPanel(ctx, this)
+        progress.show(onCancel = { cancelled.set(true) }) shown@ { shown ->
+            if (!shown) { finish(failedKey); return@shown }
+            MosaicNotePreparation.convert(ctx, pagesFile, pages,
+                onProgress = { page, count -> progress.setStatus(NativeLocale.t("mosaic_note_import_progress", page, count)) },
+                onFinalProgress = {},
+                cancelled = { cancelled.get() },
+                notePath = path,
+            ) converted@ { exported, error ->
+                progress.hide()
+                if (exported == null || cancelled.get()) {
+                    Log.w(TAG, "[BOARD-IMPORT] note conversion stopped: $error")
+                    MosaicNotePreparation.discard(pagesFile)
+                    finish(if (cancelled.get()) null else failedKey)
+                    return@converted
+                }
+
+                val titles = pages.map { "$name ${NativeLocale.t("doc_mosaic_pages_label", pageRanges(listOf(it)))}" }
+                if (!MosaicLink.enqueueBoard("note", pagesFile, boardName.ifBlank { name }, template, titles, "inkling-board-import")) {
+                    MosaicNotePreparation.discard(pagesFile)
+                    finish(failedKey)
+                    return@converted
+                }
+                awaitBoardImport(pagesFile, failedKey, finish, imported)
+            }
+        }
+    }
+
+    private fun pickDocPagesForBoard(path: String, boardName: String, template: String, finish: (String?) -> Unit, imported: () -> Unit) {
+        val ctx = reactApplicationContext
+        if (!path.endsWith(".pdf", ignoreCase = true)) {
+
+            offerDocuCraftConversion(finish, askKey = "mosaic_board_docucraft_ask", handedOff = imported)
+            return
+        }
+        Thread({
+            val total = runCatching {
+                android.os.ParcelFileDescriptor.open(java.io.File(path), android.os.ParcelFileDescriptor.MODE_READ_ONLY).use { fd ->
+                    android.graphics.pdf.PdfRenderer(fd).use { it.pageCount }
+                }
+            }.onFailure { Log.w(TAG, "[BOARD-IMPORT] pdf unreadable: ${it.message}") }.getOrNull()
+            handler.post {
+                if (total == null || total <= 0) return@post finish("doc_mosaic_import_failed")
+                DocPagePickerPanel(ctx, this).show(path, total, -1, selectAll = true, done = { pages ->
+                    if (pages == null) finish(null)
+                    else convertDocForBoard(path, pages, boardName, template, finish, imported)
+                }) { shown -> if (!shown) finish("doc_mosaic_import_failed") }
+            }
+        }, "Notipal-board-import-pdf").start()
+    }
+
+    private fun convertDocForBoard(path: String, pages: List<Int>, boardName: String, template: String,
+                                   finish: (String?) -> Unit, imported: () -> Unit) {
+        val ctx = reactApplicationContext
+        val outDir = MosaicLink.newDocImportDir() ?: return finish("doc_mosaic_import_failed")
+        val name = java.io.File(path).nameWithoutExtension
+        val cancelled = java.util.concurrent.atomic.AtomicBoolean(false)
+        var annotationsSkipped = false
+        val progress = NoteImportProgressPanel(ctx, this)
+        progress.show(onCancel = { cancelled.set(true) }, initialStatus = NativeLocale.t("doc_mosaic_importing")) shown@ { shown ->
+            if (!shown) { finish("doc_mosaic_import_failed"); return@shown }
+            me.laumss.notipal.render.DocMosaicExport.export(ctx, path, pages, outDir, name,
+                onProgress = { page, total -> progress.setStatus(NativeLocale.t("doc_mosaic_progress", page, total)) },
+                cancelled = { cancelled.get() },
+                onAnnotationsSkipped = { annotationsSkipped = true },
+            ) { ok, error ->
+                progress.hide()
+                if (!ok || cancelled.get()) {
+                    Log.w(TAG, "[BOARD-IMPORT] doc conversion stopped: $error")
+                    outDir.deleteRecursively()
+                    finish(if (cancelled.get()) null else "doc_mosaic_import_failed")
+                    return@export
+                }
+                val publish = {
+
+                    val titles = pages.map { name + "\n" + NativeLocale.t("doc_mosaic_pages_label", pageRanges(listOf(it))) }
+                    if (MosaicLink.enqueueBoard("doc", outDir, boardName.ifBlank { name }, template, titles, "inkling-board-import")) {
+                        awaitBoardImport(outDir, "doc_mosaic_import_failed", finish, imported)
+                    } else {
+                        outDir.deleteRecursively()
+                        finish("doc_mosaic_import_failed")
+                    }
+                }
+                if (annotationsSkipped) Dialog.result(ctx, NativeLocale.t("mosaic_board_annotations_skipped")) { publish() } else publish()
+            }
+        }
+    }
+
+    private fun awaitBoardImport(payload: java.io.File, failedKey: String, finish: (String?) -> Unit, imported: () -> Unit) {
+        awaitNoteImportResult(payload) { outcome ->
+            if (outcome == NoteImportCompletion.Outcome.SUCCESS) imported()
+            else finish(if (outcome == NoteImportCompletion.Outcome.OPEN_FAILED) "mosaic_note_open_failed" else failedKey)
+        }
+        openMosaicPluginForPending()
+    }
+
+    private fun isHostPluginInstalled(pluginId: String): Boolean = try {
+        val managerClass = Class.forName(HOST_PLUGIN_MANAGER_CLASS, false, reactApplicationContext.classLoader)
+        val manager = managerClass.methods.firstOrNull { it.name == "getInstance" && it.parameterCount == 0 }
+            ?.invoke(null)
+        val getPluginApp = managerClass.methods.firstOrNull {
+            it.name == "getPluginApp" && it.parameterCount == 1 && it.parameterTypes[0] == String::class.java
+        }
+        manager != null && getPluginApp?.invoke(manager, pluginId) != null
+    } catch (e: Exception) {
+        Log.w(TAG, "plugin $pluginId lookup failed: ${e.message}")
+        false
+    }
+
+    private fun exportDocPagesToMosaic(
+        path: String,
+        pages: List<Int>,
+        finish: (String?) -> Unit,
+        imported: () -> Unit,
+    ) {
+        val ctx = reactApplicationContext
+        val outDir = MosaicLink.newDocImportDir() ?: return finish("doc_mosaic_import_failed")
+        val name = java.io.File(path).nameWithoutExtension
+
+        val title = name + "\n" + NativeLocale.t("doc_mosaic_pages_label", pageRanges(pages))
+        val cancelled = java.util.concurrent.atomic.AtomicBoolean(false)
+        val progress = NoteImportProgressPanel(ctx, this)
+        progress.show(onCancel = { cancelled.set(true) }, initialStatus = NativeLocale.t("doc_mosaic_importing")) shown@ { shown ->
+            if (!shown) { finish("doc_mosaic_import_failed"); return@shown }
+            me.laumss.notipal.render.DocMosaicExport.export(ctx, path, pages, outDir, title,
+                onProgress = { page, total -> progress.setStatus(NativeLocale.t("doc_mosaic_progress", page, total)) },
+                cancelled = { cancelled.get() },
+            ) { ok, error ->
+                progress.hide()
+                if (!ok || cancelled.get()) {
+                    Log.w(TAG, "[DOC-MOSAIC] conversion stopped: $error")
+                    outDir.deleteRecursively()
+                    finish(when {
+                        cancelled.get() -> null
+
+                        error?.contains("page does not exist", ignoreCase = true) == true -> "doc_last_page_host_limit"
+                        else -> "doc_mosaic_import_failed"
+                    })
+                    return@export
+                }
+                if (!MosaicLink.enqueueDoc(outDir, title, "inkling-doc-import")) {
+                    outDir.deleteRecursively()
+                    finish("doc_mosaic_import_failed")
+                    return@export
+                }
+                awaitNoteImportResult(outDir) { outcome ->
+                    if (outcome == NoteImportCompletion.Outcome.SUCCESS) imported()
+                    else finish(if (outcome == NoteImportCompletion.Outcome.OPEN_FAILED)
+                        "mosaic_note_open_failed" else "doc_mosaic_import_failed")
+                }
+                openMosaicPluginForPending()
+            }
+        }
+    }
+
+    private fun pageRanges(pages: List<Int>): String {
+        val sorted = pages.distinct().sorted()
+        val parts = ArrayList<String>()
+        var start = 0
+        for (i in sorted.indices) {
+            if (i + 1 < sorted.size && sorted[i + 1] == sorted[i] + 1) continue
+            parts.add(if (i == start) "${sorted[i] + 1}" else "${sorted[start] + 1}–${sorted[i] + 1}")
+            start = i + 1
+        }
+        return parts.joinToString(", ")
+    }
+
+    private fun awaitNoteImportResult(
+        pagesFile: java.io.File,
+        onDone: (NoteImportCompletion.Outcome) -> Unit,
+    ) {
+        val state = NoteImportCompletion(android.os.SystemClock.elapsedRealtime())
+        val resultFile = MosaicLink.noteImportResultFile(pagesFile)
+        val requestId = resultFile.name.removeSuffix(".result")
+        val poll = object : Runnable {
+            override fun run() {
+                val reported = runCatching {
+                    if (!resultFile.isFile) null else org.json.JSONObject(resultFile.readText()).let {
+                        if (it.optString("id") == requestId && it.has("success")) it.getBoolean("success") else null
+                    }
+                }.getOrNull()
+                val outcome = state.observe(android.os.SystemClock.elapsedRealtime(), MosaicLink.isBoardVisible(), reported)
+                if (outcome == null) {
+                    handler.postDelayed(this, 300L)
+                    return
+                }
+                if (outcome != NoteImportCompletion.Outcome.SUCCESS) MosaicLink.cancelPendingNoteImport(pagesFile)
+                resultFile.delete()
+                Log.i(TAG, "[NOTE-MOSAIC] completed id=$requestId outcome=$outcome visible=${MosaicLink.isBoardVisible()}")
+                onDone(outcome)
+            }
+        }
+        handler.post(poll)
+    }
+
+    internal fun openMosaicPluginForPending() {
+        handler.post {
+            var opened = showHostPluginView(MOSAIC_PLUGIN_ID)
             if (!opened) {
                 try {
                     val intent = Intent().apply {
@@ -6228,6 +7057,42 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    private fun showHostPluginView(pluginId: String): Boolean {
+        val loader = reactApplicationContext.classLoader
+        try {
+            val eventClass = Class.forName(
+                "com.ratta.supernote.pluginhost.eventbus.PluginShowEvent", false, loader)
+            val event = eventClass.getConstructor(String::class.java, Integer.TYPE)
+                .newInstance(pluginId, 1)
+            val eventBusClass = Class.forName("org.greenrobot.eventbus.EventBus", false, loader)
+            val eventBus = eventBusClass.getMethod("getDefault").invoke(null)
+            eventBusClass.getMethod("post", Any::class.java).invoke(eventBus, event)
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "plugin opened via PluginShowEvent($pluginId, 1)")
+            return true
+        } catch (e: Exception) {
+            if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "PluginShowEvent($pluginId) unavailable: ${e.message}")
+        }
+        try {
+            val managerClass = Class.forName(HOST_PLUGIN_MANAGER_CLASS, false, loader)
+            val manager = managerClass.methods.firstOrNull {
+                it.name == "getInstance" && it.parameterCount == 0
+            }?.invoke(null)
+            val show = managerClass.methods.firstOrNull {
+                it.name == "showPluginView" && it.parameterCount == 2 &&
+                    it.parameterTypes[0].isAssignableFrom(String::class.java) &&
+                    (it.parameterTypes[1] == Integer.TYPE || it.parameterTypes[1] == Integer::class.java)
+            }
+            if (manager != null && show != null) {
+                show.invoke(manager, pluginId, 1)
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "plugin opened via PluginManager.showPluginView($pluginId, 1)")
+                return true
+            }
+        } catch (e: Exception) {
+            if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "PluginManager.showPluginView($pluginId) unavailable: ${e.message}")
+        }
+        return false
+    }
+
     fun showPluginView() {
         handler.post { callShowPluginView() }
     }
@@ -6235,7 +7100,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     fun closePluginView() {
         handler.post { callClosePluginView() }
     }
-
 
     fun cancelPendingScreen() {
         pendingScreen = ""
@@ -6248,6 +7112,8 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             emitEvent("onToolbarDestroyAll", Arguments.createMap())
 
             toolbarSessionActive = false
+            lexiStowed = false
+            LexiLink.release(LEXI_TOOLBAR_HOLD)
             stopForegroundMonitor()
             pendingScreen = ""
             pendingOpenMain = false
@@ -6258,7 +7124,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
             ToolRegistry.hideAll()
             FloatingBubbleModule.hideAndForget()
-            AiBubbleModule.hideAndForget()
             PaletteBubbleModule.hideAndForget()
             ScreenshotBubble.pendingReshow = false
             ScreenshotBubble.hide()
@@ -6274,10 +7139,8 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         destroyAll()
     }
 
-    
-    
     private fun shouldPageSidebarTools(): Boolean =
-        mosaicMode || (!docMode && tools.count { !isToolbarUtilityTool(it.id) } == 4)
+        mosaicMode || docMode || tools.count { !isToolbarUtilityTool(it.id) } == 4
 
     private fun horizontalClipCount(): Int = if (docMode || mosaicMode) 4 else MAX_VISIBLE_CLIPS
 
@@ -6294,7 +7157,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     private fun lastVerticalClipPage(): Int =
         if (shouldPageSidebarTools()) 1 else (CLIP_SLOT_COUNT - 1) / verticalClipCapacity()
 
-    
     private fun verticalClipWindow(): Pair<Int, Int> {
         clipPage = clipPage.coerceIn(0, lastVerticalClipPage())
         if (shouldPageSidebarTools()) {
@@ -6363,10 +7225,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         } catch (_: Exception) {}
     }
 
-
-    private fun runMonitorTick() {
-        
-        val foreground = foregroundActivity() ?: return
+    private fun runMonitorTick(foreground: ForegroundActivity, hostFile: String?) {
         val fgPkg = foreground.packageName
         val noteCanvasForeground = fgPkg == NOTE_PACKAGE &&
             foreground.activityName == NOTE_INSIDE_PAGES_ACTIVITY
@@ -6376,19 +7235,11 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             cancelRotationSync("left handwriting page")
         }
 
-        
-        
-        
-        
         FloatingPenGuard.setFullScreenActive(!supportsHandwriting, PenGuardOwner.FOREIGN_ACTIVITY)
         if (!supportsScreenshotBubble && ScreenshotBubble.isShowing) {
             monitorHandler.post { ScreenshotBubble.hideForInactiveCanvas() }
         }
 
-        
-        
-        
-        
         val fgKey = "$fgPkg/${foreground.activityName}"
         if (fgKey != lastForegroundKey) {
             val previous = lastForegroundKey
@@ -6410,8 +7261,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         } else if ((ScreenshotBubble.hiddenBySettings || ScreenshotBubble.hiddenByInactiveCanvas)
             && supportsScreenshotBubble
             && !SubviewLogMonitor.isSubviewOpen() && !isPluginHostWindowShowing) {
-            
-            
+
             if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "foreground monitor: safe to restore ScreenshotBubble (fg=$fgPkg)")
             monitorHandler.post {
                 if (ScreenshotBubble.hiddenBySettings) {
@@ -6422,12 +7272,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             }
         }
 
-        
-        
-        
-        
-        
-        val inDoc = fgPkg == DOC_PACKAGE || (fgPkg == PLUGIN_PACKAGE && docMode)
         if (noteCanvasForeground || fgPkg == DOC_PACKAGE) {
             val targetDocMode = fgPkg == DOC_PACKAGE
             if (docMode != targetDocMode || loadedDocMode != targetDocMode) {
@@ -6435,13 +7279,11 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             }
         }
 
-        val inNote = fgPkg == PLUGIN_PACKAGE || noteCanvasForeground || inDoc
+        val inNote = fgPkg == PLUGIN_PACKAGE || supportsHandwriting
         if (inNote != isInNoteApp) {
             if (inNote) noteForegroundSinceMs = android.os.SystemClock.elapsedRealtime()
             isInNoteApp = inNote
-            
-            
-            
+
             emitEvent("onNoteForegroundChanged", com.facebook.react.bridge.Arguments.createMap().apply {
                 putBoolean("inNote", inNote)
             })
@@ -6449,78 +7291,113 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "foreground monitor: left note canvas, hiding overlays")
                 markToolbarForRestore(parkGuards = false)
                 terminateAfterPluginMenuClose = false
-                
-                
-                
-                
-                
+
                 FloatingPenGuard.releaseScopes("left note canvas", PenGuardScope.HOST_UI)
                 monitorHandler.post {
-                    
-                    
-                    
-                    
+
                     FloatingPenGuard.endPark("left note canvas", flush = true)
                     removeAll()
                     suspendAllNativePanels()
-                    FloatingBubbleModule.hideStatic()
-                    AiBubbleModule.hideStatic()
-                    PaletteBubbleModule.hideStatic()
+                    hideSurfaceBubbles()
                 }
             } else {
                 if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "foreground monitor: returned to note canvas")
                 scheduleRestore(RESTORE_DELAY_SHORT, "returned to note canvas")
             }
         }
+
+        if (supportsHandwriting) {
+            RelayInboxPanel.showing()?.onHostPage(if (noteCanvasForeground) "NOTE" else "DOC", hostFile)
+        }
         syncDocumentTextSelectionGuard()
         syncPluginHostGuard()
     }
 
+    private val relayMonitorStop: Runnable = object : Runnable {
+        override fun run() {
+            if (!monitorOnlyForRelay || currentInstance !== this@FloatingToolbarModule) return
+
+            if (hasToolbarSession()) {
+                monitorOnlyForRelay = false
+                return
+            }
+
+            if (SystemKeyboard.shown) {
+                monitorHandler.postDelayed(this, PenGuardTiming.RELAY_MONITOR_STOP_DELAY_MS)
+                return
+            }
+            Log.i(TAG, "foreground monitor stops: the AIRelay window it was started for has closed")
+            stopForegroundMonitor()
+        }
+    }
+
+    internal fun holdMonitorForRelay() {
+        monitorHandler.removeCallbacks(relayMonitorStop)
+        if (foregroundMonitorRunning) return
+        startForegroundMonitor()
+        monitorOnlyForRelay = true
+        Log.i(TAG, "foreground monitor started for the AIRelay window")
+    }
+
+    internal fun releaseMonitorForRelay() {
+        if (!monitorOnlyForRelay) return
+        monitorHandler.removeCallbacks(relayMonitorStop)
+        monitorHandler.postDelayed(relayMonitorStop, PenGuardTiming.RELAY_MONITOR_STOP_DELAY_MS)
+    }
+
     fun startForegroundMonitor() {
+        monitorOnlyForRelay = false
         if (foregroundMonitorRunning) return
         foregroundMonitorRunning = true
         isInNoteApp = true
 
-
-
         paletteApplyInFlight = false
         setPaletteSelectionHold(false)
-        HostPenSignals.endPaletteApplyGuard()
+        FloatingPenGuard.setFullScreenActive(false, PenGuardOwner.PALETTE_APPLY)
         HostPenSignals.endInsertImageGuard()
 
-        
         if (windowStateMonitor == null) {
             windowStateMonitor = WindowStateMonitor(reactApplicationContext)
         }
         windowStateMonitor?.start()
 
-        
-        
         FloatingPenGuard.claimOwnership(reactApplicationContext.filesDir)
+        SystemKeyboard.ensureRegistered(reactApplicationContext)
 
-        
-        
         FloatingPenGuard.beginHostBootstrap("foreground monitor start")
         SubviewLogMonitor.start(subviewListener)
+        TwoFingerDoubleTap.start(reactApplicationContext) { currentInstance?.onTwoFingerDoubleTap() }
 
+        lassoSelectionSendsText = false
+        docLassoSelected = false
+        refreshSmartLassoIcon()
+
+        monitorTickSerial.incrementAndGet()
         monitorHandler.removeCallbacks(staticMonitorRunnable)
         monitorHandler.postDelayed(staticMonitorRunnable, MONITOR_INTERVAL_MS)
+        LexiLink.onMonitorChanged(true)
         if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "foreground monitor started")
     }
 
     fun stopForegroundMonitor() {
         cancelRotationSync("foreground monitor stopped")
         foregroundMonitorRunning = false
+        monitorOnlyForRelay = false
+        monitorHandler.removeCallbacks(relayMonitorStop)
+        monitorTickSerial.incrementAndGet()
         monitorHandler.removeCallbacks(staticMonitorRunnable)
-        
-        
+
         SubviewLogMonitor.stop()
+        TwoFingerDoubleTap.stop()
+        lassoSelectionSendsText = false
+        docLassoSelected = false
+        refreshSmartLassoIcon()
         paletteApplyInFlight = false
         paletteOverlaysParked = false
         setPaletteSelectionHold(false)
         clearMultiInsert("foreground monitor stopped")
         HostPenSignals.resetForMonitorStop("foreground monitor stopped")
-        
+
         FloatingPenGuard.releaseScopes(
             "foreground monitor stopped",
             PenGuardScope.HOST_UI, PenGuardScope.FLOW, PenGuardScope.PRESS
@@ -6531,14 +7408,25 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         toolbarRestorePending = false
         cancelScheduledRestore()
         FloatingPenGuard.endPark("foreground monitor stopped", flush = true)
+        LexiLink.onMonitorChanged(false)
         terminateAfterPluginMenuClose = false
     }
 
     private data class ForegroundActivity(val packageName: String, val activityName: String)
 
+    private fun isHostPage(foreground: ForegroundActivity): Boolean =
+        (foreground.packageName == NOTE_PACKAGE && foreground.activityName == NOTE_INSIDE_PAGES_ACTIVITY) ||
+            foreground.packageName == DOC_PACKAGE
+
+    private fun hostFilePath(): String? = try {
+        HostDataCacheAPI.getInstance()?.currentFilePath?.takeIf { it.isNotBlank() }
+    } catch (error: Throwable) {
+        if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "current file path read failed: $error")
+        null
+    }
+
     private val resumedActivityRegex = Regex("""mResumedActivity:.*?(\S+)/(\S+)\s""")
 
-    
     private fun foregroundActivity(): ForegroundActivity? {
         return try {
             val bin = if (java.io.File("/system/bin/dumpsys").exists()) "/system/bin/dumpsys" else "dumpsys"
@@ -6568,6 +7456,10 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             null
         }
     }
+
+    private fun isHandwritingForeground(fg: ForegroundActivity): Boolean =
+        (fg.packageName == NOTE_PACKAGE && fg.activityName == NOTE_INSIDE_PAGES_ACTIVITY) ||
+            fg.packageName == DOC_PACKAGE
 
     private fun isNoteCanvasForeground(): Boolean {
         val foreground = foregroundActivity() ?: return false
@@ -6605,9 +7497,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     actions = listOf(PenLassoOverlay.Action.CONFIRM, PenLassoOverlay.Action.CANCEL),
                     beforeAction = {
                         if (penSelectionRequest == requestId) {
-                            
-                            
-                            
+
                             FloatingPenGuard.setFullScreenActive(true, PenGuardOwner.penSelection(requestId))
                             schedulePenSelectionTimeout(requestId, PenGuardTiming.PEN_SELECTION_ACTION_TIMEOUT_MS)
                         }
@@ -6624,10 +7514,8 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                         }
                     },
                     onCancel = { endPenSelection(requestId, cancelled = true) },
+                    hintKey = "pen_selection_hint",
                 )
-                if (penSelectionRequest == requestId) {
-                    schedulePenSelectionTimeout(requestId, PenGuardTiming.PEN_SELECTION_SESSION_TIMEOUT_MS)
-                }
             } catch (error: Exception) {
                 Log.e(TAG, "beginPenLassoSelection request=$requestId", error)
                 endPenSelection(requestId, cancelled = true)
@@ -6673,53 +7561,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun cancelPenLassoSelection(requestId: String) {
         handler.post { endPenSelection(requestId, cancelled = true) }
-    }
-
-    @ReactMethod
-    fun showPenLassoOverlay() {
-        
-        Log.i(TAG, "showPenLassoOverlay: bridge call received")
-        handler.post {
-            try {
-                Log.i(TAG, "showPenLassoOverlay: creating overlay (prev=${penLassoOverlay != null})")
-                penLassoOverlay?.dismissSilently()
-                penLassoOverlay = null
-                val overlay = PenLassoOverlay(reactApplicationContext)
-                penLassoOverlay = overlay
-                overlay.show(
-                    actions = listOf(
-                        PenLassoOverlay.Action.CONFIRM,
-                        PenLassoOverlay.Action.CANCEL,
-                    ),
-                    onAction = { _, l, t, r, b ->
-                        handler.post {
-                            if (penLassoOverlay === overlay) penLassoOverlay = null
-                            emitEvent("onPenLassoBbox", Arguments.createMap().apply {
-                                putInt("left", l); putInt("top", t)
-                                putInt("right", r); putInt("bottom", b)
-                            })
-                        }
-                    },
-                    onCancel = {
-                        handler.post {
-                            if (penLassoOverlay === overlay) penLassoOverlay = null
-                            emitEvent("onPenLassoCancel", Arguments.createMap())
-                        }
-                    }
-                )
-            } catch (e: Exception) {
-                if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "showPenLassoOverlay failed: ${e.message}", e)
-                emitEvent("onPenLassoCancel", Arguments.createMap())
-            }
-        }
-    }
-
-    @ReactMethod
-    fun dismissPenLassoOverlay() {
-        handler.post {
-            penLassoOverlay?.dismiss()
-            penLassoOverlay = null
-        }
     }
 
     private var insertTimerRunning = false

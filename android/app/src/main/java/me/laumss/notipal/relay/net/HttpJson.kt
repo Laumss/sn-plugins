@@ -4,38 +4,13 @@ import android.util.Log
 import org.json.JSONObject
 import java.io.IOException
 
-
 object HttpJson {
     private const val TAG = "HttpJson"
 
-    
-    @Volatile var authToken: String? = null
-
-    
-    fun sseUrl(url: String): String {
-        val token = authToken ?: return url
-        val sep = if ("?" in url) "&" else "?"
-        return "$url${sep}access_token=$token"
-    }
-
-    
-    fun authHeaders(extra: Map<String, String> = emptyMap()): Map<String, String> {
-        val token = authToken ?: return extra
-        return extra + ("Authorization" to "Bearer $token")
-    }
-
-    
-    fun normalizeBaseUrl(host: String, defaultPort: Int): String {
-        val h = host.trim()
-        return if (h.startsWith("http")) h else "http://$h:$defaultPort"
-    }
-
-    
-    fun get(url: String, timeoutMs: Int = 5_000): String? =
+    private fun get(url: String, timeoutMs: Int): String? =
         RawHttp.request(
             method = "GET",
             url = url,
-            headers = authHeaders(),
             connectTimeoutMs = timeoutMs,
             readTimeoutMs = timeoutMs,
         ).use { resp ->
@@ -47,7 +22,6 @@ object HttpJson {
             }
         }
 
-    
     fun getJsonOrNull(url: String, timeoutMs: Int = 5_000): JSONObject? =
         try {
             get(url, timeoutMs)?.let { JSONObject(it) }
@@ -59,13 +33,11 @@ object HttpJson {
     fun getJson(url: String, timeoutMs: Int = 5_000): JSONObject =
         JSONObject(get(url, timeoutMs) ?: throw IOException("GET $url was not successful"))
 
-    
     fun delete(url: String, timeoutMs: Int = 5_000): Boolean =
         try {
             RawHttp.request(
                 method = "DELETE",
                 url = url,
-                headers = authHeaders(),
                 connectTimeoutMs = timeoutMs,
                 readTimeoutMs = timeoutMs,
             ).use { it.isSuccess }
@@ -74,7 +46,6 @@ object HttpJson {
             false
         }
 
-    
     fun postJson(url: String, body: JSONObject, timeoutMs: Int = 30_000): String =
         post(
             url = url,
@@ -83,7 +54,6 @@ object HttpJson {
             timeoutMs = timeoutMs,
         )
 
-    
     fun post(
         url: String,
         body: ByteArray,
@@ -93,10 +63,9 @@ object HttpJson {
         RawHttp.request(
             method = "POST",
             url = url,
-            headers = authHeaders(mapOf("Content-Type" to contentType)),
+            headers = mapOf("Content-Type" to contentType),
             body = body,
-            
-            
+
             connectTimeoutMs = minOf(timeoutMs, 10_000),
             readTimeoutMs = timeoutMs,
         ).use { resp ->

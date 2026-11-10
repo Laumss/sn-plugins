@@ -1,9 +1,15 @@
 package me.laumss.notipal.render
 
+import me.laumss.notipal.NotipalDirs
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.BitmapRegionDecoder
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Rect
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import android.util.SizeF
 import com.facebook.react.bridge.ReactApplicationContext
@@ -19,7 +25,6 @@ import java.lang.reflect.Proxy
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
-
 object PageImageSource {
 
     private const val TAG = "PageImageSource"
@@ -27,12 +32,14 @@ object PageImageSource {
     private const val HOST_CALLBACK_CLASS = "com.ratta.supernote.pluginlib.callback.RequestHostCallback"
     private const val FOREGROUND_RETRY_COUNT = 3
     private const val FOREGROUND_RETRY_MS = 600L
-    
-    private const val HOST_OUTPUT_DIR = "/sdcard/EXPORT/inkling_capture"
-    
+
+    internal val HOST_OUTPUT_DIR get() = NotipalDirs.hostRender
+
     private const val INCLUDE_NOTE_TEMPLATE = false
-    
+
     internal const val TRAIL_CACHE_BUSY = "host trail cache busy"
+    internal const val TRAIL_CACHE_BUSY_RETRY_COUNT = 50
+    internal const val TRAIL_CACHE_BUSY_RETRY_MS = 300L
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val renderExecutor by lazy {
@@ -46,7 +53,20 @@ object PageImageSource {
         val screenWidth: Int, val screenHeight: Int,
     )
 
-    
+    class StageTimer {
+        private val start = SystemClock.elapsedRealtime()
+        private var last = start
+        private val parts = StringBuilder()
+
+        @Synchronized fun mark(stage: String) {
+            val now = SystemClock.elapsedRealtime()
+            parts.append(' ').append(stage).append('=').append(now - last)
+            last = now
+        }
+
+        @Synchronized fun summary(): String = "$parts total=${SystemClock.elapsedRealtime() - start}"
+    }
+
     fun readCurrentContext(ctx: ReactApplicationContext, onDone: (PageContext?, String?) -> Unit) {
         val done = AtomicBoolean(false)
         val timeout = Runnable {
@@ -82,12 +102,13 @@ object PageImageSource {
         }
     }
 
-    
     fun renderCurrentPage(
         ctx: ReactApplicationContext,
         outPath: String,
         expectedContext: PageContext? = null,
         livePicturePreview: (() -> String?)? = null,
+        crop: Rect? = null,
+        timer: StageTimer? = null,
         onDone: (String?, String?) -> Unit,
     ) {
         val done = AtomicBoolean(false)
@@ -100,41 +121,43 @@ object PageImageSource {
             postMain { onDone(path, error) }
         }
         readCurrentContext(ctx) { source, error ->
+            timer?.mark("context")
             if (source == null) return@readCurrentContext finish(null, error)
-            if (me.laumss.notipal.MosaicLink.isBoardSurface() ||
+            if (me.laumss.notipal.MosaicLink.isBoardVisible() ||
                 (expectedContext != null && source != expectedContext)) {
                 return@readCurrentContext finish(null, "capture context changed before render")
             }
             val rendered: (String?, String?) -> Unit = { path, renderError ->
                 if (path == null) finish(null, renderError)
                 else readCurrentContext(ctx) { current, contextError ->
-                    if (current != source || me.laumss.notipal.MosaicLink.isBoardSurface()) {
+                    timer?.mark("verify")
+                    if (current != source || me.laumss.notipal.MosaicLink.isBoardVisible()) {
                         finish(null, contextError ?: "capture context changed during render")
                     } else finish(path, null)
                 }
             }
             if (isNotePath(source.filePath)) {
                 renderNote(ctx, source.filePath, source.pageNum, source.pageWidth,
-                    source.pageHeight, outPath, livePicturePreview, rendered)
+                    source.pageHeight, outPath, livePicturePreview, crop, timer, rendered)
             } else {
                 renderDoc(ctx, source.filePath, source.pageNum, source.pageWidth, source.pageHeight,
-                    source.screenWidth, source.screenHeight, outPath, rendered)
+                    source.screenWidth, source.screenHeight, outPath, crop, timer, rendered)
             }
         }
     }
 
-    
     fun renderCurrentPageBlocking(
         ctx: ReactApplicationContext, outPath: String,
         expectedContext: PageContext? = null, timeoutMs: Long = 15_000L,
         livePicturePreview: (() -> String?)? = null,
+        crop: Rect? = null, timer: StageTimer? = null,
     ): String? {
         check(Looper.myLooper() != Looper.getMainLooper()) { "page rendering requires a worker" }
         val latch = java.util.concurrent.CountDownLatch(1)
         val lock = Any()
         var accepting = true
         var result: String? = null
-        renderCurrentPage(ctx, outPath, expectedContext, livePicturePreview) { path, _ ->
+        renderCurrentPage(ctx, outPath, expectedContext, livePicturePreview, crop, timer) { path, _ ->
             synchronized(lock) {
                 if (accepting) result = path
                 else runCatching { File(outPath).delete() }
@@ -152,8 +175,6 @@ object PageImageSource {
         }
     }
 
-    
-
     private fun renderNote(
         ctx: ReactApplicationContext,
         path: String,
@@ -162,12 +183,15 @@ object PageImageSource {
         pageH: Int,
         outPath: String,
         livePicturePreview: (() -> String?)?,
+        crop: Rect?,
+        timer: StageTimer?,
         finish: (String?, String?) -> Unit,
     ) {
         val stem = "note_${System.nanoTime()}"
         val templatePath = if (INCLUDE_NOTE_TEMPLATE) hostOutputFile("${stem}_tpl.png") else null
         fun withTemplate(readyTemplate: String) {
             loadElements(ctx, path, page) { elements, error, release ->
+                timer?.mark("elements(${elements?.size ?: 0})")
                 if (elements == null) {
                     release()
                     runCatching { File(readyTemplate).delete() }
@@ -175,21 +199,22 @@ object PageImageSource {
                     return@loadElements
                 }
                 withLayerPreview(ctx, path, page, stem, elements, livePicturePreview) { previewPath ->
+                    timer?.mark("preview")
                     renderExecutor.execute {
                         val result = runCatching {
                             val background = readyTemplate.takeIf { it.isNotEmpty() }?.let(::decodeFile)
-                            try {
-                                writePng(
-                                    VectorPageRenderer.render(
-                                        elements, pageW, pageH, pageW, pageH,
-                                        background = background,
-                                        layerPreviewPath = previewPath,
-                                    ),
-                                    outPath,
+                            val rendered = try {
+                                VectorPageRenderer.render(
+                                    elements, pageW, pageH, pageW, pageH,
+                                    background = background,
+                                    layerPreviewPath = previewPath,
                                 )
                             } finally {
                                 background?.recycle()
                             }
+                            timer?.mark("draw")
+                            writeRegionPng(rendered, crop, outPath)
+                            timer?.mark("encode")
                         }
                         release()
                         runCatching { if (readyTemplate.isNotEmpty()) File(readyTemplate).delete() }
@@ -217,8 +242,6 @@ object PageImageSource {
         }
     }
 
-    
-
     private fun renderDoc(
         ctx: ReactApplicationContext,
         path: String,
@@ -228,25 +251,28 @@ object PageImageSource {
         screenW: Int,
         screenH: Int,
         outPath: String,
+        crop: Rect?,
+        timer: StageTimer?,
         finish: (String?, String?) -> Unit,
     ) {
         val stem = "doc_${System.nanoTime()}"
         val basePath = hostOutputFile("${stem}_base.png")
         runCatching { File(basePath).delete() }
-        
-        
+
         callHost(
             ctx, "generateCurrentDocImage",
             listOf(page, basePath, SizeF(screenW.toFloat(), screenH.toFloat()), 1),
         ) { value, error ->
+            timer?.mark("hostDocImage")
             val baseOk = value == true && File(basePath).isFile && File(basePath).length() > 0L
             if (!baseOk) {
                 runCatching { File(basePath).delete() }
                 finish(null, error ?: "doc base image failed (result=$value)")
                 return@callHost
             }
-            
+
             loadElements(ctx, path, page, emptyIsOk = true) { elements, elementError, release ->
+                timer?.mark("elements(${elements?.size ?: 0})")
                 if (elements == null) {
                     release()
                     runCatching { File(basePath).delete() }
@@ -255,21 +281,29 @@ object PageImageSource {
                 }
                 val list = elements
                 withLayerPreview(ctx, path, page, stem, list) { previewPath ->
+                    timer?.mark("preview")
                     renderExecutor.execute {
                         val result = runCatching {
-                            val background = decodeFile(basePath)
-                                ?: throw IllegalStateException("doc base decode failed")
-                            try {
-                                writePng(
+
+                            if (crop != null && list.isEmpty() &&
+                                writeBaseRegion(basePath, screenW, screenH, crop, outPath)) {
+                                timer?.mark("baseRegion")
+                            } else {
+                                val background = decodeFile(basePath)
+                                    ?: throw IllegalStateException("doc base decode failed")
+                                timer?.mark("decode")
+                                val rendered = try {
                                     VectorPageRenderer.render(
                                         list, pageW, pageH, screenW, screenH,
                                         background = background,
                                         layerPreviewPath = previewPath,
-                                    ),
-                                    outPath,
-                                )
-                            } finally {
-                                background.recycle()
+                                    )
+                                } finally {
+                                    background.recycle()
+                                }
+                                timer?.mark("draw")
+                                writeRegionPng(rendered, crop, outPath)
+                                timer?.mark("encode")
                             }
                         }
                         release()
@@ -291,8 +325,7 @@ object PageImageSource {
         }
     }
 
-    
-    private fun withLayerPreview(
+    internal fun withLayerPreview(
         ctx: ReactApplicationContext,
         path: String,
         page: Int,
@@ -307,9 +340,7 @@ object PageImageSource {
                     it.picture?.picturePath?.let { p -> p.isEmpty() || !File(p).canRead() } != false)
         }
         if (!needsPreview) return onReady("")
-        
-        
-        
+
         if (livePicturePreview != null) {
             renderExecutor.execute {
                 val preview = runCatching { livePicturePreview() }.getOrNull()
@@ -328,15 +359,13 @@ object PageImageSource {
                     onReady(previewPath)
                 } else {
                     Log.w(TAG, "layer preview unavailable: $e1, pictures skipped")
+                    File(previewPath).delete()
                     onReady("")
                 }
             }
         }
     }
 
-    
-
-    
     fun loadPageElements(
         ctx: ReactApplicationContext,
         path: String,
@@ -344,7 +373,6 @@ object PageImageSource {
         onLoaded: (List<Element>?, String?, () -> Unit) -> Unit,
     ) = loadElements(ctx, path, page, emptyIsOk = true, onLoaded = onLoaded)
 
-    
     private fun loadElements(
         ctx: ReactApplicationContext,
         path: String,
@@ -414,7 +442,7 @@ object PageImageSource {
                                     else deliver(null, "element path empty")
                                 } else {
                                     try {
-                                        
+
                                         @Suppress("UNCHECKED_CAST")
                                         val elements = readMethod.invoke(pluginApp, tempPath) as? List<Element>
                                         if (elements == null) deliver(null, "elements deserialize empty")
@@ -448,8 +476,7 @@ object PageImageSource {
                     val methods = pluginApp.javaClass.methods.filter {
                         it.name == "removeTrail" && it.parameterCount == 1
                     }
-                    
-                    
+
                     val byElement = methods.firstOrNull { it.parameterTypes[0] == Element::class.java }
                     val byUuid = methods.firstOrNull { it.parameterTypes[0] == String::class.java }
                     elements.forEach { element ->
@@ -468,9 +495,6 @@ object PageImageSource {
         }
     }
 
-    
-
-    
     internal fun callHost(
         ctx: ReactApplicationContext,
         methodName: String,
@@ -549,7 +573,6 @@ object PageImageSource {
         ctx.runOnNativeModulesQueueThread(block)
     }
 
-    
     fun resizeLassoRectAfterInsert(
         ctx: ReactApplicationContext,
         rect: ReadableMap,
@@ -595,6 +618,12 @@ object PageImageSource {
         return boxed.isInstance(value)
     }
 
+    internal fun samePath(first: String?, second: String): Boolean {
+        if (first.isNullOrEmpty()) return false
+        fun canonical(path: String) = runCatching { File(path).canonicalPath }.getOrDefault(path)
+        return canonical(first) == canonical(second)
+    }
+
     private fun isForegroundDenied(message: String?): Boolean =
         message?.contains("not allowed to use this API", ignoreCase = true) == true
 
@@ -615,6 +644,46 @@ object PageImageSource {
     private fun decodeFile(path: String): Bitmap? = try {
         BitmapFactory.decodeFile(path, BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 })
     } catch (_: Throwable) { null }
+
+    internal fun clampCrop(crop: Rect, width: Int, height: Int): Rect {
+        val x = crop.left.coerceIn(0, width - 1)
+        val y = crop.top.coerceIn(0, height - 1)
+        val w = crop.width().coerceIn(1, width - x)
+        val h = crop.height().coerceIn(1, height - y)
+        return Rect(x, y, x + w, y + h)
+    }
+
+    internal fun writeRegionPng(bitmap: Bitmap, crop: Rect?, outPath: String) {
+        val region = crop?.let { clampCrop(it, bitmap.width, bitmap.height) }
+        val out = try {
+            region?.let { Bitmap.createBitmap(bitmap, it.left, it.top, it.width(), it.height()) } ?: bitmap
+        } catch (error: Throwable) {
+            bitmap.recycle()
+            throw error
+        }
+        if (out !== bitmap) bitmap.recycle()
+        writePng(out, outPath)
+    }
+
+    private fun writeBaseRegion(basePath: String, width: Int, height: Int, crop: Rect, outPath: String): Boolean {
+        @Suppress("DEPRECATION")
+        val decoder = runCatching { BitmapRegionDecoder.newInstance(basePath, false) }.getOrNull() ?: return false
+        return try {
+            if (decoder.width != width || decoder.height != height) return false
+            val options = BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 }
+            val region = decoder.decodeRegion(clampCrop(crop, width, height), options) ?: return false
+            val opaque = Bitmap.createBitmap(region.width, region.height, Bitmap.Config.ARGB_8888)
+            Canvas(opaque).apply { drawColor(Color.WHITE); drawBitmap(region, 0f, 0f, null) }
+            region.recycle()
+            writePng(opaque, outPath)
+            true
+        } catch (error: Exception) {
+            Log.w(TAG, "base region decode failed: ${messageOf(error)}")
+            false
+        } finally {
+            decoder.recycle()
+        }
+    }
 
     private fun writePng(bitmap: Bitmap, outPath: String) {
         try {

@@ -14,7 +14,6 @@ function asLayer(el: any): number {
   return typeof n === 'number' && n >= 0 && n <= 3 ? n : 0;
 }
 
-
 export async function saveCurrentPage(reason: string): Promise<boolean> {
   try {
     const res: any = await PluginNoteAPI.saveCurrentNote();
@@ -40,8 +39,7 @@ function groupByLayer(elements: any[]): Map<number, any[]> {
   return groups;
 }
 
-
-export async function modifyLiveElements(elements: any[], page: number): Promise<any> {
+async function modifyLiveElements(elements: any[], page: number): Promise<any> {
   if (!elements.length) return { success: true, result: [] };
   const modified: number[] = [];
   for (const [layer, els] of groupByLayer(elements)) {
@@ -53,7 +51,6 @@ export async function modifyLiveElements(elements: any[], page: number): Promise
   }
   return { success: true, result: modified };
 }
-
 
 export async function modifyPaletteElements(filePath: string, page: number, elements: any[], style: {
   penColor: number | null; thickness: number | null; penType: number | null;
@@ -71,24 +68,17 @@ export async function modifyPaletteElements(filePath: string, page: number, elem
     : modifyFileElements(filePath, page, elements);
 }
 
-
-
-
-
-
-
-export async function modifyFileElements(
+async function modifyFileElements(
   filePath: string,
   page: number,
   elements: any[],
 ): Promise<any> {
   if (!elements.length) return { success: true, result: [] };
   console.log(TAG, `modifyElements(file) n=${elements.length} page=${page}`);
-  const res: any = await (PluginFileAPI as any).modifyElements(filePath, page, elements);
+  const res: any = await PluginFileAPI.modifyElements(filePath, page, elements);
   console.log(TAG, `modifyElements(file) ok=${res?.success} err=${res?.error?.message ?? ''} result=${JSON.stringify(res?.result)}`);
   return res;
 }
-
 
 export async function ensureMarkerDirection(el: any): Promise<void> {
   const stroke = el?.stroke;
@@ -122,10 +112,6 @@ export async function ensureMarkerDirection(el: any): Promise<void> {
 
   const ok = await dir.setRange(0, dirs.length - 1, dirs);
   console.log(TAG, `ensureMarkerDirection uuid=${el.uuid} n=${dirs.length} ok=${ok}`);
-}
-
-export function isMarkerStroke(el: any): boolean {
-  return el?.type === 0 && el?.stroke?.penType === MARKER_PT;
 }
 
 export { MARKER_PT };

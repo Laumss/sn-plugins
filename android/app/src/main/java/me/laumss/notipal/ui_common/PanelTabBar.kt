@@ -9,7 +9,6 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import com.facebook.react.bridge.ReactApplicationContext
 
-
 class PanelTabBar(
     private val ctx: ReactApplicationContext,
     private val tabs: List<Tab>,
@@ -76,7 +75,7 @@ class PanelTabBar(
         }
 
         wrapper.addView(bar)
-        
+
         wrapper.addView(View(ctx).apply {
             layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 1).apply {
                 leftMargin = side; rightMargin = side

@@ -1,15 +1,15 @@
-import { NativeModules, NativeEventEmitter, Platform } from 'react-native';
+import { NativeModules, NativeEventEmitter } from 'react-native';
 
 const { LocalSendModule } = NativeModules;
 
-export interface ServerConfig {
+interface ServerConfig {
   alias: string;
   port?: number;
   dest?: string;
   pin?: string;
 }
 
-export interface ServerStatus {
+interface ServerStatus {
   running: boolean;
   ip: string;
   port: number;
@@ -59,8 +59,8 @@ class LocalSendBridge {
     LocalSendModule.ackPendingText(id);
   }
 
-  async scanForPeers(): Promise<string> {
-    return await LocalSendModule.scanForPeers();
+  copyTextToClipboard(text: string): void {
+    LocalSendModule.copyTextToClipboard(text);
   }
 }
 

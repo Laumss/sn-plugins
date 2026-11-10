@@ -2,18 +2,18 @@ package me.laumss.notipal.bubbles
 
 import android.graphics.PixelFormat
 import android.util.Log
+import android.view.View
 import android.view.WindowManager
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.WritableMap
 import com.facebook.react.modules.core.DeviceEventManagerModule
 import me.laumss.notipal.BuildConfig
+import me.laumss.notipal.FloatingDragRefresh
 import me.laumss.notipal.ui_common.ScreenScale
 import kotlin.math.roundToInt
 
-
 internal object BubbleWindowSupport {
 
-    
     @Suppress("DEPRECATION")
     fun overlayParams(w: Int, h: Int): WindowManager.LayoutParams =
         WindowManager.LayoutParams(
@@ -23,7 +23,6 @@ internal object BubbleWindowSupport {
             PixelFormat.TRANSLUCENT
         )
 
-    
     private const val V_MARGIN_RATIO = 0.06f
 
     fun clampToBand(screenH: Int, desired: Int, viewH: Int): Int {
@@ -32,7 +31,6 @@ internal object BubbleWindowSupport {
         return desired.coerceIn(minY, maxY)
     }
 
-    
     fun bubbleScale(ctx: ReactApplicationContext): Float =
         maxOf(0.86f, ScreenScale.factor(ctx))
 
@@ -42,5 +40,13 @@ internal object BubbleWindowSupport {
         } catch (e: Exception) {
             if (BuildConfig.ENABLE_DEBUG) Log.w(tag, "emitEvent($name): ${e.message}")
         }
+    }
+
+    const val DRAG_THRESHOLD_PX = 10
+
+    fun detach(wm: WindowManager?, view: View?, tag: String) {
+        if (view == null) return
+        FloatingDragRefresh.endNow(view)
+        try { wm?.removeView(view) } catch (e: Exception) { if (BuildConfig.ENABLE_DEBUG) Log.w(tag, "removeView: ${e.message}") }
     }
 }

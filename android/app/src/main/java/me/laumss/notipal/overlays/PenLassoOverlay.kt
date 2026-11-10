@@ -15,7 +15,6 @@ import android.widget.TextView
 import com.facebook.react.bridge.ReactApplicationContext
 import me.laumss.notipal.ui_common.ScreenScale
 
-
 class PenLassoOverlay(private val context: ReactApplicationContext) {
 
     companion object {
@@ -51,11 +50,9 @@ class PenLassoOverlay(private val context: ReactApplicationContext) {
         private const val ACTION_BAR_SCREEN_MARGIN_DP = 12
         private const val ACTION_ICON_STROKE_DP = 2f
         private const val ACTION_ICON_RATIO = 0.56f
-    
-    
+
     private const val HINT_BAR_HEIGHT_PX = 135f
 
-        
         private val REARM_DELAYS_MS = PenGuardTiming.PEN_LASSO_REARM_DELAYS_MS
     }
 
@@ -78,20 +75,20 @@ class PenLassoOverlay(private val context: ReactApplicationContext) {
     private var lassoPathView: LassoPathView? = null
     private var actionBar: LinearLayout? = null
     private var hintBar: LinearLayout? = null
+    private var hintKey = "smart_lasso_hint"
     private val hideHintBarRunnable = Runnable { hintBar?.visibility = View.GONE }
     private var actions: List<Action> = emptyList()
     private var onAction: ((action: Action, left: Int, top: Int, right: Int, bottom: Int) -> Unit)? = null
     private val guardOwner = "${PenGuardOwner.PEN_LASSO_PREFIX}${System.nanoTime()}"
     private var beforeAction: ((Action) -> Unit)? = null
     private var onCancel: (() -> Unit)? = null
-    
+
     private var autoConfirm = false
     private val handler = Handler(Looper.getMainLooper())
     private var timeoutRunnable: Runnable? = null
     private var fullAutoEnabled = false
     private val releaseFullAutoRunnable = Runnable { setFullUiAuto(false, "release-delay") }
 
-    
     private val guardKeepAliveRunnable = object : Runnable {
         override fun run() {
             if (rootView == null) return
@@ -102,35 +99,18 @@ class PenLassoOverlay(private val context: ReactApplicationContext) {
 
     private val points = mutableListOf<PointF>()
 
-    
     private fun setFullUiAuto(enable: Boolean, reason: String) {
         handler.removeCallbacks(releaseFullAutoRunnable)
         if (fullAutoEnabled == enable) return
-        try {
-            val eink = context.getSystemService("eink") ?: return
-            val methods = eink.javaClass.methods
-            val twoArg = methods.firstOrNull {
-                it.name == "enableFullUiAuto" && it.parameterTypes.contentEquals(
-                    arrayOf(Boolean::class.javaPrimitiveType, Boolean::class.javaPrimitiveType)
-                )
-            }
-            if (twoArg != null) {
-                twoArg.invoke(eink, enable, true)
-            } else {
-                val oneArg = methods.firstOrNull {
-                    it.name == "enableFullUiAuto" && it.parameterTypes.contentEquals(
-                        arrayOf(Boolean::class.javaPrimitiveType)
-                    )
-                } ?: return
-                oneArg.invoke(eink, enable)
-            }
-            fullAutoEnabled = enable
-            
-            if (rootView != null) FloatingPenGuard.reassert("pen lasso fullUiAuto=$enable reason=$reason")
-            if (BuildConfig.ENABLE_DEBUG) android.util.Log.i(TAG, "fullUiAuto=$enable reason=$reason")
-        } catch (e: Exception) {
-            if (BuildConfig.ENABLE_DEBUG) android.util.Log.w(TAG, "fullUiAuto call exception reason=$reason: ${e.message}")
+        if (enable) {
+            if (!EinkAuto.acquire(context, "pen-lasso", true)) return
+        } else {
+            EinkAuto.release(context, "pen-lasso")
         }
+        fullAutoEnabled = enable
+
+        if (rootView != null) FloatingPenGuard.reassert("pen lasso fullUiAuto=$enable reason=$reason")
+        if (BuildConfig.ENABLE_DEBUG) android.util.Log.i(TAG, "fullUiAuto=$enable reason=$reason")
     }
 
     private fun scheduleFullUiAutoRelease(
@@ -150,14 +130,16 @@ class PenLassoOverlay(private val context: ReactApplicationContext) {
         onCancel: () -> Unit,
         autoConfirm: Boolean = false,
         beforeAction: (Action) -> Unit = {},
+        hintKey: String = "smart_lasso_hint",
     ) {
-        
+
         android.util.Log.i(TAG, "show() called actions=$actions autoConfirm=$autoConfirm")
         this.actions = actions
         this.onAction = onAction
         this.beforeAction = beforeAction
         this.onCancel = onCancel
         this.autoConfirm = autoConfirm
+        this.hintKey = hintKey
 
         val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
         windowManager = wm
@@ -219,21 +201,13 @@ class PenLassoOverlay(private val context: ReactApplicationContext) {
         armDrawPath("show-initial")
         handler.removeCallbacks(guardKeepAliveRunnable)
         handler.postDelayed(guardKeepAliveRunnable, PenGuardTiming.PEN_LASSO_KEEP_ALIVE_MS)
-        
-        
-        
+
         handler.postDelayed({
             if (rootView != null && stage == Stage.DRAW) armDrawPath("show-post-attach")
         }, 80L)
         scheduleRearm(Stage.DRAW)
     }
 
-    fun dismiss() {
-        if (BuildConfig.ENABLE_DEBUG) android.util.Log.i(TAG, "dismiss() called (external)")
-        handler.post { fireCancel("dismiss()") }
-    }
-
-    
     fun dismissSilently() {
         if (BuildConfig.ENABLE_DEBUG) android.util.Log.i(TAG, "dismissSilently() called")
         if (Looper.myLooper() == Looper.getMainLooper()) cleanup()
@@ -251,8 +225,6 @@ class PenLassoOverlay(private val context: ReactApplicationContext) {
         handler.postDelayed(timeoutRunnable!!, TIMEOUT_MS)
     }
 
-    
-
     private fun armDrawPath(reason: String) {
         if (BuildConfig.ENABLE_DEBUG) android.util.Log.i(TAG, "armDrawPath reason=$reason")
         FloatingPenGuard.setFullScreenActive(true, guardOwner)
@@ -265,7 +237,6 @@ class PenLassoOverlay(private val context: ReactApplicationContext) {
         FloatingPenGuard.reassert("pen lasso mute: $reason")
     }
 
-    
     private fun scheduleRearm(expectStage: Stage) {
         for (d in REARM_DELAYS_MS) {
             handler.postDelayed({
@@ -273,8 +244,6 @@ class PenLassoOverlay(private val context: ReactApplicationContext) {
             }, d)
         }
     }
-
-    
 
     private enum class Stage { DRAW, ADJUST }
     private var stage = Stage.DRAW
@@ -321,7 +290,7 @@ class PenLassoOverlay(private val context: ReactApplicationContext) {
         private var dragStartY = 0f
         private var dragStartBox = RectF()
         private var dragMovedSq = 0f
-        
+
         private var currentGestureIsStylus = false
 
         private val edgeHitZone get() = dp(EDGE_HIT_ZONE_DP).toFloat()
@@ -349,7 +318,6 @@ class PenLassoOverlay(private val context: ReactApplicationContext) {
             event.getToolType(0) == MotionEvent.TOOL_TYPE_STYLUS ||
                 event.isFromSource(InputDevice.SOURCE_STYLUS)
 
-        
         private fun onTouchDraw(event: MotionEvent): Boolean {
             if (event.action == MotionEvent.ACTION_DOWN && BuildConfig.ENABLE_DEBUG) {
                 android.util.Log.i(TAG, "DRAW DOWN toolType=${event.getToolType(0)} " +
@@ -377,8 +345,7 @@ class PenLassoOverlay(private val context: ReactApplicationContext) {
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     scheduleFullUiAutoRelease(if (event.action == MotionEvent.ACTION_UP) "draw-up" else "draw-cancel")
-                    
-                    
+
                     if (event.action == MotionEvent.ACTION_UP && points.size >= 2) enterAdjust()
                     else { points.clear(); resetDottedLasso(); invalidate() }
                 }
@@ -395,8 +362,7 @@ class PenLassoOverlay(private val context: ReactApplicationContext) {
             }
             val spanX = maxX - minX
             val spanY = maxY - minY
-            
-            
+
             if (spanX < tapSlop && spanY < tapSlop) {
                 if (BuildConfig.ENABLE_DEBUG) {
                     android.util.Log.i(TAG, "DRAW discarded as tap span=${spanX}x${spanY} points=${points.size}")
@@ -409,7 +375,7 @@ class PenLassoOverlay(private val context: ReactApplicationContext) {
             box.set(minX, minY, maxX, maxY); clampBoxToScreen()
             if (BuildConfig.ENABLE_DEBUG) android.util.Log.i(TAG, "enter ADJUST box=$box autoConfirm=$autoConfirm")
             if (autoConfirm) {
-                
+
                 points.clear(); resetDottedLasso()
                 fireAction(Action.CONFIRM, box)
                 return
@@ -429,7 +395,6 @@ class PenLassoOverlay(private val context: ReactApplicationContext) {
             if (BuildConfig.ENABLE_DEBUG) android.util.Log.i(TAG, "back to DRAW")
         }
 
-        
         private fun onTouchAdjust(event: MotionEvent): Boolean {
             val x = event.x; val y = event.y
             when (event.action) {
@@ -472,14 +437,11 @@ class PenLassoOverlay(private val context: ReactApplicationContext) {
                     )
                     if (event.action == MotionEvent.ACTION_UP && dragMovedSq < tapSlopSq) {
                         when (mode) {
-                            
-                            
-                            
+
                             DragMode.TAP_OUTSIDE -> {
                                 if (currentGestureIsStylus) fireCancel("tap-outside-pen") else backToDraw()
                             }
-                            
-                            
+
                             DragMode.TAP_INSIDE -> {}
                             else -> {}
                         }
@@ -613,14 +575,13 @@ class PenLassoOverlay(private val context: ReactApplicationContext) {
         private fun drawViewfinder(canvas: Canvas) {
             canvas.drawRect(box, framePaint)
 
-            
             val mh = moveHandle
             val hl = box.left - mh / 2f
             val ht = box.top - mh / 2f
             val cx = hl + mh / 2f; val cy = ht + mh / 2f
             canvas.drawRect(hl, ht, hl + mh, ht + mh, handleFillPaint)
             canvas.drawRect(hl, ht, hl + mh, ht + mh, handleStrokePaint)
-            
+
             val arm = mh * 0.30f
             val ah = mh * 0.14f
             for (dx in intArrayOf(-1, 1)) for (dy in intArrayOf(-1, 1)) {
@@ -630,12 +591,10 @@ class PenLassoOverlay(private val context: ReactApplicationContext) {
                 canvas.drawLine(ex, ey, ex, ey - dy * ah, handleStrokePaint)
             }
 
-            
             drawCorner(canvas, box.right, box.top, 1, -1)
             drawCorner(canvas, box.left, box.bottom, -1, 1)
             drawCorner(canvas, box.right, box.bottom, 1, 1)
 
-            
             val midX = box.centerX(); val midY = box.centerY()
             drawMidCap(canvas, midX, box.top, horizontal = true)
             drawMidCap(canvas, midX, box.bottom, horizontal = true)
@@ -669,8 +628,6 @@ class PenLassoOverlay(private val context: ReactApplicationContext) {
         fun currentBox(): RectF = RectF(box)
     }
 
-    
-
     private inner class ActionIconButton(ctx: Context, private val action: Action) : View(ctx) {
         private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.WHITE
@@ -703,7 +660,7 @@ class PenLassoOverlay(private val context: ReactApplicationContext) {
                 Action.OPEN_IMAGE_PANEL -> "image_panel"
                 Action.OPEN_MOSAIC_CARD -> "mosaic_card"
             }
-            
+
             val size = (r * 2f * ACTION_ICON_RATIO).toInt().coerceAtLeast(1)
             val icon = me.laumss.notipal.ui_common.VectorAssets.loadBitmapTinted(
                 this@PenLassoOverlay.context, "icons/lasso/$asset.xml", size, Color.BLACK) ?: return
@@ -742,7 +699,6 @@ class PenLassoOverlay(private val context: ReactApplicationContext) {
         actionBar = bar
     }
 
-    
     private fun buildHintBar(root: FrameLayout) {
         val bar = LinearLayout(context).apply {
             setBackgroundColor(Color.BLACK)
@@ -762,7 +718,7 @@ class PenLassoOverlay(private val context: ReactApplicationContext) {
             setTextColor(Color.WHITE)
             textSize = 24f
             gravity = Gravity.CENTER
-            text = NativeLocale.t("smart_lasso_hint")
+            text = NativeLocale.t(hintKey)
             setPadding(ScreenScale.px(context, 51.5), 0, ScreenScale.px(context, 51.5), 0)
         }
         bar.addView(text, LinearLayout.LayoutParams(
@@ -832,15 +788,14 @@ class PenLassoOverlay(private val context: ReactApplicationContext) {
     private fun fireAction(action: Action, b: RectF) {
         if (BuildConfig.ENABLE_DEBUG) android.util.Log.i(TAG, "action=$action bbox=$b")
         val cb = onAction
-        
+
         beforeAction?.invoke(action)
         cleanup()
         cb?.invoke(action, b.left.toInt(), b.top.toInt(), b.right.toInt(), b.bottom.toInt())
     }
 
     private fun fireCancel(reason: String) {
-        
-        
+
         android.util.Log.i(TAG, "fireCancel reason=$reason")
         val cb = onCancel
         cleanup()

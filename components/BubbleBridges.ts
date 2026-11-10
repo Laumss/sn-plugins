@@ -1,8 +1,14 @@
-
-
-import { NativeModules, NativeEventEmitter } from 'react-native';
+import { NativeModules, NativeEventEmitter, DeviceEventEmitter } from 'react-native';
+import type { Subscription } from './FloatingToolbarBridge';
 
 const { FloatingBubble } = NativeModules;
+
+type BubblePosition = {
+  screenY: number; pageY: number;
+  screenX: number; pageX: number;
+  screenBottomY: number; pageBottomY: number;
+  bubbleHeight: number;
+};
 
 let _bubbleEmitter: NativeEventEmitter | null = null;
 function getBubbleEmitter(): NativeEventEmitter | null {
@@ -40,9 +46,12 @@ const FloatingBubbleBridge = {
     }
   },
 
-  
   setPending(pending: boolean): void {
     try { FloatingBubble?.setPending(pending); } catch (_) {}
+  },
+
+  setPageFull(full: boolean): void {
+    try { FloatingBubble?.setPageFull?.(full); } catch (_) {}
   },
 
   setPageHeight(height: number): void {
@@ -53,12 +62,7 @@ const FloatingBubbleBridge = {
     try { FloatingBubble?.setPageWidth(width); } catch (_) {}
   },
 
-  onTap(callback: (data: {
-    screenY: number; pageY: number;
-    screenX: number; pageX: number;
-    screenBottomY: number; pageBottomY: number;
-    bubbleHeight: number; bubbleWidth: number;
-  }) => void): { remove(): void } {
+  onTap(callback: (data: BubblePosition & { bubbleWidth: number }) => void): Subscription {
     const em = getBubbleEmitter();
     if (!em) return { remove() {} };
     return em.addListener('onBubbleTap', (event) => {
@@ -80,19 +84,13 @@ const FloatingBubbleBridge = {
     });
   },
 
-  
-  onLongPress(callback: () => void): { remove(): void } {
+  onLongPress(callback: () => void): Subscription {
     const em = getBubbleEmitter();
     if (!em) return { remove() {} };
     return em.addListener('onBubbleLongPress', callback);
   },
 
-  onDragEnd(callback: (data: {
-    screenY: number; pageY: number;
-    screenX: number; pageX: number;
-    screenBottomY: number; pageBottomY: number;
-    bubbleHeight: number;
-  }) => void): { remove(): void } {
+  onDragEnd(callback: (data: BubblePosition) => void): Subscription {
     const em = getBubbleEmitter();
     if (!em) return { remove() {} };
     return em.addListener('onBubbleDragEnd', (event) => {
@@ -115,12 +113,7 @@ const FloatingBubbleBridge = {
     });
   },
 
-  onLayout(callback: (data: {
-    screenY: number; pageY: number;
-    screenX: number; pageX: number;
-    screenBottomY: number; pageBottomY: number;
-    bubbleHeight: number;
-  }) => void): { remove(): void } {
+  onLayout(callback: (data: BubblePosition) => void): Subscription {
     const em = getBubbleEmitter();
     if (!em) return { remove() {} };
     return em.addListener('onBubbleLayout', (event) => {
@@ -142,83 +135,53 @@ const FloatingBubbleBridge = {
 
 };
 
-const { AiBubble } = NativeModules;
+const { AIRelayModule: RelayWindow } = NativeModules;
 
-let _aiEmitter: NativeEventEmitter | null = null;
-function getAiEmitter(): NativeEventEmitter | null {
-  if (!AiBubble) return null;
-  if (!_aiEmitter) _aiEmitter = new NativeEventEmitter(AiBubble);
-  return _aiEmitter;
-}
+export type RelayWindowAction = 'lasso_ai' | 'screenshot_ai' | 'mode' | 'mode_text' | 'reply_failed';
 
-type AiBubbleMode = 'ai' | 'voice';
+const RelayWindowBridge = {
+  isAvailable: !!RelayWindow?.openWindow,
 
-const AiBubbleBridge = {
-  isAvailable: !!AiBubble,
-
-  show(statusText: string, mode: AiBubbleMode = 'ai'): void {
-    try { AiBubble?.show(statusText, mode); } catch (e) {
-      console.warn('[AiBubbleBridge]: show failed:', e);
-    }
-  },
-
-  
-  hide(): void {
-    try { AiBubble?.hide(); } catch (e) {
-      console.warn('[AiBubbleBridge]: hide failed:', e);
-    }
-  },
-
-  updateText(text: string): void {
-    try { AiBubble?.updateText(text); } catch (e) {
-      console.warn('[AiBubbleBridge]: updateText failed:', e);
-    }
-  },
-
-  
-  flashText(text: string, durationMs: number, thenText: string): void {
+  open(forPage: boolean): Promise<boolean> {
     try {
-      AiBubble?.flashText(text, durationMs, thenText);
+      return Promise.resolve(RelayWindow?.openWindow?.(forPage) ?? false).catch((e: unknown) => {
+        console.warn('[RelayWindowBridge]: open failed:', e);
+        return false;
+      });
     } catch (e) {
-      console.warn('[AiBubbleBridge]: flashText failed:', e);
+      console.warn('[RelayWindowBridge]: open failed:', e);
+      return Promise.resolve(false);
     }
   },
 
-  setPageHeight(height: number): void {
-    try { AiBubble?.setPageHeight(height); } catch (_) {}
-  },
-
-  setActionButtons(buttons: import('./ToolPresets').BubbleAction[]): void {
-    try { AiBubble?.setActionButtons(JSON.stringify(buttons)); } catch (e) {
-      console.warn('[AiBubbleBridge]: setActionButtons failed:', e);
+  close(): void {
+    try { RelayWindow?.closeWindow?.(); } catch (e) {
+      console.warn('[RelayWindowBridge]: close failed:', e);
     }
   },
 
-  
-  setInboxItems(
-    items: { id: string; title: string; preview: string; source: string; time: number; pinned?: boolean }[],
-  ): void {
-    try { AiBubble?.setInboxItems(JSON.stringify(items)); } catch (e) {
-      console.warn('[AiBubbleBridge]: setInboxItems failed:', e);
+  setStatus(text: string): void {
+    try { RelayWindow?.setWindowStatus?.(text); } catch (e) {
+      console.warn('[RelayWindowBridge]: setStatus failed:', e);
     }
   },
 
-  onAction(cb: (e: { actionId: string }) => void): { remove(): void } {
-    return getAiEmitter()?.addListener('onAiBubbleAction', cb) ?? { remove() {} };
+  flash(text: string, durationMs: number): void {
+    try { RelayWindow?.flashWindowStatus?.(text, durationMs); } catch (e) {
+      console.warn('[RelayWindowBridge]: flash failed:', e);
+    }
   },
 
-  
-  onActionMode(cb: (e: { actionId: string; mode: string }) => void): { remove(): void } {
-    return getAiEmitter()?.addListener('onAiBubbleActionMode', cb) ?? { remove() {} };
+  setSelectionMode(mode: 'text' | 'formula', switchable: boolean): void {
+    try { RelayWindow?.setWindowSelectionMode?.(mode, switchable); } catch (_) {}
   },
 
-  onCapsuleTap(cb: (e: { id: string }) => void): { remove(): void } {
-    return getAiEmitter()?.addListener('onAiCapsuleTap', cb) ?? { remove() {} };
+  setAside(aside: boolean): void {
+    try { RelayWindow?.setWindowAside?.(aside); } catch (_) {}
   },
 
-  
-  onCapsuleLongPress(cb: (e: { id: string }) => void): { remove(): void } {
-    return getAiEmitter()?.addListener('onAiCapsuleLongPress', cb) ?? { remove() {} };
+  onAction(cb: (e: { actionId: RelayWindowAction }) => void): Subscription {
+    return DeviceEventEmitter.addListener('onRelayWindowAction', cb);
   },
 };
 
@@ -240,7 +203,6 @@ const PaletteBubbleBridge = {
     }
   },
 
-  
   hideTemporarily(): void {
     try { PaletteBubble?.hideTemporarily?.(); } catch (e) {
       console.warn('[PaletteBubbleBridge]: hideTemporarily failed:', e);
@@ -253,10 +215,10 @@ const PaletteBubbleBridge = {
     }
   },
 
-  onSlotTap(cb: (e: { slotIndex: number; color: string; thickness: number; penType: number }) => void): { remove(): void } {
+  onSlotTap(cb: (e: { slotIndex: number; color: string; thickness: number; penType: number }) => void): Subscription {
     return getPaletteEmitter()?.addListener('onPaletteBubbleSlotTap', cb) ?? { remove() {} };
   },
 };
 
 export default FloatingBubbleBridge;
-export { AiBubbleBridge, PaletteBubbleBridge };
+export { RelayWindowBridge, PaletteBubbleBridge };
