@@ -1043,9 +1043,9 @@ function preprocess(input: string): string {
   text = text.replace(/^(\d+)\./gm, '$1​.');
   text = text.replace(/\*/g, '');
   text = text.replace(/`/g, '');
-  // 旧版中继的预填占位 UUID；收件箱按发来的原文保存回复。末组可能在流式中途截断，所以是 {1,12}。
+
   text = text.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1,12}/gi, '');
-  // BLANK 是一个看不见的占位，熬过下面的空行过滤后变回真正的空行（对话轮次的分隔）；开头的占位丢掉，笔记不以空行开头。
+
   const BLANK = '⁣';
   text = text.replace(/^(?:#{1,3}\s*)?(?:H|Human)\s*[:：].*$/gim, BLANK);
   text = text.replace(/^(?:#{1,3}\s*)?(?:A|Assistant)\s*[:：][ \t]*(.*)$/gim,
@@ -1075,34 +1075,14 @@ function preprocess(input: string): string {
   return text;
 }
 
-// =====================================================================================================================
-// 模式（状态机）
-// =====================================================================================================================
-
-/**
- * 等待翻页的子状态：none 正常接收；turn 本页放不下、等用户往后翻页（胶囊角标）；tap 已翻到新页、等用户点胶囊接着放。
- */
 export type PageWait = 'none' | 'turn' | 'tap';
 
-/**
- * 文本接收的状态。
- * - off：关闭。
- * - starting：笔记里正在开（要权限、开 LocalSend、读页面）；token 区分先后两次开，旧的结果到了丢掉。
- * - receiving：笔记里接收中，mode 是无间隔（nospacing）或段落（paragraph），wait 是等待翻页子状态。
- * - mosaic：Mosaic 白板上接收，文字合成卡片。
- */
 export type TextState =
   | { kind: 'off' }
   | { kind: 'starting'; mode: TextInsertMode; token: number }
   | { kind: 'receiving'; mode: TextInsertMode; wait: PageWait }
   | { kind: 'mosaic' };
 
-/**
- * - start：开始（工具栏点按、收文字时打开、换笔记后重开）；started：启动结果，token 对不上的丢掉。
- * - pageWait：插入循环的等待翻页变了。
- * - mosaic：白板上打开。
- * - stop：关掉（再点一次按钮、打开设置、进文档、进出 Mosaic、转屏、工具栏会话结束、启动失败）。
- */
 export type TextEvent =
   | { type: 'start'; mode: TextInsertMode; token: number }
   | { type: 'started'; mode: TextInsertMode; token: number; ok: boolean }
@@ -1138,7 +1118,7 @@ class TextMachine extends StateMachine<TextState, TextEvent> {
         enterOff(from);
         break;
       case 'starting':
-        // 换笔记后重开时胶囊留着，等的文字丢掉（手册 1.8.2：切换笔记时等待中的文字被丢弃）。
+
         if (from.kind === 'mosaic') { leaveMosaic(); }
         pendingCards = [];
         syncBubble();
@@ -1161,13 +1141,12 @@ class TextMachine extends StateMachine<TextState, TextEvent> {
   }
 }
 
-/** 笔记里点胶囊之前等着的文字（旧 _pendingCards）。 */
 let pendingCards: QueueItem[] = [];
-/** 白板上点胶囊之前等着的文字（旧 _mosaicTextBuffer）。 */
+
 let mosaicBuffer: string[] = [];
-/** 插入点是程序定的（换页、AI 回复的位置）：胶囊上屏时报来的位置不改它（旧 _aiPositionLocked）。 */
+
 let anchorLocked = false;
-/** 上次的接收方式（旧 LAST_MODE_STORE_KEY 预设，现在是预设 JSON 的 textInsertMode）。 */
+
 let lastMode: TextInsertMode = 'nospacing';
 let startToken = 0;
 let lastPermissionTipAt = 0;
@@ -1210,7 +1189,6 @@ function enterOff(from: TextState): void {
   }
 }
 
-/** 胶囊的样子：有文字等着放（或翻到新页等点按）时反白；本页放不下、在等翻页时有角标。 */
 function syncBubble(): void {
   if (!TEXT_AVAILABLE) { return; }
   if (machine.state.kind === 'mosaic') {
@@ -1226,7 +1204,6 @@ function pushPageSize(): void {
   if (ps && TEXT_AVAILABLE) { notipalText.setPageSize(ps.width, ps.height); }
 }
 
-/** 工具栏按钮的反白跟着模式走（旧 _pushActiveModes）。 */
 function syncToolbar(): void {
   if (!hasNativeModule('NotipalToolbar')) { return; }
   notipalToolbar.setActive(TOOL.INSERT_TEXT, machine.state.kind !== 'off');
@@ -1235,8 +1212,6 @@ function syncToolbar(): void {
 machine.addListener((old, next) => {
   if (old.kind !== next.kind) { syncToolbar(); }
 });
-
-// ---- 插入循环的回调 ----
 
 function handlePositionChanged(_page: number, nextTop: number, _source: TextSource, isPageChange: boolean): void {
   if (!isPageChange || !TEXT_AVAILABLE) { return; }
@@ -1252,7 +1227,6 @@ function handlePositionChanged(_page: number, nextTop: number, _source: TextSour
   }
 }
 
-/** 换了一本笔记：等着的文字丢掉，按原来的方式在新笔记里重开；不在笔记里了就关掉。 */
 function handleNoteChanged(reason: 'note_switched', detail: string): void {
   log.w(TAG, `NoteContextChanged ${reason}: ${detail}`);
   const state = machine.state;
@@ -1273,9 +1247,6 @@ function handlePageWaitChanged(): void {
   syncBubble();
 }
 
-// ---- 开与关 ----
-
-/** 文件读写权限（先读后写）；没给时提示，1.5 秒内只提示一次。 */
 async function ensurePermissions(): Promise<boolean> {
   if (!hasNativeModule('NotipalHost')) { return true; }
   const readGranted = await notipalHost.requestPermission('file_read');
@@ -1289,7 +1260,6 @@ async function ensurePermissions(): Promise<boolean> {
   return ready;
 }
 
-/** 由 LocalSend（Task 20）设置：开 LocalSend 服务，开不了（没 Wi-Fi、没权限）时自己提示并返回 false。 */
 export const textHooks: { startLocalSend: () => Promise<boolean> } = {
   startLocalSend: async () => {
     log.w(TAG, 'LocalSend not wired yet: text receive opens without it');
@@ -1297,16 +1267,11 @@ export const textHooks: { startLocalSend: () => Promise<boolean> } = {
   },
 };
 
-/** 收文字要的东西：权限和 LocalSend（旧 _ensureTextReceiverRuntime）。 */
 async function ensureRuntime(): Promise<boolean> {
   if (!await ensurePermissions()) { return false; }
   return textHooks.startLocalSend();
 }
 
-/**
- * 在笔记里开始接收（旧 switchToMode / _startTextInserter）。preserve：保留各页的插入点；saveMode：记成上次的方式。
- * 第一次开不起来隔 800ms、2000ms 各再试一次。途中被停掉（再点一次、进文档……）时放弃，返回 false。
- */
 async function startNote(
   mode: TextInsertMode,
   opts: { preserve: boolean; saveMode: boolean },
@@ -1352,7 +1317,6 @@ async function startNote(
   return ok;
 }
 
-/** 白板上开始接收（旧 toggleMosaicTextMode 的打开）。 */
 async function startMosaic(): Promise<boolean> {
   if (!await ensureRuntime()) { return false; }
   if (hostState().surface !== 'mosaic') {
@@ -1363,13 +1327,11 @@ async function startMosaic(): Promise<boolean> {
   return true;
 }
 
-/** 关掉文本接收（笔记和白板都停）。不调宿主 API，退出模式时在别的动作进行中也能调。 */
 export function stopTextReceive(reason: string): void {
   ++startToken;
   machine.send({ type: 'stop', reason });
 }
 
-/** 工具栏“文本接收”被点（旧 toggleMode(lastMode)）：白板上开关白板模式；文档里提示不支持；笔记里开或关。 */
 async function onToolTap(ctx: HostCtx): Promise<void> {
   try {
     if (ctx.surface === 'mosaic') {
@@ -1387,24 +1349,22 @@ async function onToolTap(ctx: HostCtx): Promise<void> {
     }
     await startNote(lastMode, { preserve: true, saveMode: true });
   } finally {
-    // 原生点下时已先点亮；文档里拒绝、权限失败等路径按实际状态回写。
+
     syncToolbar();
   }
 }
 
 async function onToolAction(ctx: HostCtx, ev: ToolbarAction): Promise<void> {
   if (ev.gesture === 'exit') {
-    // 再点一次、或打开设置：只停模式，等着的文字丢掉（旧 stopTextReceive / stopMode）。
+
     stopTextReceive(`tool exit (${ev.host.surface})`);
     return;
   }
   if (ev.gesture === 'tap') { await onToolTap(ctx); }
 }
 
-// ---- 宿主界面的变化 ----
-
 function onHostChanged(next: HostStatePayload, prev: HostStatePayload): void {
-  // 进出 Mosaic（白板和笔记卡片之间切换不算）：文本接收关掉（旧 _closeSurfaceModes）。
+
   if ((prev.surface === 'mosaic') !== (next.surface === 'mosaic')) {
     if (machine.state.kind !== 'off') {
       log.i(TAG, `MosaicSurface ${next.surface === 'mosaic' ? 'enter' : 'leave'}: closed text`);
@@ -1412,11 +1372,10 @@ function onHostChanged(next: HostStatePayload, prev: HostStatePayload): void {
     }
   }
   if (next.surface === 'document' && prev.surface !== 'document') { stopForDocument(); }
-  // 回到笔记或文档：宿主还在把页面画回来，1.5 秒内不插（旧 onNoteForegroundChanged）。
+
   if (next.inHostApp && !prev.inHostApp) { inserter.holdInserts(NOTE_FOREGROUND_SETTLE_MS); }
 }
 
-/** 进了文档：文本接收关掉并提示，之后收到的文字进系统剪贴板（旧 _stopTextReceiveForDocument）。 */
 function stopForDocument(): void {
   const hadText = machine.state.kind !== 'off' || inserter.isRunning()
     || mosaicBuffer.length > 0 || pendingCards.length > 0;
@@ -1426,9 +1385,6 @@ function stopForDocument(): void {
   dialog.tip(t('doc_text_receive_stop')).catch(e => log.w(TAG, 'tip failed', e));
 }
 
-// ---- 胶囊 ----
-
-/** 胶囊的位置定下一条的插入点：胶囊底边往下 4 像素、左边对齐（旧 applyBubblePosition）。白板上不用。 */
 function applyBubblePosition(d: TextBubbleEvent, source: string): void {
   if (machine.state.kind === 'mosaic') { return; }
   const pageBottomY = d.pageBottomY > d.pageY ? d.pageBottomY : d.pageY;
@@ -1438,7 +1394,6 @@ function applyBubblePosition(d: TextBubbleEvent, source: string): void {
   log.i(TAG, `applyBubblePosition source=${source} raw=${JSON.stringify(d)} accepted=${JSON.stringify(anchor)}`);
 }
 
-/** 白板上点胶囊：等着的几段合成一张卡片，放在胶囊右下角（屏幕像素）。 */
 function flushMosaicCard(d: TextBubbleEvent): void {
   if (mosaicBuffer.length === 0) { return; }
   const text = mosaicBuffer.join('\n\n');
@@ -1450,7 +1405,6 @@ function flushMosaicCard(d: TextBubbleEvent): void {
   syncBubble();
 }
 
-/** 笔记里点胶囊：先对上当前页，胶囊位置定插入点，等着的文字进队列；翻到新页在等点按的接着插。 */
 async function flushPendingCards(d: TextBubbleEvent): Promise<void> {
   try {
     const pg = asResponse(await sdkCall(PluginCommAPI.getCurrentPageNum(), 'getCurrentPageNum(bubble)'));
@@ -1475,7 +1429,6 @@ async function flushPendingCards(d: TextBubbleEvent): Promise<void> {
   syncBubble();
 }
 
-/** `text:bubble` 的处理函数，index.js 接上。 */
 export function onBubble(d: TextBubbleEvent): void {
   const kind = machine.state.kind;
   if (kind === 'off') {
@@ -1485,7 +1438,7 @@ export function onBubble(d: TextBubbleEvent): void {
   switch (d.kind) {
     case 'tap':
       if (kind === 'starting') {
-        // 换笔记后正在重开：页面尺寸、插入点还是上一本的，等开好再点。
+
         log.i(TAG, 'text bubble tapped while starting: ignored');
         return;
       }
@@ -1530,17 +1483,13 @@ export function onBubble(d: TextBubbleEvent): void {
   }
 }
 
-/** `text:bubbleClosed` 的处理函数：转屏、进出 Mosaic、工具栏会话结束时窗口那边关了胶囊。 */
 export function onBubbleClosed(_ev: NativeEvents['text:bubbleClosed']): void {
   stopTextReceive('bubble closed by window change');
 }
 
-/** `toolbar:closed` 的处理函数：工具栏会话结束，文本接收停掉（旧 onDestroyAll → stopAllModes）。 */
 export function onToolbarClosed(_ev: NativeEvents['toolbar:closed']): void {
   stopTextReceive('toolbar closed');
 }
-
-// ---- 收到文字 ----
 
 function stagePendingCard(text: string, source: TextSource): void {
   pendingCards.push({ text, source });
@@ -1555,10 +1504,6 @@ function stageMosaicText(text: string, source: TextSource): void {
   syncBubble();
 }
 
-/**
- * LocalSend 收到一段文字、而文本接收开着时（Task 20 调；旧 _routeLocalSendText）：白板上进卡片缓存，文档里进系统剪贴板，
- * 笔记里等在胶囊里。文本接收其实没开时也进系统剪贴板（旧版排进不会再插的队列，文字就丢了）。
- */
 export function onTextReceived(text: string): void {
   log.i(TAG, `text received (LocalSend) len=${text.length}`);
   const kind = machine.state.kind;
@@ -1575,10 +1520,6 @@ export function onTextReceived(text: string): void {
   }
 }
 
-/**
- * 收到文字时的提示框里点了“确认”（Task 20 调；旧 onOpenTextReceiverRequested）：按所在位置打开文本接收（白板开白板模式，
- * 文档里提示不支持），这段文字进胶囊等着放。弹框时文字已进剪贴板，这里打不开也不会丢内容。
- */
 export async function openReceiverWithText(text: string): Promise<void> {
   const surface = hostState().surface;
   log.i(TAG, `opening text receiver from LocalSend prompt mode=${lastMode} surface=${surface}`);
@@ -1597,10 +1538,6 @@ export async function openReceiverWithText(text: string): Promise<void> {
   if (ok) { onTextReceived(text); }
 }
 
-/**
- * AI 回复要插进页面（Task 25 调；旧 onTextFromRelay）：白板上进卡片缓存（文本接收没开时打开白板模式），文档里不插，
- * 笔记里没开就按无间隔打开，文字等在胶囊里。返回去了哪里，Task 25 据此提示。
- */
 export async function relayText(text: string): Promise<'mosaic' | 'document' | 'staged' | 'off'> {
   const surface = hostState().surface;
   if (surface === 'mosaic') {
@@ -1614,7 +1551,6 @@ export async function relayText(text: string): Promise<'mosaic' | 'document' | '
   return 'staged';
 }
 
-/** 把下一条的插入点定在页面坐标 (left, top) 并把胶囊挪过去（Task 25 用；旧 setProgrammaticInsertionAnchor + showTextBubbleAtInsertion）。 */
 export function placeAnchor(top: number, left: number, source: string): void {
   if (!noteActive()) { return; }
   const anchor = inserter.setNextInsertionAnchor(top, left, source);
@@ -1623,22 +1559,16 @@ export function placeAnchor(top: number, left: number, source: string): void {
   if (TEXT_AVAILABLE) { notipalText.showBubbleAt(anchor.left, anchor.top); }
 }
 
-/**
- * AI 选区让笔圈页面时胶囊让开（aside 为真时藏起），圈完放回（笔记里在收文字时才放回）。旧 BackgroundService 的
- * FloatingBubbleBridge.hide() 与 restoreBubbleAfterLasso 里的 show。
- */
 export function setBubbleAside(aside: boolean): void {
   if (!TEXT_AVAILABLE) { return; }
   if (aside) { notipalText.hideBubble(); return; }
   if (noteActive()) { notipalText.showBubble(); }
 }
 
-/** 当前状态（Task 20、25 判断用）。 */
 export function textState(): TextState {
   return machine.state;
 }
 
-/** index.js 启动时调一次：登记工具栏动作，读上次的方式，接宿主界面变化；新的 JS 实例从“关闭”开始。 */
 export function register(): void {
   registerAction(TOOL.INSERT_TEXT, onToolAction);
   onHostChange(onHostChanged);

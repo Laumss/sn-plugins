@@ -1,0 +1,1916 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light">
+<title>Notipal AI</title>
+<style>
+* { box-sizing: border-box; }
+html, body {
+  margin: 0; height: 100%; background: #fff; color: #000;
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+  -webkit-text-size-adjust: 100%;
+}
+body { overflow: hidden; }
+button {
+  font: inherit; background: #fff; color: #000; border: 1px solid #000; border-radius: 2px;
+  min-height: 44px; min-width: 44px; padding: 0 12px; cursor: pointer; white-space: nowrap;
+}
+button:disabled { border-style: dashed; cursor: default; }
+button.primary { background: #000; color: #fff; }
+button.primary:disabled { background: #fff; color: #000; }
+button.small { min-height: 36px; min-width: 36px; padding: 0 10px; font-size: 14px; }
+input, textarea, select {
+  font: inherit; border: 1px solid #000; border-radius: 2px; background: #fff; color: #000;
+  padding: 8px; min-height: 44px; width: 100%;
+}
+textarea { resize: vertical; }
+textarea.log { width: 100%; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; line-height: 1.4; white-space: pre; overflow: auto; }
+select { appearance: auto; }
+a { color: #000; }
+hr { border: 0; border-top: 1px solid #000; margin: 12px 0; }
+[hidden] { display: none !important; }
+
+#app { display: flex; flex-direction: column; height: 100%; }
+#topbar {
+  display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-bottom: 1px solid #000; flex: none;
+}
+#conn { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; white-space: nowrap; }
+.dot { display: inline-block; width: 12px; height: 12px; border: 1px solid #000; background: #fff; }
+.dot.on { background: #000; }
+#title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+#banner {
+  display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-bottom: 1px solid #000; font-size: 14px; flex: none;
+}
+#banner span { flex: 1; }
+
+#main { flex: 1; display: flex; min-height: 0; position: relative; }
+#sidebar { width: 300px; flex: none; border-right: 1px solid #000; overflow: auto; background: #fff; }
+#scrim { display: none; }
+.conv {
+  display: block; width: 100%; text-align: left; border: 0; border-bottom: 1px solid #000; border-radius: 0;
+  padding: 10px 12px; min-height: 56px; white-space: normal;
+}
+.conv.current { background: #000; color: #fff; }
+.conv .conv-title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conv .conv-meta { display: block; font-size: 12px; opacity: 1; }
+.conv.current .conv-meta { color: #fff; }
+
+#chat { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+#messages { flex: 1; overflow: auto; padding: 12px; overscroll-behavior: contain; }
+#empty { padding: 24px 12px; text-align: center; }
+.msg { margin: 0 0 18px; max-width: 900px; }
+.msg.user { border-left: 3px solid #000; padding-left: 12px; }
+.msg .role { font-size: 12px; letter-spacing: .06em; text-transform: uppercase; margin-bottom: 2px; }
+.msg .body > :first-child { margin-top: 0; }
+.msg .body > :last-child { margin-bottom: 0; }
+.msg img.part { display: block; max-width: 100%; max-height: 60vh; border: 1px solid #000; margin: 6px 0; }
+.msg .part-doc { display: inline-block; border: 1px solid #000; padding: 4px 10px; margin: 6px 0; }
+.msg .gen { display: inline-block; width: 10px; height: 18px; background: #000; vertical-align: text-bottom; margin-left: 2px; }
+.body p { margin: 8px 0; white-space: pre-wrap; word-break: break-word; }
+.body h1, .body h2, .body h3, .body h4 { margin: 12px 0 6px; line-height: 1.3; }
+.body h1 { font-size: 1.4em; } .body h2 { font-size: 1.25em; } .body h3 { font-size: 1.1em; } .body h4 { font-size: 1em; }
+.body pre { border: 1px solid #000; padding: 8px; overflow: auto; margin: 8px 0; white-space: pre; }
+.body code { font-family: ui-monospace, Menlo, Consolas, "Courier New", monospace; font-size: .95em; }
+.body :not(pre) > code { border: 1px solid #000; padding: 0 3px; }
+.body blockquote { border-left: 2px solid #000; margin: 8px 0; padding: 0 0 0 12px; }
+.body ul, .body ol { margin: 8px 0; padding-left: 24px; }
+.body li { margin: 2px 0; white-space: pre-wrap; }
+.body hr { margin: 10px 0; }
+.body table { border-collapse: collapse; }
+.body td, .body th { border: 1px solid #000; padding: 2px 6px; }
+
+#composer { border-top: 1px solid #000; padding: 8px; flex: none; }
+#attachments { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
+#attachments img { height: 56px; border: 1px solid #000; }
+#attachments .att { position: relative; display: inline-block; }
+#attachments .att button { position: absolute; top: 0; right: 0; min-height: 24px; min-width: 24px; padding: 0; font-size: 12px; line-height: 1; }
+#composer-row { display: flex; gap: 8px; align-items: flex-end; }
+#input { flex: 1; min-height: 44px; max-height: 40vh; }
+#composer-buttons { display: flex; gap: 6px; }
+
+#settings { flex: 1; overflow: auto; padding: 12px; }
+#settings .inner { max-width: 820px; }
+.card { border: 1px solid #000; padding: 12px; margin: 0 0 12px; }
+.card h3 { margin: 0 0 8px; font-size: 1.05em; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+.row label { flex: none; min-width: 110px; font-size: 14px; }
+.row input, .row select, .row textarea { flex: 1; min-width: 160px; width: auto; }
+.row.stack { display: block; }
+.row.stack label { display: block; margin-bottom: 4px; }
+.hint { font-size: 13px; margin: 4px 0 8px; }
+.notice { border: 1px solid #000; padding: 8px 12px; margin-bottom: 12px; }
+.hint.bad, .check.bad { font-weight: 600; }
+.check { font-size: 13px; flex: 1; min-width: 0; }
+.card.provider { margin-bottom: 8px; }
+details.more > summary { cursor: pointer; min-height: 36px; line-height: 36px; font-size: 14px; }
+.model-row select { flex: 0 1 180px; min-width: 120px; }
+#setup-note { display: flex; align-items: center; gap: 8px; margin: 0 8px 8px; flex: none; }
+#setup-note span { flex: 1; }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; font-size: 14px; }
+.sr { position: absolute; left: -9999px; }
+
+#menu { position: absolute; top: 0; right: 8px; background: #fff; border: 1px solid #000; z-index: 20; }
+#menu button { display: block; width: 100%; border: 0; border-bottom: 1px solid #000; border-radius: 0; text-align: left; }
+#menu button:last-child { border-bottom: 0; }
+#toast {
+  position: absolute; left: 50%; bottom: 90px; transform: translateX(-50%); background: #000; color: #fff;
+  padding: 8px 14px; max-width: 90%; font-size: 14px; z-index: 30;
+}
+
+@media (max-width: 900px) {
+  #sidebar { position: absolute; left: 0; top: 0; bottom: 0; width: min(85vw, 320px); z-index: 11; display: none; }
+  #sidebar.open { display: block; }
+  #scrim.open { display: block; position: absolute; inset: 0; background: rgba(0,0,0,.25); z-index: 10; }
+  .row label { min-width: 90px; }
+}
+@media (min-width: 901px) {
+  #btn-list { display: none; }
+}
+</style>
+</head>
+<body>
+<div id="app">
+  <header id="topbar">
+    <button id="btn-list" class="small" aria-label="list">&#9776;</button>
+    <span id="conn"><span id="conn-dot" class="dot"></span><span id="conn-text"></span></span>
+    <span id="title"></span>
+    <button id="btn-menu" class="small" aria-label="menu">&#8943;</button>
+    <button id="btn-new" class="small"></button>
+    <button id="btn-settings" class="small"></button>
+  </header>
+  <div id="banner"><span id="banner-text"></span><button id="banner-close" class="small" aria-label="close">&#215;</button></div>
+  <div id="main">
+    <aside id="sidebar"><div id="conv-list"></div></aside>
+    <div id="scrim"></div>
+    <section id="chat">
+      <div id="messages"><div id="empty"></div></div>
+      <div id="setup-note" class="notice" hidden><span id="setup-text"></span><button id="setup-go" class="small"></button></div>
+      <div id="composer">
+        <div id="attachments"></div>
+        <div id="composer-row">
+          <textarea id="input" rows="2"></textarea>
+          <div id="composer-buttons">
+            <button id="btn-attach"></button>
+            <button id="btn-stop" hidden></button>
+            <button id="btn-send" class="primary"></button>
+          </div>
+        </div>
+        <input type="file" id="file-input" accept="image/*" multiple class="sr">
+      </div>
+    </section>
+    <section id="settings" hidden><div class="inner" id="settings-inner"></div></section>
+    <div id="menu" hidden>
+      <button id="menu-rename"></button>
+      <button id="menu-delete"></button>
+    </div>
+    <div id="toast" hidden></div>
+  </div>
+</div>
+<script>
+'use strict';
+
+const STRINGS = {
+  zh: {
+    connected: '已连接', reconnecting: '重连中', noToken: '没有访问码', authBad: 'Supernote 拒绝了这个访问码（不对或已更换）。请用 Notipal 设置里的二维码重新打开本页。',
+    banner: '请保持本页打开。建议用电脑浏览器；手机锁屏会中断生成；这个模式的稳定性不如 RikkaHub。',
+    newChat: '新对话', settings: '设置', back: '返回', send: '发送', stop: '停止', attach: '图片',
+    rename: '重命名', delete: '删除', deleteConfirm: '删除这个对话？', renamePrompt: '新标题',
+    noConversation: '还没有对话。发一条消息开始，或在 Supernote 上套索提问。', generating: '生成中',
+    you: '你', assistant: 'AI', noChatOpen: '新对话',
+    tokenTitle: 'Supernote 访问码', tokenHint: '这是 Notipal 网页模式链接里 t= 后面的那串字符，用来连 Supernote，不是模型的 API Key。用 Notipal 设置里的二维码打开本页会自动填上，也可以把整个链接粘到这里。',
+    providers: '模型服务', addProvider: '添加服务', type: '类型', name: '名称', baseUrl: '接口地址', apiKey: 'API Key',
+    show: '显示', hide: '隐藏', models: '模型列表',
+    modelsHint: '填好 API Key 后会自动获取。获取不到时可以在这里手动填，每行一个。',
+    pickProvider: '选择服务商…', customProvider: '其他（OpenAI 兼容）',
+    providersEmpty: '还没有模型服务。在下面选一个服务商，再填上它的 API Key。',
+    providersHint: '列表里是允许浏览器直接调用的服务。智谱不允许，用不了。',
+    keyPlaceholder: '粘贴 API Key', needKey: '还没填 API Key', checking: '正在检测…',
+    checkOk: 'API Key 可用，%d 个对话模型', checkBadKey: 'API Key 不对，或这个 Key 没有权限',
+    checkNoList: '这个服务不提供模型列表，请在「更多」里手动填模型',
+    recheck: '重新检测', providerMore: '更多', advanced: '高级',
+    type_openai: 'OpenAI 兼容', type_anthropic: 'Anthropic', type_gemini: 'Gemini',
+    typeToSearch: '输入可搜索', sameAsChat: '跟对话模型相同',
+    translateHint: '留空就用对话模型。',
+    autoPicked: '已自动选择，可以改成别的。', providerDefault: '服务默认',
+    setup_noProvider: '还没有添加模型服务，网页还不能回答。', setup_noKey: '还没有填 API Key，网页还不能回答。',
+    setup_noChatModel: '还没有选对话模型，网页还不能回答。', setupGo: '去设置',
+    removeProvider: '删除服务', removeProviderConfirm: '删除这个服务？',
+    modelsTitle: '使用的模型', chatModel: '对话模型', translateModel: '翻译模型', none: '未选择',
+    temperature: '温度', maxTokens: '最大输出 token', language: '语言', auto: '跟随浏览器',
+    promptTitle: '系统提示词', promptHint: 'Supernote 上 AIRelay 的提问和这个页面里的对话都会带上它，留空就不带。公式识别用它自己的指令，翻译用翻译的提示词。',
+    status: '状态', statusWorkers: '已连接的页面', statusPending: '等待中的请求', statusTranslate: '翻译可用',
+    yes: '是', no: '否', thisPage: '本页', runningJobs: '进行中的任务', address: '地址', refresh: '刷新', saved: '已保存',
+    noChatModel: '没有选对话模型', providerMissing: '模型服务不存在',
+    noApiKey: '没有填 API Key', sendFailed: '发送失败：', uploadFailed: '上传失败：', loadFailed: '读取失败：',
+    cancelled: '已取消', imageLoadFailed: '图片读取失败', emptyReply: '模型没有返回内容', errorLabel: '错误',
+    defaultTitle: '新对话', workerOn: '已连接，接收任务', workerOff: '未连接',
+    chatHint: 'Enter 发送，Shift+Enter 换行',
+    logTitle: '日志', logCopy: '复制日志', logCopied: '已复制', logCopyFailed: '没能复制，请长按文本框手动全选复制',
+    logHint: '出问题时把这里的内容复制出来。同样的内容也会写进 Supernote 的日志（tag WebPage）。',
+    netSupernote: '连不上 Supernote', netProvider: '连不上模型服务',
+    netHint: '（网络不通、接口地址写错，或这个服务不允许浏览器直接调用）',
+    listLabel: '对话列表', menuLabel: '更多操作', closeLabel: '关闭',
+  },
+  en: {
+    connected: 'Connected', reconnecting: 'Reconnecting', noToken: 'No access code', authBad: 'The Supernote refused this access code (wrong or replaced). Open this page again from the QR code in Notipal’s settings.',
+    banner: 'Keep this page open. A computer browser is recommended; a locked phone interrupts generation; this mode is less reliable than RikkaHub.',
+    newChat: 'New chat', settings: 'Settings', back: 'Back', send: 'Send', stop: 'Stop', attach: 'Image',
+    rename: 'Rename', delete: 'Delete', deleteConfirm: 'Delete this conversation?', renamePrompt: 'New title',
+    noConversation: 'No conversation yet. Send a message to start, or lasso a question on the Supernote.', generating: 'Generating',
+    you: 'You', assistant: 'AI', noChatOpen: 'New chat',
+    tokenTitle: 'Supernote access code', tokenHint: 'The characters after t= in Notipal’s web-mode link. It connects to the Supernote; it is not the model’s API key. Opening this page from the QR code in Notipal’s settings fills it in; you can also paste the whole link here.',
+    providers: 'Providers', addProvider: 'Add provider', type: 'Type', name: 'Name', baseUrl: 'Base URL', apiKey: 'API key',
+    show: 'Show', hide: 'Hide', models: 'Models',
+    modelsHint: 'Fetched once the API key is in. When they cannot be, type them here, one per line.',
+    pickProvider: 'Choose a provider…', customProvider: 'Other (OpenAI compatible)',
+    providersEmpty: 'No provider yet. Choose one below, then fill in its API key.',
+    providersHint: 'The list holds providers that let a browser call them directly. Zhipu does not, so it cannot be used.',
+    keyPlaceholder: 'Paste the API key', needKey: 'No API key yet', checking: 'Checking…',
+    checkOk: 'API key works, %d chat models', checkBadKey: 'Wrong API key, or the key lacks access',
+    checkNoList: 'This provider gives no model list; type the models under More',
+    recheck: 'Check again', providerMore: 'More', advanced: 'Advanced',
+    type_openai: 'OpenAI compatible', type_anthropic: 'Anthropic', type_gemini: 'Gemini',
+    typeToSearch: 'Type to search', sameAsChat: 'Same as the chat model',
+    translateHint: 'Empty: the chat model is used.',
+    autoPicked: 'Picked for you; you can change it.', providerDefault: 'Provider default',
+    setup_noProvider: 'No model provider yet, so the page cannot answer.', setup_noKey: 'No API key yet, so the page cannot answer.',
+    setup_noChatModel: 'No chat model chosen, so the page cannot answer.', setupGo: 'Settings',
+    removeProvider: 'Remove provider', removeProviderConfirm: 'Remove this provider?',
+    modelsTitle: 'Models in use', chatModel: 'Chat model', translateModel: 'Translation model', none: 'None',
+    temperature: 'Temperature', maxTokens: 'Max output tokens', language: 'Language', auto: 'Follow browser',
+    promptTitle: 'System prompt', promptHint: 'Sent with AIRelay questions from the Supernote and with chats on this page; leave it empty for none. Formula recognition keeps its own instruction, translation its own prompt.',
+    status: 'Status', statusWorkers: 'Connected pages', statusPending: 'Waiting requests', statusTranslate: 'Translation ready',
+    yes: 'Yes', no: 'No', thisPage: 'This page', runningJobs: 'Running jobs', address: 'Address', refresh: 'Refresh', saved: 'Saved',
+    noChatModel: 'No chat model chosen', providerMissing: 'Provider missing',
+    noApiKey: 'No API key', sendFailed: 'Send failed: ', uploadFailed: 'Upload failed: ', loadFailed: 'Load failed: ',
+    cancelled: 'Cancelled', imageLoadFailed: 'Image could not be loaded', emptyReply: 'The model returned nothing', errorLabel: 'Error',
+    defaultTitle: 'New chat', workerOn: 'Connected, taking jobs', workerOff: 'Not connected',
+    chatHint: 'Enter sends, Shift+Enter breaks the line',
+    logTitle: 'Log', logCopy: 'Copy log', logCopied: 'Copied', logCopyFailed: 'Could not copy; long-press the box and select all to copy',
+    logHint: 'When something goes wrong, copy this out. The same lines go to the Supernote log (tag WebPage).',
+    netSupernote: 'Cannot reach the Supernote', netProvider: 'Cannot reach the model provider',
+    netHint: '(no network, a wrong base URL, or the provider does not allow calls from a browser)',
+    listLabel: 'Conversations', menuLabel: 'More actions', closeLabel: 'Close',
+  },
+  ja: {
+    connected: '接続済み', reconnecting: '再接続中', noToken: 'アクセスコードがありません', authBad: 'Supernote がこのアクセスコードを拒否しました（間違っているか、変更されています）。Notipal の設定にある QR コードからこのページを開き直してください。',
+    banner: 'このページは開いたままにしてください。パソコンのブラウザがおすすめです。スマートフォンをロックすると生成が中断されます。このモードは RikkaHub ほど安定していません。',
+    newChat: '新しいチャット', settings: '設定', back: '戻る', send: '送信', stop: '停止', attach: '画像',
+    rename: '名前を変更', delete: '削除', deleteConfirm: 'このチャットを削除しますか？', renamePrompt: '新しいタイトル',
+    noConversation: 'まだチャットがありません。メッセージを送るか、Supernote で投げ縄選択して質問すると始まります。', generating: '生成中',
+    you: 'あなた', assistant: 'AI', noChatOpen: '新しいチャット',
+    tokenTitle: 'Supernote アクセスコード', tokenHint: 'Notipal のウェブモードのリンクで t= の後ろにある文字列です。Supernote への接続に使うもので、モデルの API キーではありません。Notipal の設定にある QR コードからこのページを開くと自動で入力されます。リンク全体をここに貼り付けてもかまいません。',
+    providers: 'モデルサービス', addProvider: 'サービスを追加', type: '種類', name: '名前', baseUrl: 'ベース URL', apiKey: 'API キー',
+    show: '表示', hide: '隠す', models: 'モデル一覧',
+    modelsHint: 'API キーを入力すると自動で取得します。取得できないときは、ここに 1 行に 1 つずつ入力してください。',
+    pickProvider: 'サービスを選択…', customProvider: 'その他（OpenAI 互換）',
+    providersEmpty: 'モデルサービスがまだありません。下でサービスを選び、その API キーを入力してください。',
+    providersHint: '一覧にあるのは、ブラウザから直接呼び出せるサービスです。Zhipu（智谱）は対応していないため使えません。',
+    keyPlaceholder: 'API キーを貼り付け', needKey: 'API キーが未入力です', checking: '確認中…',
+    checkOk: 'API キーは有効です（チャットモデル %d 個）', checkBadKey: 'API キーが間違っているか、このキーに権限がありません',
+    checkNoList: 'このサービスはモデル一覧を提供していません。「その他」でモデルを手動入力してください',
+    recheck: '再確認', providerMore: 'その他', advanced: '詳細設定',
+    type_openai: 'OpenAI 互換', type_anthropic: 'Anthropic', type_gemini: 'Gemini',
+    typeToSearch: '入力して検索', sameAsChat: 'チャットモデルと同じ',
+    translateHint: '空欄ならチャットモデルを使います。',
+    autoPicked: '自動で選びました。変更できます。', providerDefault: 'サービスの既定値',
+    setup_noProvider: 'モデルサービスが追加されていないため、このページはまだ回答できません。', setup_noKey: 'API キーが入力されていないため、このページはまだ回答できません。',
+    setup_noChatModel: 'チャットモデルが選ばれていないため、このページはまだ回答できません。', setupGo: '設定へ',
+    removeProvider: 'サービスを削除', removeProviderConfirm: 'このサービスを削除しますか？',
+    modelsTitle: '使用するモデル', chatModel: 'チャットモデル', translateModel: '翻訳モデル', none: '未選択',
+    temperature: '温度', maxTokens: '最大出力トークン数', language: '言語', auto: 'ブラウザに合わせる',
+    promptTitle: 'システムプロンプト', promptHint: 'Supernote の AIRelay からの質問にも、このページのチャットにも付けて送ります。空欄なら付けません。数式認識は専用の指示を、翻訳は翻訳用のプロンプトを使います。',
+    status: '状態', statusWorkers: '接続中のページ', statusPending: '待機中のリクエスト', statusTranslate: '翻訳を利用可能',
+    yes: 'はい', no: 'いいえ', thisPage: 'このページ', runningJobs: '実行中のタスク', address: 'アドレス', refresh: '更新', saved: '保存しました',
+    noChatModel: 'チャットモデルが選ばれていません', providerMissing: 'モデルサービスが見つかりません',
+    noApiKey: 'API キーが入力されていません', sendFailed: '送信に失敗しました：', uploadFailed: 'アップロードに失敗しました：', loadFailed: '読み込みに失敗しました：',
+    cancelled: 'キャンセルしました', imageLoadFailed: '画像を読み込めませんでした', emptyReply: 'モデルから内容が返ってきませんでした', errorLabel: 'エラー',
+    defaultTitle: '新しいチャット', workerOn: '接続済み、タスクを受付中', workerOff: '未接続',
+    chatHint: 'Enter で送信、Shift+Enter で改行',
+    logTitle: 'ログ', logCopy: 'ログをコピー', logCopied: 'コピーしました', logCopyFailed: 'コピーできませんでした。テキスト欄を長押しして全選択し、手動でコピーしてください',
+    logHint: '問題が起きたら、ここの内容をコピーしてください。同じ内容は Supernote のログ（tag WebPage）にも書き込まれます。',
+    netSupernote: 'Supernote に接続できません', netProvider: 'モデルサービスに接続できません',
+    netHint: '（ネットワークにつながっていない、ベース URL が間違っている、またはこのサービスがブラウザからの直接呼び出しを許可していない）',
+    listLabel: 'チャット一覧', menuLabel: 'その他の操作', closeLabel: '閉じる',
+  },
+  'zh-TW': {
+    connected: '已連線', reconnecting: '重新連線中', noToken: '沒有存取碼', authBad: 'Supernote 拒絕了這個存取碼（不正確或已更換）。請用 Notipal 設定裡的 QR 碼重新開啟本頁。',
+    banner: '請保持本頁開啟。建議用電腦瀏覽器；手機鎖定螢幕會中斷生成；這個模式的穩定性不如 RikkaHub。',
+    newChat: '新對話', settings: '設定', back: '返回', send: '傳送', stop: '停止', attach: '圖片',
+    rename: '重新命名', delete: '刪除', deleteConfirm: '刪除這個對話？', renamePrompt: '新標題',
+    noConversation: '還沒有對話。傳一則訊息開始，或在 Supernote 上用套索提問。', generating: '生成中',
+    you: '你', assistant: 'AI', noChatOpen: '新對話',
+    tokenTitle: 'Supernote 存取碼', tokenHint: '這是 Notipal 網頁模式連結裡 t= 後面的那串字元，用來連線 Supernote，不是模型的 API Key。用 Notipal 設定裡的 QR 碼開啟本頁會自動填入，也可以把整個連結貼到這裡。',
+    providers: '模型服務', addProvider: '新增服務', type: '類型', name: '名稱', baseUrl: 'API 位址', apiKey: 'API Key',
+    show: '顯示', hide: '隱藏', models: '模型清單',
+    modelsHint: '填好 API Key 後會自動取得。取得不到時可以在這裡手動填寫，每行一個。',
+    pickProvider: '選擇服務商…', customProvider: '其他（OpenAI 相容）',
+    providersEmpty: '還沒有模型服務。在下面選一個服務商，再填上它的 API Key。',
+    providersHint: '清單裡是允許瀏覽器直接呼叫的服務。智譜不允許，無法使用。',
+    keyPlaceholder: '貼上 API Key', needKey: '還沒填 API Key', checking: '正在檢測…',
+    checkOk: 'API Key 可用，%d 個對話模型', checkBadKey: 'API Key 不正確，或這個 Key 沒有權限',
+    checkNoList: '這個服務不提供模型清單，請在「更多」裡手動填寫模型',
+    recheck: '重新檢測', providerMore: '更多', advanced: '進階',
+    type_openai: 'OpenAI 相容', type_anthropic: 'Anthropic', type_gemini: 'Gemini',
+    typeToSearch: '輸入可搜尋', sameAsChat: '與對話模型相同',
+    translateHint: '留空就用對話模型。',
+    autoPicked: '已自動選擇，可以改成別的。', providerDefault: '服務預設',
+    setup_noProvider: '還沒有新增模型服務，網頁還不能回答。', setup_noKey: '還沒有填 API Key，網頁還不能回答。',
+    setup_noChatModel: '還沒有選對話模型，網頁還不能回答。', setupGo: '去設定',
+    removeProvider: '刪除服務', removeProviderConfirm: '刪除這個服務？',
+    modelsTitle: '使用的模型', chatModel: '對話模型', translateModel: '翻譯模型', none: '未選擇',
+    temperature: '溫度', maxTokens: '最大輸出 token', language: '語言', auto: '跟隨瀏覽器',
+    promptTitle: '系統提示詞', promptHint: 'Supernote 上 AIRelay 的提問和這個頁面裡的對話都會帶上它，留空就不帶。公式辨識用它自己的指令，翻譯用翻譯的提示詞。',
+    status: '狀態', statusWorkers: '已連線的頁面', statusPending: '等待中的請求', statusTranslate: '翻譯可用',
+    yes: '是', no: '否', thisPage: '本頁', runningJobs: '進行中的任務', address: '位址', refresh: '重新整理', saved: '已儲存',
+    noChatModel: '沒有選對話模型', providerMissing: '模型服務不存在',
+    noApiKey: '沒有填 API Key', sendFailed: '傳送失敗：', uploadFailed: '上傳失敗：', loadFailed: '讀取失敗：',
+    cancelled: '已取消', imageLoadFailed: '圖片讀取失敗', emptyReply: '模型沒有傳回內容', errorLabel: '錯誤',
+    defaultTitle: '新對話', workerOn: '已連線，接收任務', workerOff: '未連線',
+    chatHint: 'Enter 傳送，Shift+Enter 換行',
+    logTitle: '日誌', logCopy: '複製日誌', logCopied: '已複製', logCopyFailed: '沒能複製，請長按文字框手動全選複製',
+    logHint: '出問題時把這裡的內容複製出來。同樣的內容也會寫進 Supernote 的日誌（tag WebPage）。',
+    netSupernote: '連不上 Supernote', netProvider: '連不上模型服務',
+    netHint: '（網路不通、API 位址寫錯，或這個服務不允許瀏覽器直接呼叫）',
+    listLabel: '對話清單', menuLabel: '更多操作', closeLabel: '關閉',
+  },
+};
+
+const LANGUAGES = [['zh', '简体中文'], ['zh-TW', '繁體中文'], ['ja', '日本語'], ['en', 'English']];
+let lang = 'zh';
+function t(key) { return (STRINGS[lang] && STRINGS[lang][key]) || STRINGS.en[key] || key; }
+function pickLanguage() {
+  const pref = settings.language || 'auto';
+  if (LANGUAGES.some(([code]) => code === pref)) return pref;
+  const nav = String(navigator.language || (navigator.languages && navigator.languages[0]) || '');
+  if (/^ja/i.test(nav)) return 'ja';
+  if (/^zh/i.test(nav)) return /tw|hk|mo|hant/i.test(nav) ? 'zh-TW' : 'zh';
+  return 'en';
+}
+
+function convTitle(c) { return (c && c.title) || t('defaultTitle'); }
+
+const TOKEN_KEY = 'relayToken';
+const DEFAULT_BASE = { openai: 'https://api.openai.com/v1', anthropic: 'https://api.anthropic.com', gemini: 'https://generativelanguage.googleapis.com' };
+let token = localStorage.getItem(TOKEN_KEY) || '';
+let authOk = true;
+let settings = { providers: [], chatModel: null, translateModel: null, temperature: null, maxTokens: null, language: 'auto', systemPrompt: '' };
+let serverState = null;
+let conversations = [];
+const cur = { id: null, data: null, es: null };
+let attachments = [];
+const jobs = new Map();
+let workerES = null;
+let workerId = null;
+let workerTimer = null;
+let workerConnected = false;
+let listTimer = null;
+let saveTimer = null;
+let statusTimer = null;
+let view = 'chat';
+const imageCache = new Map();
+
+const $ = (id) => document.getElementById(id);
+
+const logLines = [];
+let logOutbox = [];
+let logTimer = null;
+
+function safeUrl(url) {
+  return String(url).replace(/([?&]key=)[^&]*/i, '$1…');
+}
+
+function hostOf(url) {
+  try { return new URL(url, location.href).host; } catch (e) { return String(url); }
+}
+
+function log(...parts) {
+  const text = parts.map((p) => (typeof p === 'string' ? p : (p instanceof Error ? p.message : JSON.stringify(p)))).join(' ');
+  const line = new Date().toISOString().slice(11, 23) + ' ' + text;
+  logLines.push(line);
+  if (logLines.length > 300) logLines.shift();
+  console.log('[relay]', line);
+  logOutbox.push(line);
+  if (logOutbox.length > 100) logOutbox.shift();
+  if (!logTimer) logTimer = setTimeout(flushLog, 1000);
+  const box = $('log-box');
+  if (box) { box.value = logLines.join('\n'); box.scrollTop = box.scrollHeight; }
+}
+
+function flushLog() {
+  logTimer = null;
+  if (!token || !authOk || !logOutbox.length) return;
+  const lines = logOutbox;
+  logOutbox = [];
+
+  fetch('/web/log', {
+    method: 'POST',
+    headers: { 'X-Relay-Token': token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ lines }),
+  }).catch(() => {});
+}
+
+async function netFetch(url, init, target) {
+  try {
+    return await fetch(url, init);
+  } catch (e) {
+    if (e && e.name === 'AbortError') throw e;
+    log('net', target, (init && init.method) || 'GET', safeUrl(url), errorText(e));
+    const where = target === 'supernote' ? t('netSupernote') : t('netProvider') + ' ' + hostOf(url);
+    throw new Error(where + ': ' + errorText(e) + (target === 'provider' ? ' ' + t('netHint') : ''));
+  }
+}
+
+function copyLog() {
+  const box = $('log-box');
+  if (!box) return;
+  box.focus();
+  box.select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+  toast(ok ? t('logCopied') : t('logCopyFailed'));
+}
+
+window.addEventListener('error', (e) => log('error', e.message || '', (e.filename || '') + ':' + (e.lineno || '')));
+window.addEventListener('unhandledrejection', (e) => log('unhandled', errorText(e.reason)));
+
+(function readTokenFromUrl() {
+  const params = new URLSearchParams(location.search);
+  const given = params.get('t');
+  if (given) {
+    token = given.trim();
+    localStorage.setItem(TOKEN_KEY, token);
+    params.delete('t');
+    const rest = params.toString();
+    history.replaceState(null, '', location.pathname + (rest ? '?' + rest : ''));
+  }
+})();
+
+class ApiError extends Error {
+  constructor(status, message) { super(message); this.status = status; }
+}
+
+async function api(method, path, body) {
+  const headers = { 'X-Relay-Token': token };
+  let payload;
+  if (body instanceof FormData) payload = body;
+  else if (body !== undefined) { headers['Content-Type'] = 'application/json'; payload = JSON.stringify(body); }
+  const res = await netFetch(path, { method, headers, body: payload }, 'supernote');
+  if (res.status === 401) { log('api', method, path, '401'); setAuth(false); throw new ApiError(401, t('authBad')); }
+  setAuth(true);
+  if (res.status === 204) return null;
+  const text = await res.text();
+  let json = null;
+  try { json = text ? JSON.parse(text) : null; } catch (e) { json = null; }
+  if (!res.ok) {
+    const message = (json && json.error) || text || ('HTTP ' + res.status);
+    log('api', method, path, String(res.status), String(message).slice(0, 200));
+    throw new ApiError(res.status, message);
+  }
+  return json;
+}
+
+function withToken(path) {
+  return path + (path.includes('?') ? '&' : '?') + 't=' + encodeURIComponent(token);
+}
+
+function fileUrl(url) {
+  if (!url) return '';
+  if (/^https?:|^data:|^blob:/i.test(url)) return url;
+  return withToken(location.origin + url);
+}
+
+function setAuth(ok) {
+  if (authOk === ok) return;
+  authOk = ok;
+  if (!ok) {
+
+    log('access code refused by the Supernote; waiting for a new one');
+    clearTimeout(workerTimer);
+    if (workerES) { workerES.close(); workerES = null; }
+    workerConnected = false;
+    closeStream();
+    stopStatusPolling();
+    renderConn();
+    showView('settings');
+    return;
+  }
+  renderConn();
+  if (view === 'settings') renderSettings();
+}
+
+function toast(message, ms) {
+  log('toast', message);
+  const el = $('toast');
+  el.textContent = message;
+  el.hidden = false;
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => { el.hidden = true; }, ms || 3000);
+}
+
+function errorText(e) { return (e && e.message) ? e.message : String(e); }
+
+function escapeHtml(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function inline(text) {
+
+  const codes = [];
+  let s = escapeHtml(text).replace(/`([^`\n]+)`/g, (m, c) => { codes.push(c); return '\u0000' + (codes.length - 1) + '\u0000'; });
+  s = s.replace(/\*\*([^*\n]+?)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/__([^_\n]+?)__/g, '<strong>$1</strong>');
+  s = s.replace(/(^|[^*\w])\*([^*\n]+?)\*(?!\w)/g, '$1<em>$2</em>');
+  s = s.replace(/(^|[^_\w])_([^_\n]+?)_(?!\w)/g, '$1<em>$2</em>');
+  s = s.replace(/~~([^~\n]+?)~~/g, '<del>$1</del>');
+  s = s.replace(/\[([^\]\n]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  s = s.replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
+  s = s.replace(/\u0000(\d+)\u0000/g, (m, i) => '<code>' + codes[Number(i)] + '</code>');
+  return s;
+}
+
+function renderMarkdown(text) {
+  const lines = String(text || '').replace(/\r\n?/g, '\n').split('\n');
+  const out = [];
+  let i = 0;
+  const para = [];
+  function flushPara() {
+    if (!para.length) return;
+    out.push('<p>' + inline(para.join('\n')) + '</p>');
+    para.length = 0;
+  }
+  while (i < lines.length) {
+    const line = lines[i];
+    let m;
+    if ((m = line.match(/^\s*(```|~~~)\s*([\w+-]*)\s*$/))) {
+      flushPara();
+      const fence = m[1];
+      const code = [];
+      i++;
+      while (i < lines.length && !lines[i].match(new RegExp('^\\s*' + fence + '\\s*$'))) { code.push(lines[i]); i++; }
+      i++;
+      out.push('<pre><code' + (m[2] ? ' class="lang-' + escapeHtml(m[2]) + '"' : '') + '>' + escapeHtml(code.join('\n')) + '</code></pre>');
+      continue;
+    }
+    if (line.match(/^\s*\$\$\s*$/)) {
+
+      flushPara();
+      const math = ['$$'];
+      i++;
+      while (i < lines.length && !lines[i].match(/^\s*\$\$\s*$/)) { math.push(lines[i]); i++; }
+      math.push('$$');
+      i++;
+      out.push('<p>' + escapeHtml(math.join('\n')) + '</p>');
+      continue;
+    }
+    if ((m = line.match(/^(#{1,6})\s+(.*?)\s*#*\s*$/))) {
+      flushPara();
+      const level = Math.min(m[1].length, 4);
+      out.push('<h' + level + '>' + inline(m[2]) + '</h' + level + '>');
+      i++;
+      continue;
+    }
+    if (line.match(/^\s*([-*_])(\s*\1){2,}\s*$/)) {
+      flushPara();
+      out.push('<hr>');
+      i++;
+      continue;
+    }
+    if (line.match(/^\s*>/)) {
+      flushPara();
+      const quote = [];
+      while (i < lines.length && lines[i].match(/^\s*>/)) { quote.push(lines[i].replace(/^\s*>\s?/, '')); i++; }
+      out.push('<blockquote>' + renderMarkdown(quote.join('\n')) + '</blockquote>');
+      continue;
+    }
+    if ((m = line.match(/^(\s*)([-*+]|\d+[.)])\s+/))) {
+      flushPara();
+      const ordered = /\d/.test(m[2]);
+      const items = [];
+      const baseIndent = m[1].length;
+      while (i < lines.length) {
+        const l = lines[i];
+        const im = l.match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
+        if (im && im[1].length <= baseIndent + 1) { items.push([im[3]]); i++; continue; }
+        if (items.length && l.trim() !== '' && (l.match(/^\s+/) || !l.match(/^(\s*)([-*+]|\d+[.)])\s+/))) {
+
+          if (l.match(/^\s*$/)) break;
+          if (!l.match(/^\s+/) ) break;
+          items[items.length - 1].push(l.trim());
+          i++;
+          continue;
+        }
+        break;
+      }
+      out.push('<' + (ordered ? 'ol' : 'ul') + '>' + items.map((it) => '<li>' + inline(it.join('\n')) + '</li>').join('') + '</' + (ordered ? 'ol' : 'ul') + '>');
+      continue;
+    }
+    if (line.match(/^\s*\|.*\|\s*$/) && i + 1 < lines.length && lines[i + 1].match(/^\s*\|?\s*:?-{2,}/)) {
+      flushPara();
+      const rows = [];
+      while (i < lines.length && lines[i].match(/^\s*\|.*\|\s*$/)) { rows.push(lines[i]); i++; }
+      const cells = (r) => r.trim().replace(/^\||\|$/g, '').split('|').map((c) => inline(c.trim()));
+      const head = cells(rows[0]);
+      const body = rows.slice(2).map(cells);
+      out.push('<table><thead><tr>' + head.map((c) => '<th>' + c + '</th>').join('') + '</tr></thead><tbody>' +
+        body.map((r) => '<tr>' + r.map((c) => '<td>' + c + '</td>').join('') + '</tr>').join('') + '</tbody></table>');
+      continue;
+    }
+    if (line.trim() === '') { flushPara(); i++; continue; }
+    para.push(line);
+    i++;
+  }
+  flushPara();
+  return out.join('');
+}
+
+function renderConn() {
+  const dot = $('conn-dot');
+  const text = $('conn-text');
+  if (!token) { dot.classList.remove('on'); text.textContent = t('noToken'); return; }
+  if (!authOk) { dot.classList.remove('on'); text.textContent = t('authBad'); return; }
+  dot.classList.toggle('on', workerConnected);
+  text.textContent = workerConnected ? t('connected') : t('reconnecting');
+}
+
+function applyStrings() {
+  lang = pickLanguage();
+  document.documentElement.lang = lang;
+  $('banner-text').textContent = t('banner');
+  $('btn-new').textContent = t('newChat');
+  $('btn-settings').textContent = view === 'settings' ? t('back') : t('settings');
+  $('btn-send').textContent = t('send');
+  $('btn-stop').textContent = t('stop');
+  $('btn-attach').textContent = t('attach');
+  $('menu-rename').textContent = t('rename');
+  $('menu-delete').textContent = t('delete');
+  $('input').placeholder = t('chatHint');
+  $('empty').textContent = t('noConversation');
+  $('setup-go').textContent = t('setupGo');
+  $('btn-list').setAttribute('aria-label', t('listLabel'));
+  $('btn-menu').setAttribute('aria-label', t('menuLabel'));
+  $('banner-close').setAttribute('aria-label', t('closeLabel'));
+  renderSetupNote();
+  renderConn();
+  renderTitle();
+  renderList();
+}
+
+function renderTitle() {
+  $('title').textContent = view === 'settings' ? t('settings') : (cur.data ? convTitle(cur.data) : t('noChatOpen'));
+}
+
+function scheduleListRefresh() {
+  clearTimeout(listTimer);
+  listTimer = setTimeout(loadConversations, 200);
+}
+
+async function loadConversations() {
+  try {
+
+    conversations = await api('GET', '/web/conversations') || [];
+  } catch (e) {
+    if (e.status !== 401) toast(t('loadFailed') + errorText(e));
+    return;
+  }
+  renderList();
+  if (cur.id && !conversations.some((c) => c.id === cur.id)) {
+
+    closeConversation();
+  }
+}
+
+function fmtTime(ms) {
+  const d = new Date(ms);
+  const now = new Date();
+  const sameDay = d.toDateString() === now.toDateString();
+  const opts = { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' };
+  if (!sameDay) { opts.month = 'numeric'; opts.day = 'numeric'; }
+  try { return d.toLocaleString(lang, opts); } catch (e) {   }
+  const hh = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+  if (sameDay) return hh;
+  return (d.getMonth() + 1) + '/' + d.getDate() + ' ' + hh;
+}
+
+function renderList() {
+  const list = $('conv-list');
+  list.textContent = '';
+  for (const c of conversations) {
+    const b = document.createElement('button');
+    b.className = 'conv' + (c.id === cur.id ? ' current' : '');
+    const title = document.createElement('span');
+    title.className = 'conv-title';
+    title.textContent = convTitle(c);
+    const meta = document.createElement('span');
+    meta.className = 'conv-meta';
+    meta.textContent = fmtTime(c.updateAt) + (c.isGenerating ? ' · ' + t('generating') : '');
+    b.appendChild(title);
+    b.appendChild(meta);
+    b.onclick = () => { openConversation(c.id); showView('chat'); closeDrawer(); };
+    list.appendChild(b);
+  }
+}
+
+function openDrawer() { $('sidebar').classList.add('open'); $('scrim').classList.add('open'); }
+function closeDrawer() { $('sidebar').classList.remove('open'); $('scrim').classList.remove('open'); }
+
+async function openConversation(id, announce = true) {
+  if (cur.id === id && cur.data) return;
+  closeStream();
+  cur.id = id;
+  cur.data = null;
+  renderMessages();
+  try {
+    cur.data = await api('GET', '/api/conversations/' + encodeURIComponent(id));
+  } catch (e) {
+    if (e.status !== 401) toast(t('loadFailed') + errorText(e));
+    cur.id = null;
+    renderMessages();
+    renderTitle();
+    return;
+  }
+  if (cur.id !== id) return;
+  renderMessages();
+  renderTitle();
+  renderList();
+  openStream(id);
+  if (announce) api('POST', '/web/active', { conversationId: id }).catch(() => {});
+}
+
+function closeConversation() {
+  closeStream();
+  cur.id = null;
+  cur.data = null;
+  renderMessages();
+  renderTitle();
+  renderList();
+}
+
+function followActive(data) {
+  scheduleListRefresh();
+  let id = null;
+  try { id = JSON.parse(data).conversationId; } catch (e) {   }
+  if (!id || id === cur.id) return;
+  log('following conversation', id);
+  openConversation(id, false);
+}
+
+function closeStream() {
+  if (cur.es) { cur.es.close(); cur.es = null; }
+}
+
+function openStream(id) {
+  const es = new EventSource(withToken('/api/conversations/' + encodeURIComponent(id) + '/stream'));
+  cur.es = es;
+  es.addEventListener('snapshot', (e) => {
+    if (cur.id !== id) return;
+    try {
+      const data = JSON.parse(e.data);
+      cur.data = data.conversation;
+      renderMessages();
+      renderTitle();
+    } catch (err) {   }
+  });
+  es.addEventListener('node_update', (e) => {
+    if (cur.id !== id || !cur.data) return;
+    try {
+      const data = JSON.parse(e.data);
+      const nodes = cur.data.messages || (cur.data.messages = []);
+      if (data.nodeIndex < nodes.length) nodes[data.nodeIndex] = data.node;
+      else if (data.nodeIndex === nodes.length) nodes.push(data.node);
+      else return;
+      cur.data.isGenerating = !!data.isGenerating;
+      cur.data.updateAt = data.updateAt;
+      updateNode(data.nodeIndex);
+      renderComposerState();
+    } catch (err) {   }
+  });
+  es.onerror = () => {   };
+}
+
+function selectedMessage(node) {
+  if (!node || !node.messages || !node.messages.length) return null;
+  const idx = Math.min(Math.max(node.selectIndex || 0, 0), node.messages.length - 1);
+  return node.messages[idx];
+}
+
+function messageText(message) {
+  return (message.parts || []).filter((p) => p.type === 'text').map((p) => p.text || '').join('');
+}
+
+function renderNodeEl(node, index) {
+  const message = selectedMessage(node);
+  const el = document.createElement('div');
+  el.dataset.index = index;
+  if (!message) { el.hidden = true; return el; }
+  const user = message.role === 'USER';
+  el.className = 'msg ' + (user ? 'user' : 'assistant');
+  const role = document.createElement('div');
+  role.className = 'role';
+  role.textContent = user ? t('you') : t('assistant');
+  el.appendChild(role);
+  const body = document.createElement('div');
+  body.className = 'body';
+  let html = '';
+  for (const part of message.parts || []) {
+    if (part.type === 'image' && part.url) html += '<img class="part" src="' + escapeHtml(fileUrl(part.url)) + '" alt="">';
+
+    else if (part.type === 'document') html += '<div class="part-doc">' + escapeHtml(part.fileName || 'PDF') + '</div>';
+  }
+  const text = messageText(message);
+  const open = !user && !message.finishedAt && cur.data && cur.data.isGenerating;
+
+  const error = (message.parts || []).filter((p) => p.type === 'error').map((p) => p.text || '').join('\n');
+  if (text) html += renderMarkdown(text);
+  else if (open) html += '<p>' + t('generating') + '…</p>';
+  if (error) html += '<p><b>[' + t('errorLabel') + ']</b> ' + escapeHtml(error) + '</p>';
+  if (open) html += '<span class="gen"></span>';
+  body.innerHTML = html;
+  el.appendChild(body);
+  return el;
+}
+
+function nearBottom() {
+  const box = $('messages');
+  return box.scrollHeight - box.scrollTop - box.clientHeight < 120;
+}
+
+function scrollBottom() {
+  const box = $('messages');
+  box.scrollTop = box.scrollHeight;
+}
+
+function renderMessages() {
+  const box = $('messages');
+  const stick = nearBottom();
+  box.textContent = '';
+  const empty = document.createElement('div');
+  empty.id = 'empty';
+  empty.textContent = t('noConversation');
+  if (!cur.data || !(cur.data.messages || []).length) {
+    box.appendChild(empty);
+  } else {
+    cur.data.messages.forEach((node, i) => box.appendChild(renderNodeEl(node, i)));
+  }
+  renderComposerState();
+  if (stick) scrollBottom();
+}
+
+function updateNode(index) {
+  const box = $('messages');
+  const stick = nearBottom();
+  const existing = box.querySelector('[data-index="' + index + '"]');
+  const fresh = renderNodeEl(cur.data.messages[index], index);
+  if (existing) existing.replaceWith(fresh);
+  else {
+    const empty = $('empty');
+    if (empty) empty.remove();
+    box.appendChild(fresh);
+  }
+  if (stick) scrollBottom();
+}
+
+function renderComposerState() {
+  const generating = !!(cur.data && cur.data.isGenerating);
+  $('btn-stop').hidden = !generating;
+  $('btn-send').disabled = !token;
+  renderSetupNote();
+}
+
+function renderAttachments() {
+  const box = $('attachments');
+  box.textContent = '';
+  attachments.forEach((url, i) => {
+    const wrap = document.createElement('span');
+    wrap.className = 'att';
+    const img = document.createElement('img');
+    img.src = fileUrl(url);
+    const rm = document.createElement('button');
+    rm.textContent = '×';
+    rm.onclick = () => { attachments.splice(i, 1); renderAttachments(); };
+    wrap.appendChild(img);
+    wrap.appendChild(rm);
+    box.appendChild(wrap);
+  });
+}
+
+async function uploadFiles(files) {
+  for (const file of files) {
+    const fd = new FormData();
+    fd.append('file', file, file.name || 'image.png');
+    try {
+      const res = await api('POST', '/api/files/upload', fd);
+      const url = res && res.files && res.files[0] && res.files[0].url;
+      if (url) attachments.push(url);
+    } catch (e) {
+      toast(t('uploadFailed') + errorText(e));
+    }
+  }
+  renderAttachments();
+}
+
+async function sendMessage() {
+  const input = $('input');
+  const text = input.value.trim();
+  const images = attachments.slice();
+  if (!text && !images.length) return;
+  $('btn-send').disabled = true;
+  try {
+    if (!cur.id) {
+      const created = await api('POST', '/api/conversations', {});
+      await openConversation(created.conversationId);
+      scheduleListRefresh();
+    }
+    const parts = images.map((url) => ({ type: 'image', url }));
+    if (text) parts.push({ type: 'text', text });
+    await api('POST', '/api/conversations/' + encodeURIComponent(cur.id) + '/messages', { parts });
+    input.value = '';
+    attachments = [];
+    renderAttachments();
+    autosize();
+  } catch (e) {
+    toast(t('sendFailed') + errorText(e));
+  } finally {
+    renderComposerState();
+  }
+}
+
+async function stopGeneration() {
+  if (!cur.id) return;
+  try { await api('POST', '/api/conversations/' + encodeURIComponent(cur.id) + '/stop', {}); } catch (e) { toast(errorText(e)); }
+}
+
+async function newConversation() {
+  try {
+    const created = await api('POST', '/api/conversations', {});
+    await openConversation(created.conversationId);
+    scheduleListRefresh();
+    showView('chat');
+    closeDrawer();
+    $('input').focus();
+  } catch (e) {
+    toast(errorText(e));
+  }
+}
+
+async function renameConversation() {
+  if (!cur.id || !cur.data) return;
+  const shown = convTitle(cur.data);
+  const title = prompt(t('renamePrompt'), shown);
+  if (title === null) return;
+  const clean = title.trim();
+
+  if (!clean || clean === shown) return;
+  try {
+    await api('POST', '/api/conversations/' + encodeURIComponent(cur.id) + '/title', { title: clean });
+    cur.data.title = clean;
+    renderTitle();
+    scheduleListRefresh();
+  } catch (e) { toast(errorText(e)); }
+}
+
+async function deleteConversation() {
+  if (!cur.id) return;
+  if (!confirm(t('deleteConfirm'))) return;
+  try {
+    await api('DELETE', '/api/conversations/' + encodeURIComponent(cur.id));
+    closeConversation();
+    scheduleListRefresh();
+  } catch (e) { toast(errorText(e)); }
+}
+
+function autosize() {
+  const input = $('input');
+  input.style.height = 'auto';
+  input.style.height = Math.min(input.scrollHeight + 2, window.innerHeight * 0.4) + 'px';
+}
+
+function showView(name) {
+  view = name;
+  $('chat').hidden = name !== 'chat';
+  $('settings').hidden = name !== 'settings';
+  $('btn-menu').hidden = name !== 'chat';
+  $('menu').hidden = true;
+  $('btn-settings').textContent = name === 'settings' ? t('back') : t('settings');
+  renderTitle();
+  if (name === 'settings') { renderSettings(); startStatusPolling(); }
+  else { stopStatusPolling(); renderSetupNote(); }
+}
+
+function scheduleSave() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveSettings, 500);
+  renderSetupNote();
+}
+
+async function saveSettings() {
+  try {
+    await api('PUT', '/web/settings', settings);
+  } catch (e) {
+    if (e.status !== 401) toast(errorText(e));
+  }
+}
+
+function providerById(id) { return (settings.providers || []).find((p) => p.id === id) || null; }
+
+function resolveModel(ref) {
+  if (!ref || !ref.providerId || !ref.model) return null;
+  const provider = providerById(ref.providerId);
+  if (!provider) return null;
+  return { provider, model: ref.model };
+}
+
+function el(tag, attrs, children) {
+  const node = document.createElement(tag);
+  if (attrs) for (const k in attrs) {
+    if (k === 'text') node.textContent = attrs[k];
+    else if (k === 'html') node.innerHTML = attrs[k];
+    else if (k.startsWith('on')) node[k] = attrs[k];
+    else if (k === 'hidden') node.hidden = !!attrs[k];
+    else node.setAttribute(k, attrs[k]);
+  }
+  (children || []).forEach((c) => { if (c) node.appendChild(typeof c === 'string' ? document.createTextNode(c) : c); });
+  return node;
+}
+
+function row(labelText, control, extra) {
+  return el('div', { class: 'row' }, [el('label', { text: labelText }), control, extra]);
+}
+
+const PRESETS = [
+  { id: 'openai', name: 'OpenAI', type: 'openai', baseUrl: 'https://api.openai.com/v1', prefer: [/^gpt-\d+(\.\d+)?o?$/] },
+  { id: 'anthropic', name: 'Anthropic', type: 'anthropic', baseUrl: 'https://api.anthropic.com', prefer: [/^claude-sonnet-/, /^claude-.*sonnet/] },
+  { id: 'gemini', name: 'Google Gemini', type: 'gemini', baseUrl: 'https://generativelanguage.googleapis.com', prefer: [/^gemini-[\d.]+-flash$/, /^gemini-[\d.]+-pro$/] },
+  { id: 'deepseek', name: 'DeepSeek', type: 'openai', baseUrl: 'https://api.deepseek.com/v1', prefer: [/^deepseek-chat$/] },
+  { id: 'openrouter', name: 'OpenRouter', type: 'openai', baseUrl: 'https://openrouter.ai/api/v1', prefer: [/^anthropic\/claude-sonnet-[\d.]+$/, /^openai\/gpt-\d+(\.\d+)?$/] },
+  { id: 'siliconflow', name: '硅基流动', type: 'openai', baseUrl: 'https://api.siliconflow.cn/v1', prefer: [/^deepseek-ai\/DeepSeek-V[\d.]+$/i, /^Qwen\/Qwen[\d.]+-.*Instruct/i] },
+  { id: 'dashscope', name: '阿里云百炼', type: 'openai', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', prefer: [/^qwen-plus$/, /^qwen-max$/] },
+  { id: 'moonshot', name: 'Kimi', type: 'openai', baseUrl: 'https://api.moonshot.cn/v1', prefer: [/^kimi-k\d/, /^moonshot-v1-auto$/] },
+  { id: 'ark', name: '火山方舟', type: 'openai', baseUrl: 'https://ark.cn-beijing.volces.com/api/v3', prefer: [/^doubao-seed-/, /^doubao-/] },
+  { id: 'xai', name: 'xAI', type: 'openai', baseUrl: 'https://api.x.ai/v1', prefer: [/^grok-\d+(\.\d+)?$/, /^grok-/] },
+  { id: 'groq', name: 'Groq', type: 'openai', baseUrl: 'https://api.groq.com/openai/v1', prefer: [/^llama-3\.3-70b/, /^llama-/] },
+  { id: 'mistral', name: 'Mistral', type: 'openai', baseUrl: 'https://api.mistral.ai/v1', prefer: [/^mistral-large-latest$/, /^mistral-medium-latest$/] },
+  { id: 'custom', name: '', type: 'openai', baseUrl: '', prefer: [] },
+];
+
+function providerName(p) {
+  const preset = presetOf(p);
+  if (preset.id === 'custom' && (!p.name || Object.values(STRINGS).some((s) => s.customProvider === p.name))) return t('customProvider');
+  return p.name || preset.name || p.type;
+}
+
+function presetOf(p) {
+  if (p.preset) return PRESETS.find((x) => x.id === p.preset) || PRESETS[PRESETS.length - 1];
+
+  const base = String(p.baseUrl || DEFAULT_BASE[p.type] || '').replace(/\/+$/, '');
+  return PRESETS.find((x) => x.id !== 'custom' && x.type === p.type && x.baseUrl === base) || PRESETS[PRESETS.length - 1];
+}
+
+const NOT_CHAT = /embed|tts|whisper|dall-e|image|moderation|rerank|audio|realtime|transcri|speech|davinci|babbage|sora|veo|imagen|aqa|computer-use|-search|ocr/i;
+function chatModels(list) { return (list || []).filter((m) => !NOT_CHAT.test(m)); }
+
+function versionOf(id) {
+  const dated = /\d{4}-\d{2}-\d{2}|\d{8}/.test(id);
+  const nums = (id.replace(/\d{4}-\d{2}-\d{2}|\d{8}/g, '').match(/\d+/g) || []).map(Number);
+  return { nums, dated };
+}
+function newer(a, b) {
+  const x = versionOf(a), y = versionOf(b);
+  for (let i = 0; i < Math.max(x.nums.length, y.nums.length); i++) {
+    const d = (x.nums[i] || 0) - (y.nums[i] || 0);
+    if (d) return d > 0;
+  }
+  if (x.dated !== y.dated) return !x.dated;
+  return a.length < b.length;
+}
+
+function pickChatModel(p) {
+  const list = chatModels(p.models);
+  for (const re of presetOf(p).prefer) {
+    const hits = list.filter((m) => re.test(m));
+    if (hits.length) return hits.reduce((best, m) => (newer(m, best) ? m : best));
+  }
+  return list[0] || null;
+}
+
+const checks = new Map();
+
+let settingsLoaded = false;
+
+const openDetails = new Set();
+
+function details(key, summary, children) {
+  const box = el('details', { class: 'more' }, [el('summary', { text: summary }), ...children]);
+  box.open = openDetails.has(key);
+  box.ontoggle = () => { if (box.open) openDetails.add(key); else openDetails.delete(key); };
+  return box;
+}
+
+async function checkProvider(p) {
+  if (!p.apiKey) { checks.delete(p.id); renderCheck(p); return; }
+  const seq = (checks.get(p.id) && checks.get(p.id).seq || 0) + 1;
+  checks.set(p.id, { state: 'checking', text: t('checking'), seq });
+  renderCheck(p);
+  let result;
+  try {
+    const list = await fetchModelList(p);
+    p.models = list;
+    const picked = autoPick(p);
+    scheduleSave();
+    result = { state: 'ok', text: t('checkOk').replace('%d', String(chatModels(list).length)) };
+    if (picked) log('chat model picked:', p.name, picked);
+  } catch (e) {
+    let text;
+    if (e.status === 401 || e.status === 403) text = t('checkBadKey');
+    else if (e.status === 404) text = t('checkNoList');
+    else text = errorText(e);
+    result = { state: 'error', text };
+  }
+  if (!providerById(p.id) || (checks.get(p.id) || {}).seq !== seq) return;
+  checks.set(p.id, Object.assign(result, { seq }));
+  renderCheck(p);
+  refreshModelPickers();
+  renderSetupNote();
+}
+
+function autoPick(p) {
+  if (resolveModel(settings.chatModel)) return null;
+  const model = pickChatModel(p);
+  if (!model) return null;
+  settings.chatModel = { providerId: p.id, model };
+  settings.chatModelAuto = true;
+  reopenWorker();
+  return model;
+}
+
+function renderCheck(p) {
+  const line = document.querySelector('[data-check="' + p.id + '"]');
+  if (!line) return;
+  const c = checks.get(p.id);
+  line.textContent = !p.apiKey ? t('needKey') : c ? c.text : '';
+  line.className = 'check' + (c && c.state === 'error' ? ' bad' : '');
+}
+
+function renderSettings() {
+  const inner = $('settings-inner');
+  inner.textContent = '';
+
+  if (!token || !authOk) {
+    const input = el('input', { type: 'text', value: token, placeholder: 't=' });
+    input.onchange = () => {
+      token = input.value.trim().replace(/^.*[?&]t=/, '').replace(/[&#].*$/, '');
+      localStorage.setItem(TOKEN_KEY, token);
+      log('access code entered (' + token.length + ' chars)');
+      authOk = true;
+      boot();
+    };
+    inner.appendChild(el('div', { class: 'card' }, [
+      el('h3', { text: t('tokenTitle') }),
+      el('div', { class: 'hint', text: authOk ? t('tokenHint') : t('authBad') }),
+      row(t('tokenTitle'), input),
+    ]));
+  }
+
+  const providersCard = el('div', { class: 'card', id: 'providers-card' }, [el('h3', { text: t('providers') })]);
+  if (!(settings.providers || []).length) providersCard.appendChild(el('div', { class: 'hint', text: t('providersEmpty') }));
+  (settings.providers || []).forEach((p) => providersCard.appendChild(renderProvider(p)));
+  const presetSelect = el('select', {}, [el('option', { value: '', text: t('pickProvider') })].concat(
+    PRESETS.map((x) => el('option', { value: x.id, text: x.id === 'custom' ? t('customProvider') : x.name }))));
+  const addBtn = el('button', { text: t('addProvider'), disabled: 'disabled' });
+  presetSelect.onchange = () => { addBtn.disabled = !presetSelect.value; };
+  addBtn.onclick = () => {
+    const preset = PRESETS.find((x) => x.id === presetSelect.value);
+    if (!preset) return;
+    const p = { id: 'p' + Date.now().toString(36), preset: preset.id, name: preset.name,
+      type: preset.type, baseUrl: preset.baseUrl, apiKey: '', models: [] };
+    settings.providers = settings.providers || [];
+    settings.providers.push(p);
+    if (preset.id === 'custom') openDetails.add('provider-' + p.id);
+    scheduleSave();
+    renderSettings();
+    const key = document.querySelector('[data-key="' + p.id + '"]');
+    if (key) { key.scrollIntoView({ block: 'center' }); key.focus(); }
+  };
+  providersCard.appendChild(el('div', { class: 'row' }, [presetSelect, addBtn]));
+  providersCard.appendChild(el('div', { class: 'hint', text: t('providersHint') }));
+  inner.appendChild(providersCard);
+
+  const modelsCard = el('div', { class: 'card', id: 'models-card' }, [el('h3', { text: t('modelsTitle') })]);
+  modelsCard.appendChild(modelRow('chatModel', t('chatModel')));
+  modelsCard.appendChild(el('div', { class: 'hint', 'data-model-hint': 'chatModel' }));
+  modelsCard.appendChild(modelRow('translateModel', t('translateModel')));
+  modelsCard.appendChild(el('div', { class: 'hint', text: t('translateHint') }));
+  inner.appendChild(modelsCard);
+
+  const promptBox = el('textarea', { rows: '6', spellcheck: 'false' });
+  promptBox.value = settings.systemPrompt || '';
+  promptBox.style.width = '100%';
+  promptBox.onchange = () => { settings.systemPrompt = promptBox.value.trim(); scheduleSave(); };
+  inner.appendChild(el('div', { class: 'card' }, [
+    el('h3', { text: t('promptTitle') }),
+    el('div', { class: 'hint', text: t('promptHint') }),
+    promptBox,
+  ]));
+
+  const temp = el('input', { type: 'number', step: '0.1', min: '0', max: '2', value: settings.temperature == null ? '' : settings.temperature, placeholder: t('providerDefault') });
+  temp.onchange = () => { settings.temperature = temp.value === '' ? null : Number(temp.value); scheduleSave(); };
+  const max = el('input', { type: 'number', step: '1', min: '1', value: settings.maxTokens == null ? '' : settings.maxTokens, placeholder: t('providerDefault') });
+  max.onchange = () => { settings.maxTokens = max.value === '' ? null : Math.max(1, Math.floor(Number(max.value))); scheduleSave(); };
+  const langSel = el('select', {}, [el('option', { value: 'auto', text: t('auto') })].concat(
+    LANGUAGES.map(([code, label]) => el('option', { value: code, text: label }))));
+  langSel.value = settings.language || 'auto';
+  langSel.onchange = () => { settings.language = langSel.value; scheduleSave(); applyStrings(); renderSettings(); };
+  const logBox = el('textarea', { id: 'log-box', rows: '10', readonly: 'readonly', spellcheck: 'false', class: 'log' });
+  logBox.value = logLines.join('\n');
+  inner.appendChild(el('div', { class: 'card' }, [details('advanced', t('advanced'), [
+    row(t('temperature'), temp),
+    row(t('maxTokens'), max),
+    row(t('language'), langSel),
+    el('h3', { text: t('status'), style: 'margin-top:12px' }),
+    el('div', { class: 'kv', id: 'status-kv' }),
+    el('div', { class: 'row', style: 'margin-top:8px' }, [el('button', { class: 'small', text: t('refresh'), onclick: refreshStatus })]),
+    el('h3', { text: t('logTitle'), style: 'margin-top:12px' }),
+    el('div', { class: 'hint', text: t('logHint') }),
+    logBox,
+    el('div', { class: 'row', style: 'margin-top:8px' }, [el('button', { class: 'small', text: t('logCopy'), onclick: copyLog })]),
+  ])]));
+  refreshStatus();
+  refreshModelPickers();
+
+  (settings.providers || []).forEach((p) => { if (p.apiKey && !checks.has(p.id)) checkProvider(p); });
+}
+
+function renderProvider(p) {
+  const preset = presetOf(p);
+  const custom = preset.id === 'custom';
+  const card = el('div', { class: 'card provider' });
+  const title = el('strong', { text: providerName(p) });
+  card.appendChild(el('div', { class: 'row' }, [title, el('span', { class: 'check', 'data-check': p.id })]));
+
+  const key = el('input', { type: 'password', value: p.apiKey || '', autocomplete: 'off', spellcheck: 'false', placeholder: t('keyPlaceholder'), 'data-key': p.id });
+  const commitKey = () => {
+    const value = key.value.trim();
+    if (value === p.apiKey) return;
+    p.apiKey = value;
+    scheduleSave();
+    reopenWorker();
+    checkProvider(p);
+  };
+  key.onchange = commitKey;
+  key.onpaste = () => setTimeout(commitKey, 0);
+  const toggle = el('button', { class: 'small', text: t('show') });
+  toggle.onclick = () => { const show = key.type === 'password'; key.type = show ? 'text' : 'password'; toggle.textContent = show ? t('hide') : t('show'); };
+  card.appendChild(row(t('apiKey'), key, toggle));
+
+  const base = el('input', { type: 'text', value: p.baseUrl || '', placeholder: custom ? 'https://…/v1' : (preset.baseUrl || DEFAULT_BASE[p.type] || '') });
+  base.onchange = () => { p.baseUrl = base.value.trim(); scheduleSave(); checkProvider(p); };
+  const baseRow = row(t('baseUrl'), base);
+
+  if (custom) card.appendChild(baseRow);
+
+  const name = el('input', { type: 'text', value: p.name || '' });
+  name.oninput = () => { p.name = name.value; title.textContent = providerName(p); scheduleSave(); refreshModelPickers(); };
+  const typeSel = el('select', {}, ['openai', 'anthropic', 'gemini'].map((ty) => el('option', { value: ty, text: t('type_' + ty) })));
+  typeSel.value = p.type;
+  typeSel.onchange = () => { p.type = typeSel.value; scheduleSave(); checkProvider(p); };
+  const models = el('textarea', { rows: '4', spellcheck: 'false' });
+  models.value = (p.models || []).join('\n');
+  models.onchange = () => { p.models = models.value.split('\n').map((s) => s.trim()).filter(Boolean); scheduleSave(); refreshModelPickers(); };
+  const more = [row(t('name'), name)];
+  if (!custom) more.push(baseRow);
+  if (custom || p.type !== preset.type) more.push(row(t('type'), typeSel));
+  more.push(el('div', { class: 'row stack' }, [el('label', { text: t('models') }), el('div', { class: 'hint', text: t('modelsHint') }), models]));
+  more.push(el('div', { class: 'row' }, [
+    el('button', { class: 'small', text: t('recheck'), onclick: () => checkProvider(p).then(() => { models.value = (p.models || []).join('\n'); }) }),
+    el('button', { class: 'small', text: t('removeProvider'), onclick: () => {
+      if (!confirm(t('removeProviderConfirm'))) return;
+      settings.providers = settings.providers.filter((x) => x !== p);
+      checks.delete(p.id);
+      if (settings.chatModel && settings.chatModel.providerId === p.id) settings.chatModel = null;
+      if (settings.translateModel && settings.translateModel.providerId === p.id) settings.translateModel = null;
+
+      for (const other of settings.providers) if (autoPick(other)) break;
+      scheduleSave();
+      renderSettings();
+      reopenWorker();
+      renderSetupNote();
+    } }),
+  ]));
+  card.appendChild(details('provider-' + p.id, t('providerMore'), more));
+  setTimeout(() => renderCheck(p), 0);
+  return card;
+}
+
+function modelRow(field, label) {
+  const provSel = el('select', { 'data-prov': field });
+  const list = el('datalist', { id: 'dl-' + field });
+  const input = el('input', { type: 'text', list: 'dl-' + field, autocomplete: 'off', spellcheck: 'false', 'data-model': field,
+    placeholder: field === 'translateModel' ? t('sameAsChat') : t('typeToSearch') });
+  const commit = () => {
+    const model = input.value.trim();
+    const providerId = provSel.value || ((settings.providers || [])[0] || {}).id;
+    settings[field] = model && providerId ? { providerId, model } : null;
+    if (field === 'chatModel') settings.chatModelAuto = false;
+    scheduleSave();
+    reopenWorker();
+    refreshModelPickers();
+    renderSetupNote();
+  };
+  input.onchange = commit;
+  provSel.onchange = () => {
+
+    const p = providerById(provSel.value);
+    if (p && input.value && (p.models || []).length && !(p.models || []).includes(input.value.trim())) input.value = '';
+    fillModelList(field);
+    if (input.value) commit(); else input.focus();
+  };
+  const box = el('div', { class: 'row model-row' }, [el('label', { text: label }), provSel, input, list]);
+  return box;
+}
+
+function fillModelList(field) {
+  const provSel = document.querySelector('[data-prov="' + field + '"]');
+  const list = $('dl-' + field);
+  if (!provSel || !list) return;
+  const p = providerById(provSel.value) || (settings.providers || [])[0];
+  list.textContent = '';
+  for (const m of chatModels(p ? p.models : [])) list.appendChild(el('option', { value: m }));
+}
+
+function refreshModelPickers() {
+  const providers = settings.providers || [];
+  for (const field of ['chatModel', 'translateModel']) {
+    const provSel = document.querySelector('[data-prov="' + field + '"]');
+    const input = document.querySelector('[data-model="' + field + '"]');
+    if (!provSel || !input) continue;
+    const current = settings[field];
+    const chosen = current && providerById(current.providerId) ? current.providerId : (provSel.value && providerById(provSel.value) ? provSel.value : (providers[0] || {}).id || '');
+    provSel.textContent = '';
+    providers.forEach((p) => provSel.appendChild(el('option', { value: p.id, text: providerName(p) })));
+    provSel.value = chosen;
+    provSel.hidden = providers.length < 2;
+    input.disabled = !providers.length;
+    if (document.activeElement !== input) input.value = current && providerById(current.providerId) ? current.model : '';
+    fillModelList(field);
+  }
+  const hint = document.querySelector('[data-model-hint="chatModel"]');
+  if (hint) {
+    const problem = setupProblem();
+    hint.textContent = problem ? t('setup_' + problem) : settings.chatModelAuto ? t('autoPicked') : '';
+    hint.className = 'hint' + (problem ? ' bad' : '');
+  }
+}
+
+function setupProblem() {
+  if (!token || !authOk || !settingsLoaded) return null;
+  const providers = settings.providers || [];
+  if (!providers.length) return 'noProvider';
+  const chat = resolveModel(settings.chatModel);
+  if (!chat) return providers.some((p) => p.apiKey) ? 'noChatModel' : 'noKey';
+  if (!chat.provider.apiKey) return 'noKey';
+  return null;
+}
+
+function renderSetupNote() {
+  const note = $('setup-note');
+  if (!note) return;
+  const problem = setupProblem();
+  note.hidden = !problem;
+  if (problem) $('setup-text').textContent = t('setup_' + problem);
+}
+
+function goToSetup() {
+  showView('settings');
+  const problem = setupProblem();
+  const target = $(problem === 'noChatModel' ? 'models-card' : 'providers-card');
+  if (target) target.scrollIntoView({ block: 'start' });
+  const focus = problem === 'noChatModel' ? document.querySelector('[data-model="chatModel"]')
+    : document.querySelector('[data-key]:placeholder-shown');
+  if (focus) focus.focus();
+}
+
+async function refreshStatus() {
+  const kv = $('status-kv');
+  if (!kv) return;
+  if (!authOk) { kv.textContent = ''; return; }
+  try { serverState = await api('GET', '/web/state'); } catch (e) { serverState = null; }
+  kv.textContent = '';
+  const add = (k, v) => { kv.appendChild(el('span', { text: k })); kv.appendChild(el('span', { text: v })); };
+  if (serverState) {
+    add(t('address'), 'http://' + (serverState.lanIp || '?') + ':' + serverState.port + '/');
+    add(t('statusWorkers'), String(serverState.workers));
+    add(t('statusPending'), String(serverState.pendingJobs));
+    add(t('statusTranslate'), serverState.translateReady ? t('yes') : t('no'));
+  }
+  add(t('thisPage'), workerConnected ? t('workerOn') : t('workerOff'));
+  add(t('runningJobs'), String(jobs.size));
+}
+
+function startStatusPolling() {
+  stopStatusPolling();
+  statusTimer = setInterval(refreshStatus, 5000);
+}
+
+function stopStatusPolling() {
+  clearInterval(statusTimer);
+  statusTimer = null;
+}
+
+function workerCaps() {
+
+  const usable = (ref) => { const m = resolveModel(ref); return m && m.provider.apiKey ? m : null; };
+  const chat = usable(settings.chatModel);
+
+  const translate = usable(settings.translateModel) || chat;
+  return { chat, translate };
+}
+
+function openWorker() {
+  clearTimeout(workerTimer);
+  if (workerES) { workerES.close(); workerES = null; }
+  if (!token || !authOk) { workerConnected = false; renderConn(); return; }
+  const caps = workerCaps();
+  const params = new URLSearchParams();
+  params.set('t', token);
+  if (caps.chat) { params.set('chat', '1'); params.set('chatModel', caps.chat.model); }
+  if (caps.translate) { params.set('translate', '1'); params.set('translateModel', caps.translate.model); }
+  const es = new EventSource('/web/events?' + params.toString());
+  workerES = es;
+  es.onopen = () => { log('worker stream open', caps.chat ? 'chat' : '-', caps.translate ? 'translate' : '-'); workerConnected = true; renderConn(); if (view === 'settings') refreshStatus(); };
+  es.addEventListener('hello', (e) => {
+    try { workerId = JSON.parse(e.data).workerId || null; } catch (err) { workerId = null; }
+    workerConnected = true;
+    renderConn();
+  });
+
+  es.addEventListener('ping', () => {
+    if (!workerId || workerES !== es) return;
+    api('POST', '/web/pong', { workerId }).catch((err) => {
+      if (err && err.status === 404 && workerES === es) { log('worker dropped by the Supernote, reconnecting'); openWorker(); }
+    });
+  });
+  es.addEventListener('list', scheduleListRefresh);
+  es.addEventListener('active', (e) => followActive(e.data));
+
+  es.addEventListener('open', (e) => followActive(e.data));
+  es.addEventListener('job', (e) => {
+    try { handleJob(JSON.parse(e.data)); } catch (err) {   }
+  });
+  es.addEventListener('cancel', (e) => {
+    try { cancelJob(JSON.parse(e.data).jobId); } catch (err) {   }
+  });
+  es.onerror = () => {
+    if (workerES !== es) return;
+    es.close();
+    workerES = null;
+    workerConnected = false;
+    renderConn();
+
+    api('GET', '/web/state').then(() => {
+      if (!authOk || workerES) return;
+      log('worker stream lost, reconnecting in 2 s');
+      workerTimer = setTimeout(openWorker, 2000);
+    }, (e) => {
+      if (e && e.status === 401) return;
+      log('worker stream lost and the Supernote does not answer, retrying in 5 s');
+      workerTimer = setTimeout(openWorker, 5000);
+    });
+  };
+}
+
+function reopenWorker() {
+  clearTimeout(workerTimer);
+  workerTimer = setTimeout(openWorker, 300);
+}
+
+function handleJob(job) {
+  if (!job || !job.id || jobs.has(job.id)) return;
+  const entry = { job, controller: new AbortController(), text: '', lastReport: 0, timer: null, done: false };
+  jobs.set(job.id, entry);
+  if (view === 'settings') refreshStatus();
+  runJob(entry).catch(() => {}).then(() => {
+    jobs.delete(job.id);
+    if (view === 'settings') refreshStatus();
+  });
+}
+
+function cancelJob(id) {
+  const entry = jobs.get(id);
+  if (!entry) return;
+  entry.done = true;
+  entry.controller.abort();
+  clearTimeout(entry.timer);
+}
+
+function report(entry, what, body) {
+  return api('POST', '/web/jobs/' + encodeURIComponent(entry.job.id) + '/' + what, body).catch(() => {});
+}
+
+function scheduleProgress(entry) {
+  if (entry.done) return;
+  const now = Date.now();
+  const wait = 300 - (now - entry.lastReport);
+  if (wait <= 0) {
+    entry.lastReport = now;
+    report(entry, 'progress', { text: answerText(entry.text) });
+  } else if (!entry.timer) {
+    entry.timer = setTimeout(() => {
+      entry.timer = null;
+      if (entry.done) return;
+      entry.lastReport = Date.now();
+      report(entry, 'progress', { text: answerText(entry.text) });
+    }, wait);
+  }
+}
+
+function stripThink(text) {
+  return String(text || '').replace(/<think>[\s\S]*?(?:<\/think>|$)/g, '').trim();
+}
+
+function answerText(text) {
+  const s = String(text || '');
+  const head = s.trimStart();
+  if (head && '<think>'.startsWith(head)) return '';
+  return s.replace(/^\s*<think>[\s\S]*?(?:<\/think>|$)/, '').trimStart();
+}
+
+async function runJob(entry) {
+  const job = entry.job;
+  const translate = job.kind === 'translate';
+  const target = (translate && resolveModel(settings.translateModel)) || resolveModel(settings.chatModel);
+  const tag = 'job ' + job.kind + ' ' + String(job.id).slice(0, 8);
+  log(tag, 'start', target ? target.provider.type + ' ' + hostOf(baseUrlOf(target.provider)) + ' ' + target.model : 'no model',
+    translate ? (String(job.text || '').length + ' chars') : ((job.messages || []).length + ' turns'));
+  if (!target) {
+    await report(entry, 'error', { message: t('noChatModel'), text: '' });
+    return;
+  }
+  if (!target.provider.apiKey) {
+    await report(entry, 'error', { message: t('noApiKey'), text: '' });
+    return;
+  }
+  let messages;
+  try {
+    messages = translate ? [{ role: 'user', parts: [{ type: 'text', text: job.text || '' }] }] : await prepareMessages(job.messages || []);
+  } catch (e) {
+    await report(entry, 'error', { message: errorText(e), text: '' });
+    return;
+  }
+  try {
+    const result = await generate({
+      provider: target.provider,
+      model: target.model,
+      system: job.system || '',
+      messages,
+      temperature: settings.temperature,
+      maxTokens: settings.maxTokens,
+      signal: entry.controller.signal,
+      onDelta: (delta) => {
+        if (entry.done) return;
+        entry.text += delta;
+        if (!translate) scheduleProgress(entry);
+      },
+    });
+    if (entry.done) return;
+    entry.done = true;
+    clearTimeout(entry.timer);
+    let text = result.text || entry.text;
+    text = translate ? stripThink(text) : answerText(text);
+    if (!text.trim()) {
+      await report(entry, 'error', { message: t('emptyReply'), text: '' });
+      return;
+    }
+    log(tag, 'done', text.length + ' chars');
+    await report(entry, 'done', { text, model: target.model, usage: result.usage || { input: 0, output: 0 } });
+  } catch (e) {
+    if (entry.done || entry.controller.signal.aborted) { log(tag, 'cancelled'); return; }
+    entry.done = true;
+    clearTimeout(entry.timer);
+    log(tag, 'error', errorText(e));
+    await report(entry, 'error', { message: errorText(e), text: translate ? entry.text : answerText(entry.text) });
+  }
+}
+
+async function prepareMessages(history) {
+  const out = [];
+  for (const m of history) {
+    const parts = [];
+    for (const part of m.parts || []) {
+      if (part.type === 'text') parts.push({ type: 'text', text: part.text || '' });
+      else if (part.type === 'image' && part.url) parts.push({ type: 'image', ...(await loadImage(part.url)) });
+      else if (part.type === 'document' && part.url) {
+        const file = await loadImage(part.url);
+        parts.push({ type: 'file', name: part.fileName || 'document.pdf', mime: 'application/pdf', data: file.data });
+      }
+    }
+    if (parts.length) out.push({ role: m.role === 'assistant' ? 'assistant' : 'user', parts });
+  }
+  return out;
+}
+
+async function loadImage(url) {
+  if (imageCache.has(url)) return imageCache.get(url);
+  const res = await netFetch(fileUrl(url), {}, 'supernote');
+  if (!res.ok) throw new Error(t('imageLoadFailed') + ' (' + res.status + ')');
+  const blob = await res.blob();
+  const dataUrl = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error(t('imageLoadFailed')));
+    reader.readAsDataURL(blob);
+  });
+  const comma = dataUrl.indexOf(',');
+  const info = { mime: blob.type || 'image/png', data: dataUrl.slice(comma + 1), dataUrl };
+  imageCache.set(url, info);
+  return info;
+}
+
+function baseUrlOf(p) {
+  return (p.baseUrl || DEFAULT_BASE[p.type] || '').replace(/\/+$/, '');
+}
+
+async function providerError(res) {
+  let body = '';
+  try { body = await res.text(); } catch (e) { body = ''; }
+  let message = body;
+  try {
+    const json = JSON.parse(body);
+    message = (json.error && (json.error.message || json.error)) || json.message || body;
+    if (typeof message !== 'string') message = JSON.stringify(message);
+  } catch (e) {   }
+  log('provider', hostOf(res.url), 'HTTP ' + res.status, String(message).slice(0, 300));
+  const error = new Error('HTTP ' + res.status + ': ' + String(message).slice(0, 400));
+  error.status = res.status;
+  return error;
+}
+
+async function readSse(res, onEvent) {
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let event = '';
+  let data = [];
+  const dispatch = () => {
+    if (data.length) onEvent(event, data.join('\n'));
+    event = '';
+    data = [];
+  };
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let idx;
+    while ((idx = buffer.indexOf('\n')) >= 0) {
+      const line = buffer.slice(0, idx).replace(/\r$/, '');
+      buffer = buffer.slice(idx + 1);
+      if (line === '') { dispatch(); continue; }
+      if (line.startsWith(':')) continue;
+      const colon = line.indexOf(':');
+      const field = colon < 0 ? line : line.slice(0, colon);
+      let value2 = colon < 0 ? '' : line.slice(colon + 1);
+      if (value2.startsWith(' ')) value2 = value2.slice(1);
+      if (field === 'event') event = value2;
+      else if (field === 'data') data.push(value2);
+    }
+  }
+  buffer += decoder.decode();
+  if (buffer.trim()) {
+    for (const line of buffer.split('\n')) {
+      const l = line.replace(/\r$/, '');
+      if (l.startsWith('data:')) data.push(l.slice(5).replace(/^ /, ''));
+    }
+  }
+  dispatch();
+}
+
+function generate(opts) {
+  switch (opts.provider.type) {
+    case 'anthropic': return callAnthropic(opts);
+    case 'gemini': return callGemini(opts);
+    default: return callOpenAI(opts);
+  }
+}
+
+function callOpenAI(opts) {
+  const messages = [];
+  if (opts.system) messages.push({ role: 'system', content: opts.system });
+  for (const m of opts.messages) {
+    const allText = m.parts.every((p) => p.type === 'text');
+    if (allText) messages.push({ role: m.role, content: m.parts.map((p) => p.text).join('') });
+    else messages.push({ role: m.role, content: m.parts.map((p) => p.type === 'text'
+      ? { type: 'text', text: p.text }
+      : p.type === 'file'
+        ? { type: 'file', file: { filename: p.name, file_data: 'data:' + p.mime + ';base64,' + p.data } }
+        : { type: 'image_url', image_url: { url: p.dataUrl } }) });
+  }
+  const body = { model: opts.model, messages, stream: true };
+  if (opts.temperature != null) body.temperature = opts.temperature;
+  if (opts.maxTokens != null) body.max_tokens = opts.maxTokens;
+  return (async () => {
+    const res = await netFetch(baseUrlOf(opts.provider) + '/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + opts.provider.apiKey },
+      body: JSON.stringify(body),
+      signal: opts.signal,
+    }, 'provider');
+    if (!res.ok) throw await providerError(res);
+    let text = '';
+    let usage = null;
+    const type = (res.headers.get('content-type') || '').toLowerCase();
+    if (!type.includes('text/event-stream')) {
+
+      const json = await res.json();
+      const choice = json.choices && json.choices[0];
+      text = (choice && choice.message && choice.message.content) || '';
+      if (typeof text !== 'string') text = '';
+      if (text) opts.onDelta(text);
+      if (json.usage) usage = { input: json.usage.prompt_tokens || 0, output: json.usage.completion_tokens || 0 };
+      return { text, usage };
+    }
+    await readSse(res, (event, data) => {
+      if (data === '[DONE]') return;
+      let json;
+      try { json = JSON.parse(data); } catch (e) { return; }
+      if (json.error) throw new Error(json.error.message || JSON.stringify(json.error));
+      const choice = json.choices && json.choices[0];
+      const delta = choice && choice.delta && choice.delta.content;
+      if (typeof delta === 'string' && delta) { text += delta; opts.onDelta(delta); }
+      if (json.usage) usage = { input: json.usage.prompt_tokens || 0, output: json.usage.completion_tokens || 0 };
+    });
+    return { text, usage };
+  })();
+}
+
+function callAnthropic(opts) {
+  const messages = opts.messages.map((m) => ({
+    role: m.role,
+    content: m.parts.map((p) => p.type === 'text'
+      ? { type: 'text', text: p.text }
+      : { type: p.type === 'file' ? 'document' : 'image', source: { type: 'base64', media_type: p.mime, data: p.data } }),
+  }));
+  const body = { model: opts.model, messages, max_tokens: opts.maxTokens || 8192, stream: true };
+  if (opts.system) body.system = opts.system;
+  if (opts.temperature != null) body.temperature = opts.temperature;
+  return (async () => {
+    const res = await netFetch(baseUrlOf(opts.provider) + '/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': opts.provider.apiKey,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true',
+      },
+      body: JSON.stringify(body),
+      signal: opts.signal,
+    }, 'provider');
+    if (!res.ok) throw await providerError(res);
+    let text = '';
+    const usage = { input: 0, output: 0 };
+    await readSse(res, (event, data) => {
+      let json;
+      try { json = JSON.parse(data); } catch (e) { return; }
+      const kind = json.type || event;
+      if (kind === 'content_block_delta' && json.delta && json.delta.type === 'text_delta') {
+        text += json.delta.text; opts.onDelta(json.delta.text);
+      } else if (kind === 'message_start' && json.message && json.message.usage) {
+        usage.input = json.message.usage.input_tokens || 0;
+      } else if (kind === 'message_delta' && json.usage) {
+        usage.output = json.usage.output_tokens || 0;
+      } else if (kind === 'error') {
+        throw new Error((json.error && json.error.message) || 'error');
+      }
+    });
+    return { text, usage };
+  })();
+}
+
+function callGemini(opts) {
+  const contents = opts.messages.map((m) => ({
+    role: m.role === 'assistant' ? 'model' : 'user',
+    parts: m.parts.map((p) => p.type === 'text' ? { text: p.text } : { inline_data: { mime_type: p.mime, data: p.data } }),
+  }));
+  const body = { contents };
+  if (opts.system) body.systemInstruction = { parts: [{ text: opts.system }] };
+  const config = {};
+  if (opts.temperature != null) config.temperature = opts.temperature;
+  if (opts.maxTokens != null) config.maxOutputTokens = opts.maxTokens;
+  if (Object.keys(config).length) body.generationConfig = config;
+  return (async () => {
+    const url = baseUrlOf(opts.provider) + '/v1beta/models/' + encodeURIComponent(opts.model) + ':streamGenerateContent?alt=sse&key=' + encodeURIComponent(opts.provider.apiKey);
+    const res = await netFetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: opts.signal,
+    }, 'provider');
+    if (!res.ok) throw await providerError(res);
+    let text = '';
+    let usage = null;
+    await readSse(res, (event, data) => {
+      let json;
+      try { json = JSON.parse(data); } catch (e) { return; }
+      if (json.error) throw new Error(json.error.message || JSON.stringify(json.error));
+      const candidate = json.candidates && json.candidates[0];
+      const parts = candidate && candidate.content && candidate.content.parts;
+      if (parts) for (const p of parts) if (typeof p.text === 'string' && p.text) { text += p.text; opts.onDelta(p.text); }
+      if (json.usageMetadata) usage = { input: json.usageMetadata.promptTokenCount || 0, output: json.usageMetadata.candidatesTokenCount || 0 };
+    });
+    return { text, usage };
+  })();
+}
+
+async function fetchModelList(p) {
+  const base = baseUrlOf(p);
+  if (p.type === 'anthropic') {
+    const res = await netFetch(base + '/v1/models?limit=1000', { headers: {
+      'x-api-key': p.apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true',
+    } }, 'provider');
+    if (!res.ok) throw await providerError(res);
+    const json = await res.json();
+    return (json.data || []).map((m) => m.id).filter(Boolean);
+  }
+  if (p.type === 'gemini') {
+    const res = await netFetch(base + '/v1beta/models?pageSize=1000&key=' + encodeURIComponent(p.apiKey), {}, 'provider');
+    if (!res.ok) throw await providerError(res);
+    const json = await res.json();
+    return (json.models || [])
+      .filter((m) => !m.supportedGenerationMethods || m.supportedGenerationMethods.includes('generateContent'))
+      .map((m) => String(m.name || '').replace(/^models\//, '')).filter(Boolean);
+  }
+  const res = await netFetch(base + '/models', { headers: { 'Authorization': 'Bearer ' + p.apiKey } }, 'provider');
+  if (!res.ok) throw await providerError(res);
+  const json = await res.json();
+  return (json.data || []).map((m) => m.id).filter(Boolean).sort();
+}
+
+async function loadSettings() {
+  try {
+    const saved = await api('GET', '/web/settings');
+    if (saved && typeof saved === 'object') settings = Object.assign(settings, saved);
+    if (!Array.isArray(settings.providers)) settings.providers = [];
+    settingsLoaded = true;
+  } catch (e) {
+    if (e.status !== 401) toast(t('loadFailed') + errorText(e));
+  }
+}
+
+async function boot() {
+  log('boot', location.host, navigator.userAgent);
+  applyStrings();
+  renderConn();
+  renderComposerState();
+  if (!token) { showView('settings'); return; }
+  await loadSettings();
+  applyStrings();
+  openWorker();
+  await loadConversations();
+
+  if (authOk && !(settings.providers || []).length && view !== 'settings') showView('settings');
+  if (!cur.id) {
+
+    let activeId = null;
+    try { activeId = (await api('GET', '/api/conversations/active') || {}).conversationId || null; } catch (e) {   }
+    const pick = conversations.find((c) => c.id === activeId) || conversations.find((c) => !c.hidden);
+    if (pick && !cur.id) await openConversation(pick.id, pick.id !== activeId);
+  }
+  if (view === 'settings' && authOk) renderSettings();
+}
+
+function wire() {
+  $('btn-list').onclick = () => { if ($('sidebar').classList.contains('open')) closeDrawer(); else openDrawer(); };
+  $('scrim').onclick = closeDrawer;
+  $('btn-new').onclick = newConversation;
+  $('btn-settings').onclick = () => showView(view === 'settings' ? 'chat' : 'settings');
+  $('btn-menu').onclick = (e) => { e.stopPropagation(); if (!cur.id) return; $('menu').hidden = !$('menu').hidden; };
+  document.addEventListener('click', (e) => { if (!$('menu').contains(e.target)) $('menu').hidden = true; });
+  $('menu-rename').onclick = () => { $('menu').hidden = true; renameConversation(); };
+  $('menu-delete').onclick = () => { $('menu').hidden = true; deleteConversation(); };
+  $('banner-close').onclick = () => { $('banner').hidden = true; sessionStorage.setItem('bannerClosed', '1'); };
+  if (sessionStorage.getItem('bannerClosed')) $('banner').hidden = true;
+  $('btn-send').onclick = sendMessage;
+  $('setup-go').onclick = goToSetup;
+  $('btn-stop').onclick = stopGeneration;
+  $('btn-attach').onclick = () => $('file-input').click();
+  $('file-input').onchange = async () => { const files = Array.from($('file-input').files || []); $('file-input').value = ''; await uploadFiles(files); };
+  const input = $('input');
+  input.addEventListener('input', autosize);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && window.matchMedia('(min-width: 901px)').matches) {
+      e.preventDefault();
+      sendMessage();
+    }
+  });
+  input.addEventListener('paste', (e) => {
+    const files = Array.from((e.clipboardData && e.clipboardData.files) || []).filter((f) => /^image\//.test(f.type));
+    if (files.length) { e.preventDefault(); uploadFiles(files); }
+  });
+  window.addEventListener('beforeunload', () => { closeStream(); if (workerES) workerES.close(); });
+}
+
+wire();
+boot();
+</script>
+</body>
+</html>
