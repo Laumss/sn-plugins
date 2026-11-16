@@ -1,15 +1,8 @@
 const {getDefaultConfig, mergeConfig} = require('@react-native/metro-config');
 
-
-
-
-
-
-
-
-
 const config = {
-  cacheVersion: process.env.WITH_LOGS === '1' ? 'with-logs' : 'no-logs',
+
+  cacheVersion: 'console-kept',
 };
 
 module.exports = mergeConfig(getDefaultConfig(__dirname), config);

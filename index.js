@@ -1,263 +1,134 @@
-
-
-import { AppRegistry, Image, DeviceEventEmitter, TurboModuleRegistry } from 'react-native';
-import App from './App';
-import { PluginManager, PluginDocAPI, FileUtils } from 'sn-plugin-lib';
+import { log, reportPluginVersion } from './src/common';
+import { AppRegistry, DeviceEventEmitter, Image, TurboModuleRegistry } from 'react-native';
+import { PluginManager } from 'sn-plugin-lib';
 import pluginSdkPackage from 'sn-plugin-lib/package.json';
-import { ensureInit, stopAllModes, startLocalSend, stopLocalSend } from './components/BackgroundService';
-import { PluginCommAPI } from 'sn-plugin-lib';
-import { loadClips, clipFilledFlags } from './components/ToolPresets';
-import FloatingToolbarBridge, {
-  ENABLE_DEBUG,
-  setPendingButton,
-  isAppMounted,
-  markHostButtonEvent,
-  markHostButtonHandled,
-} from './components/FloatingToolbarBridge';
-import LocalSendBridge from './components/LocalSendBridge';
-import { executeAction } from './components/ToolActions';
-import { setLocale, getLocale } from './components/i18n';
-import { getRNFS } from './components/rnfs';
+import { dispatch } from './src/actions';
+import App, { markHostButtonEvent, markHostButtonHandled } from './src/App';
+import * as capture from './src/capture';
+import * as clipboard from './src/clipboard';
+import { initHost, onHostState } from './src/host';
+import { getLocale, localeFromTag, setLocale, t } from './src/i18n';
+import * as lasso from './src/lasso';
+import * as links from './src/links';
+import * as localSend from './src/localSend';
+import * as mosaic from './src/mosaic';
+import * as relay from './src/relay';
+import { notipalHost, notipalToolbar, onNative } from './src/native';
+import * as textInsert from './src/textInsert';
 
-const DOC_SEND_BUTTON_ID = 301;
-let docSendBusy = false;
+const TAG = 'index';
 
-function registerDocSendButton() {
-  PluginManager.registerButton(3, ['DOC'], {
-    id: DOC_SEND_BUTTON_ID,
-    name: getLocale() === 'zh' ? '发给其他设备' : 'Send to other devices',
+const NOTE_TOOLBAR_BUTTON_ID = 100;
+const DOC_TOOLBAR_BUTTON_ID = 300;
+
+const CLIP_LASSO_BUTTON_ID = 400;
+
+const OLD_DOC_SEND_BUTTON_ID = 301;
+
+function registerClipLassoButton() {
+  PluginManager.registerButton(2, ['NOTE', 'DOC'], {
+    id: CLIP_LASSO_BUTTON_ID,
+    name: t('clip_lasso_button'),
     icon: Image.resolveAssetSource(require('./assets/smart_lasso.png')).uri,
     showType: 0,
-  });
-}
 
-if (!ENABLE_DEBUG) {
-  console.log = () => {};
-  console.warn = () => {};
-  console.info = () => {};
-  console.debug = () => {};
+    editDataTypes: [0, 1, 2, 3, 4, 5],
+  });
 }
 
 AppRegistry.registerComponent('me_laumss_notipal', () => App);
 
-
-
 TurboModuleRegistry.getEnforcing('NativePluginManager').reportSdkVersion(pluginSdkPackage.version);
 PluginManager.init();
+
 setLocale(getLocale());
-
-
-
-
-
-ensureInit();
 reportPluginVersion();
-if (ENABLE_DEBUG) {
-  const names = Object.keys(require('react-native').NativeModules || {});
-  console.log('[index] FloatingToolbar available=', FloatingToolbarBridge.isAvailable, 'nativeModules=', names.join(','));
-}
 
-
-
-
-
-async function reportPluginVersion() {
-  try {
-    const dir = await PluginManager.getPluginDirPath();
-    const RNFS = getRNFS();
-    if (!dir || !RNFS) return;
-    const path = `${dir}/PluginConfig.json`;
-    if (!(await RNFS.exists(path))) return;
-    const configText = await RNFS.readFile(path, 'utf8');
-    const cfg = JSON.parse(configText.replace(/^\uFEFF/, ''));
-    if (cfg && cfg.versionName) {
-      FloatingToolbarBridge.setPluginVersion(String(cfg.versionName), String(cfg.versionCode ?? ''));
-    }
-  } catch (e) {
-    console.warn('[index]: reportPluginVersion failed:', e);
-  }
-}
+onNative('host:state', onHostState);
+onNative('toolbar:action', dispatch);
+onNative('clipboard:clearAll', clipboard.onClearAll);
+onNative('clipboard:sketchRequest', clipboard.onSketchRequest);
+onNative('clipboard:syncApply', clipboard.onSyncApply);
+onNative('lasso:selectionShown', lasso.onSelectionShown);
+onNative('lasso:penBbox', lasso.onPenBbox);
+onNative('lasso:penCancel', lasso.onPenCancel);
+onNative('image:insert', capture.onInsertImage);
+onNative('capture:regionClosed', capture.onRegionClosed);
+onNative('links:insert', links.onInsertLink);
+onNative('text:bubble', textInsert.onBubble);
+onNative('text:bubbleClosed', textInsert.onBubbleClosed);
+onNative('toolbar:closed', textInsert.onToolbarClosed);
+onNative('panel:closed', localSend.onPanelClosed);
+onNative('localsend:text', localSend.onText);
+onNative('localsend:openReceiver', localSend.onOpenReceiver);
+onNative('localsend:prepareImage', localSend.onPrepareImage);
+onNative('relay:action', relay.onAction);
+onNative('relay:insert', relay.onInsert);
+onNative('relay:replyArrived', relay.onReplyArrived);
+onNative('relay:off', relay.onOff);
+initHost();
+clipboard.register();
+lasso.register();
+capture.register();
+links.register();
+textInsert.register();
+localSend.register();
+mosaic.register();
+relay.register();
 
 DeviceEventEmitter.addListener('plugin_button_event', (msg) => {
-  markHostButtonEvent(msg && msg.id);
-  FloatingToolbarBridge.reportHostButtonChannel(true);
-  FloatingToolbarBridge.reportHostButtonRaw('probe ' + JSON.stringify(msg));
-  console.log('[index] raw plugin_button_event:', JSON.stringify(msg));
+  markHostButtonEvent();
+  notipalHost.reportHostButtonChannel(true);
+  log.i(TAG, `raw plugin_button_event: ${JSON.stringify(msg)}`);
 });
-async function refreshTitleClips() {
-  try {
-    const clips = await loadClips();
-    const filled = clipFilledFlags(clips);
-    FloatingToolbarBridge.updateTitleClips(filled);
-  } catch (e) {
-    console.warn('[index]: refreshTitleClips failed:', e);
-  }
-}
 
 PluginManager.registerLangListener({
   onMsg(msg) {
-    const lang = msg.lang || '';
-    const locale = lang.toLowerCase().startsWith('zh') ? 'zh' : 'en';
-    setLocale(locale);
-    registerDocSendButton();
+    setLocale(localeFromTag((msg && msg.lang) || ''));
+
+    registerClipLassoButton();
   },
-});
-
-DeviceEventEmitter.addListener('nativeDeleteFile', async (evt) => {
-  if (evt && evt.path) {
-    try {
-      await FileUtils.deleteFile(evt.path);
-    } catch (e) {
-      console.warn('[index]: nativeDeleteFile failed:', e);
-    }
-  }
-});
-
-DeviceEventEmitter.addListener('startLocalSendFromNative', async (evt) => {
-  console.log('[index]: startLocalSendFromNative silent=', !!(evt && evt.silent));
-  const ok = await startLocalSend(!(evt && evt.silent));
-  if (ok && evt && evt.openClipboardSync) {
-    FloatingToolbarBridge.openSendPanelClipboardSync();
-  }
-});
-
-DeviceEventEmitter.addListener('clipsChanged', async () => {
-  console.log('[index]: clipsChanged (from native sync) → refresh title clips');
-  await refreshTitleClips();
-});
-
-FloatingToolbarBridge.onDestroyAll(() => {
-  console.log('[index]: onDestroyAll → stopAllModes + stopLocalSend');
-  stopAllModes();
-  stopLocalSend();
-});
-
-FloatingToolbarBridge.onToolTap(async ({ toolAction }) => {
-  console.log('[index]: onToolTap action=', toolAction);
-
-  if (toolAction === 'lasso_send') {
-    FloatingToolbarBridge.openPanel('nativeSendHelper');
-    return;
-  }
-
-  if (isAppMounted()) return;
-
-  const result = await executeAction(toolAction);
-  console.log('[index]: executeAction result=', result);
-
-  if (typeof result === 'string' &&
-      (result.startsWith('Saved to clip') || (result.startsWith('Clip') && result.endsWith('cleared')))) {
-    await refreshTitleClips();
-  }
-});
-
-FloatingToolbarBridge.onToolLongPress(async ({ toolId }) => {
-  if (toolId.startsWith('clip_')) {
-    const slot = toolId.split('_')[1];
-    await executeAction(`clip_clear_${slot}`);
-    await refreshTitleClips();
-  }
-});
-
-FloatingToolbarBridge.onTitleClipLongPress(async ({ slot }) => {
-  const clips = await loadClips();
-  if (clips[slot]) {
-    await executeAction(`clip_clear_${slot}`);
-  } else {
-    const result = await executeAction(`clip_save_clear_${slot}`);
-    console.log('[index]: blank clip long press result=', result);
-  }
-  await refreshTitleClips();
 });
 
 PluginManager.registerButtonListener({
   async onButtonPress(event) {
-    FloatingToolbarBridge.reportHostButtonRaw('listener id=' + (event && event.id));
     const buttonId = Number(event && event.id);
     if (!Number.isFinite(buttonId)) {
-      console.warn('[index]: ignored host button event without numeric id:', event);
+      log.w(TAG, `ignored host button event without numeric id: ${JSON.stringify(event)}`);
       return;
     }
-    console.log('[index]: button id=', buttonId);
-
-    if (buttonId === DOC_SEND_BUTTON_ID) {
+    log.i(TAG, `button id=${buttonId}`);
+    if (buttonId === NOTE_TOOLBAR_BUTTON_ID || buttonId === DOC_TOOLBAR_BUTTON_ID) {
       markHostButtonHandled();
-      if (docSendBusy) return;
-      docSendBusy = true;
+      notipalToolbar.toggle(buttonId === DOC_TOOLBAR_BUTTON_ID ? 'doc_notipal' : 'note_notipal');
+      clipboard.refreshTitleClips().catch(e => log.w(TAG, 'title clips refresh failed', e));
+      return;
+    }
+    if (buttonId === CLIP_LASSO_BUTTON_ID) {
+      markHostButtonHandled();
       try {
-        const selection = await PluginDocAPI.getLastSelectedText();
-        const text = selection?.success && typeof selection.result === 'string'
-          ? selection.result : '';
-        if (text.trim() && await startLocalSend()) {
-          FloatingToolbarBridge.showDocTextSendPanel(text);
-        }
-      } catch (error) {
-        console.warn('[index]: document text send failed:', error);
+        await clipboard.onLassoMenuButton();
       } finally {
-        docSendBusy = false;
+
+        PluginManager.closePluginView().catch(e => log.w(TAG, 'lasso menu close plugin view failed', e));
       }
-      return;
     }
-
-    if (buttonId === 100 || buttonId === 300) {
-      
-      
-      
-      markHostButtonHandled();
-      setPendingButton(buttonId);
-      
-      setPendingButton(null);
-    }
-
-    if (buttonId === 100 || buttonId === 300) {
-      const toolbarMode = buttonId === 300 ? 'doc_notipal' : 'note_notipal';
-      console.log('[index]: toolbar entry=', toolbarMode, 'available=', FloatingToolbarBridge.isAvailable, 'showing=', FloatingToolbarBridge.isShowingSync());
-      stopAllModes();
-      const invoked = FloatingToolbarBridge.toggleFromPluginButton(toolbarMode);
-      
-      setPendingButton(null);
-      console.log('[index]: native toolbar toggle invoked=', invoked, 'mode=', toolbarMode);
-      refreshTitleClips();
-      return;
-    }
-
   },
 });
 
-PluginManager.registerButton(1, ['NOTE'], {
-  id: 100,
-  name: 'Inkling',
-  icon: Image.resolveAssetSource(require('./assets/toolbar_icon.png')).uri,
-  showType: 0,
-});
-
-
-
-
-LocalSendBridge.getServerStatus().then(st => {
-  if (FloatingToolbarBridge.isSessionActiveSync()) {
-    console.log('[index]: ensure LocalSend for active toolbar session');
-    startLocalSend(false);
-  } else if (st && st.running) {
-    console.log('[index]: leftover LocalSend with no toolbar session → stop');
-    stopLocalSend();
-  }
-}).catch(() => {});
-
-PluginManager.registerButton(1, ['DOC'], {
-  id: 300,
-  name: 'Inkling',
-  icon: Image.resolveAssetSource(require('./assets/toolbar_icon.png')).uri,
-  showType: 0,
-});
-
-registerDocSendButton();
+const toolbarIcon = Image.resolveAssetSource(require('./assets/toolbar_icon.png')).uri;
+PluginManager.registerButton(1, ['NOTE'], { id: NOTE_TOOLBAR_BUTTON_ID, name: 'Inkling', icon: toolbarIcon, showType: 0 });
+PluginManager.registerButton(1, ['DOC'], { id: DOC_TOOLBAR_BUTTON_ID, name: 'Inkling', icon: toolbarIcon, showType: 0 });
+registerClipLassoButton();
+PluginManager.unregisterButton(OLD_DOC_SEND_BUTTON_ID)
+  .catch(e => log.i(TAG, `old doc send button not unregistered: ${e}`));
 
 PluginManager.registerConfigButton();
 PluginManager.registerConfigButtonListener({
   onClick() {
-    console.log('[index]: config button clicked → opening main panel');
-    setPendingButton(999);
-    DeviceEventEmitter.emit('quickToolbarButton', { id: 999 });
+    log.i(TAG, 'config button clicked');
+
+    markHostButtonHandled();
+    notipalToolbar.openSettings();
   },
 });
