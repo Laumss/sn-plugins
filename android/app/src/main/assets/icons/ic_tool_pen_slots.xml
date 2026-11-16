@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 笔槽（工具栏图标，用户 2026-11-15 定）：墨水笔 · 方案 D「笔尖特写」，原文件 ic_pen_ink__D -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="48" android:viewportHeight="48">
+  <path android:strokeColor="#1A1A1A" android:strokeWidth="4" android:fillColor="#00000000"
+        android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:pathData="M4.19 43.81 L18.03 38.56 L24.72 31.88 L27.1 34.26 L43.81 17.56 L30.44 4.19 L13.74 20.9 L16.12 23.28 L9.44 29.97 Z"/>
+  <path android:strokeColor="#1A1A1A" android:strokeWidth="4" android:fillColor="#00000000"
+        android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:pathData="M32.83 28.53 L19.47 15.17"/>
+</vector>

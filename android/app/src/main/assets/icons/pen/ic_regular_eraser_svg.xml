@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 宿主笔记（SupernoteNote）的 ic_regular_eraser_svg：侧栏的标准橡皮擦，笔槽里的橡皮用它 -->
+<vector android:height="48.0dp" android:width="48.0dp" android:viewportWidth="48.0" android:viewportHeight="48.0"
+  xmlns:android="http://schemas.android.com/apk/res/android">
+    <path android:fillColor="#00000000" android:pathData="M25.238,35.282 L10.672,20.736a1.838,1.838 0,0 1,-0.042 -2.6L25.271,3.517a1.842,1.842 0,0 1,2.6 0.042L42.439,18.108a1.838,1.838 0,0 1,0.043 2.6L27.842,35.324A1.843,1.843 0,0 1,25.238 35.282Z" android:strokeColor="#ff000000" android:strokeWidth="4.0" />
+    <path android:fillColor="#00000000" android:pathData="M14.289,38.958a1.277,1.277 0,0 1,-1.221 -0.312l-0.429,-0.428 -0.214,-0.211 -0.307,-0.307L10.581,36.166 9.044,34.632 7.507,33.098 5.97,31.564l-0.615,-0.614a1.373,1.373 0,0 1,0.1 -1.938h0l1.019,-1.018L7.489,26.977 8.509,25.959l1.02,-1.018 1.019,-1.018 1.02,-1.018L12.589,21.888l1.537,1.533 1.537,1.534 1.538,1.534 1.537,1.534 1.537,1.533 1.537,1.534 1.537,1.534 1.538,1.534 -1.02,1.018 -1.019,1.018 -0.679,0.678 -0.341,0.34h0l-0.229,0.228 -0.608,0.607a2.07,2.07 0,0 1,-0.96 0.546Z" android:strokeColor="#ff000000" android:strokeWidth="4.0" />
+    <path android:fillColor="#00000000" android:pathData="M4,45L44,45" android:strokeColor="#ff000000" android:strokeWidth="4.0" android:strokeLineCap="round" />
+</vector>

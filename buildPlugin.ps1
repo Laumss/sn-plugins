@@ -784,7 +784,7 @@ function Build-AndroidApk {
         Set-Location $androidDir
 
         $apkTask = 'buildCustomApkDebug'
-        $debugProp = if (Test-WithLogsEnabled) { '-PinklingEnableDebug=true' } else { '-PinklingEnableDebug=false' }
+        $debugProp = if (Test-WithLogsEnabled) { '-PinklingDevBuild=true' } else { '-PinklingDevBuild=false' }
 
         $gradlewPath = Join-Path $androidDir 'gradlew.bat'
         if (Test-Path $gradlewPath) {
@@ -909,16 +909,9 @@ function Build-ReactNativeBundle {
     Write-ColorOutput 'Starting React Native bundling...' 'Blue'
 
     if (Test-WithLogsEnabled) {
-        Write-ColorOutput 'Log mode: INCLUDED (JS logs retained, native ENABLE_DEBUG=true)' 'Yellow'
+        Write-ColorOutput 'Log mode: LOGCAT (dev build: logs go to logcat, DEV_BUILD=true)' 'Yellow'
     } else {
-        Write-ColorOutput 'Log mode: STRIPPED (JS logs removed, native ENABLE_DEBUG=false)' 'Blue'
-    }
-
-    Write-ColorOutput 'Copying mathjax from node_modules...' 'Blue'
-    & npm run copy-mathjax --prefix $ProjectRoot
-    if ($LASTEXITCODE -ne 0) {
-        Write-ColorOutput 'MathJax asset preparation failed; cannot continue bundling' 'Red'
-        return $false
+        Write-ColorOutput 'Log mode: FILE (logs go to the plugin log file, exported from settings; DEV_BUILD=false)' 'Blue'
     }
 
     $debugKeystore = Join-Path $androidDir 'app\debug.keystore'

@@ -1,17 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
-
+<!-- 文字接收 · 方案 B「光标 + 下箭头」：输入光标 + 落下的文字（与悬浮气泡同语义），高度压到 24，比其他侧栏图标矮 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp" android:height="24dp"
-    android:viewportWidth="24" android:viewportHeight="24">
-  <path android:strokeColor="#1A1A1A" android:strokeWidth="2" android:fillColor="#00000000"
+    android:viewportWidth="48" android:viewportHeight="48">
+  <path android:strokeColor="#1A1A1A" android:strokeWidth="4" android:fillColor="#00000000"
         android:strokeLineCap="round" android:strokeLineJoin="round"
-        android:pathData="M10,8 H5 A1.5,1.5 0 0 0 3.5,9.5 V19.5 A1.5,1.5 0 0 0 5,21 H19 A1.5,1.5 0 0 0 20.5,19.5 V9.5 A1.5,1.5 0 0 0 19,8 H14"/>
-  <path android:strokeColor="#1A1A1A" android:strokeWidth="2" android:fillColor="#00000000"
+        android:pathData="M8 12 L20 12 M14 12 L14 36 M8 36 L20 36"/>
+  <path android:strokeColor="#1A1A1A" android:strokeWidth="4" android:fillColor="#00000000"
         android:strokeLineCap="round" android:strokeLineJoin="round"
-        android:pathData="M12,2.5 V9"/>
-  <path android:fillColor="#1A1A1A"
-        android:pathData="M8.6 8.6 L15.4 8.6 L12 12.6 Z"/>
-  <path android:strokeColor="#1A1A1A" android:strokeWidth="2" android:fillColor="#00000000"
+        android:pathData="M34 12 L34 36"/>
+  <path android:strokeColor="#1A1A1A" android:strokeWidth="4" android:fillColor="#00000000"
         android:strokeLineCap="round" android:strokeLineJoin="round"
-        android:pathData="M7,15.5 H17 M7,18.3 H13"/>
+        android:pathData="M39 31 L34 36 L29 31"/>
 </vector>

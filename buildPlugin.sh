@@ -220,7 +220,7 @@ find_manual_react_packages_from_application() {
         done < <(find "$dir" -type f \( -name '*.java' -o -name '*.kt' \) -print0 2>/dev/null)
     done
 
-    if [[ ${
+    if [[ ${#found[@]} -gt 0 ]]; then
         mapfile -t APPLICATION_PACKAGES < <(printf '%s\n' "${found[@]}" | sort -u)
     else
         APPLICATION_PACKAGES=()
@@ -309,7 +309,7 @@ get_react_packages_from_autolinking_source() {
         [[ "$fqcn" == *Package ]] && AUTOLINKING_PACKAGES+=("$fqcn")
     done < <(echo "$text" | grep -oP 'new\s+\K[A-Za-z0-9_.]+(?=\s*\()' 2>/dev/null || true)
 
-    if [[ ${
+    if [[ ${#AUTOLINKING_PACKAGES[@]} -gt 0 ]]; then
         mapfile -t AUTOLINKING_PACKAGES < <(printf '%s\n' "${AUTOLINKING_PACKAGES[@]}" | sort -u)
     fi
 
@@ -338,7 +338,7 @@ update_plugin_config_packages() {
     shift
     local packages=("$@")
 
-    if [[ ${
+    if [[ ${#packages[@]} -eq 0 ]]; then
         print_color "No ReactPackage implementations found, skipping PluginConfig.json update" Yellow
         return
     fi
@@ -358,7 +358,7 @@ update_plugin_config_packages() {
 
     local all_pkgs=("me.laumss.notipal.InklingPackages" "${packages[@]}")
     local unique_pkgs=()
-    if [[ ${
+    if [[ ${#all_pkgs[@]} -gt 0 ]]; then
         mapfile -t unique_pkgs < <(printf '%s\n' "${all_pkgs[@]}" | awk 'NF && !seen[$0]++')
     fi
 
@@ -396,12 +396,6 @@ PY
 build_react_native_bundle() {
     local output_dir="$1"
     local bundle_output="$output_dir/${PKG_NAME}.bundle"
-
-    print_color "Copying mathjax from node_modules..." Blue
-    if ! (cd "$PROJECT_ROOT" && npm run copy-mathjax); then
-        print_color "MathJax asset preparation failed; cannot continue bundling" Red
-        return 1
-    fi
 
     print_color "Starting React Native bundling..." Blue
     print_color "Executing: npx react-native bundle ..." Yellow
@@ -443,9 +437,9 @@ build_android_apk() {
     fi
 
     local task="buildCustomApkDebug"
-    local debug_prop="-PinklingEnableDebug=false"
+    local debug_prop="-PinklingDevBuild=false"
     if [[ "${WITH_LOGS:-}" == "1" ]]; then
-        debug_prop="-PinklingEnableDebug=true"
+        debug_prop="-PinklingDevBuild=true"
     fi
 
     if [[ -f "$android_dir/gradlew" ]]; then
@@ -614,9 +608,9 @@ main() {
         esac
     done
     if [[ "${WITH_LOGS:-}" == "1" ]]; then
-        print_color "Log mode: INCLUDED (JS logs retained, native ENABLE_DEBUG=true)" Yellow
+        print_color "Log mode: LOGCAT (dev build: logs go to logcat, DEV_BUILD=true)" Yellow
     else
-        print_color "Log mode: STRIPPED (JS logs removed, native ENABLE_DEBUG=false)" Blue
+        print_color "Log mode: FILE (logs go to the plugin log file, exported from settings; DEV_BUILD=false)" Blue
     fi
 
     print_color "Running on Linux (bash)" Blue
@@ -707,7 +701,7 @@ with open(p, 'w', encoding='utf-8') as f:
 
     print_color "=== Step 9: Build condition check ===" Blue
     local should_build=false
-    if [[ ${
+    if [[ ${#PROJECT_PACKAGES[@]} -gt 0 || ${#APPLICATION_PACKAGES[@]} -gt 0 || ${#NATIVE_MODS[@]} -gt 0 ]]; then
         should_build=true
     fi
 
@@ -740,7 +734,7 @@ with open(p, 'w', encoding='utf-8') as f:
         all_pkgs+=("${APPLICATION_PACKAGES[@]+"${APPLICATION_PACKAGES[@]}"}")
         all_pkgs+=("${AUTOLINKING_PACKAGES[@]+"${AUTOLINKING_PACKAGES[@]}"}")
         local dedup_pkgs=()
-        if [[ ${
+        if [[ ${#all_pkgs[@]} -gt 0 ]]; then
             mapfile -t dedup_pkgs < <(printf '%s\n' "${all_pkgs[@]}" | sort -u)
         fi
 

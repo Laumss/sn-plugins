@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 笔槽竖条收起后的圆形按钮（用户 2026-11-15 定）：针管笔 · 方案 B「竖放」，原文件 ic_pen_needle__B -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="48" android:viewportHeight="48">
+  <path android:strokeColor="#1A1A1A" android:strokeWidth="4" android:fillColor="#00000000"
+        android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:pathData="M24 44 L28.5 30 L28.5 4 L19.5 4 L19.5 30 Z"/>
+  <path android:strokeColor="#1A1A1A" android:strokeWidth="4" android:fillColor="#00000000"
+        android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:pathData="M28.5 24 L19.5 24"/>
+</vector>

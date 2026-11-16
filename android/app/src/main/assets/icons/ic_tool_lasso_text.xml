@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 套索场景 ① 手写转文字 · 方案 D「圈 + 笔」：套索圈住的手写笔迹 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="48" android:viewportHeight="48">
+  <path android:strokeColor="#1A1A1A" android:strokeWidth="4" android:fillColor="#00000000"
+        android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:pathData="M24 7 C25.48 6.93 27.22 6.92 28.98 7.03 M35.45 8.3 C36.5 8.72 37.41 9.26 38.12 9.94 C38.54 10.35 38.91 10.84 39.24 11.38 M41.26 17.64 C41.53 19.31 41.67 21.02 41.73 22.6 M41.47 29.2 C41.26 30.88 40.92 32.56 40.41 34.06 M36.48 39.16 C35.14 39.89 33.49 40.36 31.74 40.65 M25.15 41.03 C24.89 41.02 24.63 41.01 24.37 41 C23.04 40.93 21.62 40.77 20.2 40.51 M13.92 38.51 C12.83 37.97 11.84 37.34 10.99 36.6 C10.64 36.28 10.28 35.94 9.93 35.56 M6.26 30.1 C5.5 28.53 4.95 26.9 4.71 25.38 M5.75 18.95 C6.4 17.46 7.28 15.98 8.25 14.65 M12.94 10.04 C14.3 9.17 15.86 8.52 17.49 8.04"/>
+  <path android:strokeColor="#1A1A1A" android:strokeWidth="4" android:fillColor="#00000000"
+        android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:pathData="M16.5 33 L23.15 31.16 L33.05 21.26 L28.24 16.45 L18.34 26.35 Z"/>
+</vector>

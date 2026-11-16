@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 套索场景 ② 发送选中的文本 / 链接 · 方案 A「圈(T) + →」：圈住的文字被送出去 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="48" android:viewportHeight="48">
+  <path android:strokeColor="#1A1A1A" android:strokeWidth="4" android:fillColor="#00000000"
+        android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:pathData="M17.09 8.97 C18.57 9.05 20.15 9.34 21.42 10.1 M24.3 15.11 C24.59 16.49 24.79 18.03 24.91 19.58 M25.07 25.55 C25.03 27 24.95 28.55 24.77 30.04 M23.33 35.81 C23.22 36.01 23.12 36.19 23 36.36 C22.27 37.46 21.15 38.14 19.9 38.54 M13.99 38.84 C12.59 38.58 11.12 38.05 9.82 37.19 M6.16 32.58 C5.56 31.3 5.02 29.83 4.63 28.35 M4.06 22.43 C4.22 21.02 4.6 19.5 5.11 18.06 M7.8 12.75 C7.82 12.72 7.85 12.68 7.87 12.65 C8.81 11.4 9.99 10.52 11.26 9.94"/>
+  <path android:strokeColor="#1A1A1A" android:strokeWidth="4" android:fillColor="#00000000"
+        android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:pathData="M11.2 18 L18.8 18 M15 18 L15 30"/>
+  <path android:strokeColor="#1A1A1A" android:strokeWidth="4" android:fillColor="#00000000"
+        android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:pathData="M32 24 L44 24"/>
+  <path android:strokeColor="#1A1A1A" android:strokeWidth="4" android:fillColor="#00000000"
+        android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:pathData="M40.11 20.11 L44 24 L40.11 27.89"/>
+</vector>

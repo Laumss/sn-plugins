@@ -1,17 +1,13 @@
 {
   "name": "plugin_notipal",
-  "version": "0.0.1",
+  "version": "0.3.0",
   "private": true,
   "scripts": {
     "android": "react-native run-android",
     "start": "react-native start",
-    "lint": "eslint .",
-    "test": "jest",
-    "copy-mathjax": "node -e \"const fs=require('fs');const src='node_modules/mathjax/es5/tex-svg.js';const dst='android/app/src/main/assets/formula/tex-svg.js';fs.mkdirSync('android/app/src/main/assets/formula',{recursive:true});if(fs.existsSync(src)){fs.copyFileSync(src,dst);console.log('mathjax copied from node_modules');}else if(fs.existsSync(dst)){console.warn('mathjax package is unavailable; keeping bundled formula asset');}else{console.error('MathJax asset is missing from node_modules and android/app/src/main/assets/formula');process.exit(1);}\""
+    "lint": "eslint ."
   },
   "dependencies": {
-    "@react-native-community/image-editor": "^4.3.0",
-    "mathjax": "3.2.2",
     "react": "19.0.0",
     "react-native": "0.79.2",
     "react-native-fs": "^2.20.0",

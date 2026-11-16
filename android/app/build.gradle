@@ -1,6 +1,5 @@
 apply plugin: "com.android.application"
 apply plugin: "org.jetbrains.kotlin.android"
-apply plugin: "org.jetbrains.kotlin.plugin.compose"
 apply plugin: "com.facebook.react"
 
 def processCustomApk(String buildType) {
@@ -152,22 +151,25 @@ android {
     buildTypes {
         
         
-        def inklingDbg = findProperty("inklingEnableDebug")?.toString()?.toLowerCase()
-        def debugEnableDebug = (inklingDbg == "false") ? "false" : "true"
-        def releaseEnableDebug = (inklingDbg == "true") ? "true" : "false"
+        // DEV_BUILD: packed with --with-logs (the scripts pass -PinklingDevBuild=true). Logs go to logcat and
+        // features still in development are on. Otherwise logs go to the plugin's log file, exported from settings.
+        // ENABLE_DEBUG: produce debug logs at all; on in both, -PinklingDebugLogs=false compiles them out.
+        def devProp = findProperty("inklingDevBuild")?.toString()?.toLowerCase()
+        def debugDevBuild = (devProp == "false") ? "false" : "true"
+        def releaseDevBuild = (devProp == "true") ? "true" : "false"
+        def debugLogs = (findProperty("inklingDebugLogs")?.toString()?.toLowerCase() == "false") ? "false" : "true"
         debug {
             signingConfig signingConfigs.debug
-            buildConfigField "boolean", "ENABLE_DEBUG", debugEnableDebug
+            buildConfigField "boolean", "ENABLE_DEBUG", debugLogs
+            buildConfigField "boolean", "DEV_BUILD", debugDevBuild
         }
         release {
-            buildConfigField "boolean", "ENABLE_DEBUG", releaseEnableDebug
+            buildConfigField "boolean", "ENABLE_DEBUG", debugLogs
+            buildConfigField "boolean", "DEV_BUILD", releaseDevBuild
             signingConfig signingConfigs.debug
             minifyEnabled enableProguardInReleaseBuilds
             proguardFiles getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro"
         }
-    }
-    buildFeatures {
-        compose true
     }
     aaptOptions {
         additionalParameters "--package-id", "0x71", "--allow-reserved-package-id"
@@ -181,21 +183,13 @@ android {
 dependencies {
 
     
-    def composeBom = platform("androidx.compose:compose-bom:2023.10.01")
-    implementation(composeBom)
-    implementation("androidx.compose.foundation:foundation")
-    implementation("androidx.compose.material3:material3")
-    implementation("androidx.compose.ui:ui")
-    implementation("androidx.compose.runtime:runtime")
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
-    implementation("androidx.lifecycle:lifecycle-viewmodel:2.8.7")
-    implementation("androidx.savedstate:savedstate:1.2.1")
     implementation("org.java-websocket:Java-WebSocket:1.5.7")
+    implementation("com.google.zxing:core:3.5.3")
 
     implementation("com.facebook.react:react-android")
 
-    
-    
+    // 宿主 plugincommon 数据类（Element / PluginAPIResponse 等）。运行时由 PluginHost 提供，
+    // 这里只参与编译，供原生 getElements + VectorPageRenderer 使用（与 hardcopy 同源）。
     compileOnly files("$rootDir/../node_modules/sn-plugin-lib/android/libs/plugincommonlib.aar")
 
     if (hermesEnabled.toBoolean()) {

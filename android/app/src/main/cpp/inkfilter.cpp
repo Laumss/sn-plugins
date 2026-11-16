@@ -1,4 +1,3 @@
-
 #include <jni.h>
 #include <android/bitmap.h>
 #include <android/log.h>
@@ -14,7 +13,6 @@ constexpr const char* kTag = "InkFilter";
 constexpr int FILTER_NONE = 0;
 constexpr int FILTER_ENHANCE = 1;
 constexpr int FILTER_TEXT_BW = 2;
-
 
 constexpr int BG_SHIFT = 3;
 constexpr int BG_SCALE = 1 << BG_SHIFT;
@@ -33,7 +31,6 @@ inline uint8_t clamp255(int v) {
     return static_cast<uint8_t>(v < 0 ? 0 : (v > 255 ? 255 : v));
 }
 
-
 void buildLut(uint8_t lut[256], bool enhance, int density) {
     const float alpha = static_cast<float>(density) / 100.f;
     for (int i = 0; i < 256; i++) {
@@ -46,7 +43,6 @@ void buildLut(uint8_t lut[256], bool enhance, int density) {
         lut[i] = clamp255(static_cast<int>(out + 0.5f));
     }
 }
-
 
 void dilateSmall(std::vector<uint8_t>& img, int w, int h, int radius) {
     std::vector<uint8_t> tmp(img.size());
@@ -71,7 +67,6 @@ void dilateSmall(std::vector<uint8_t>& img, int w, int h, int radius) {
         }
     }
 }
-
 
 void boxBlurSmall(std::vector<uint8_t>& img, int w, int h, int radius) {
     std::vector<uint8_t> tmp(img.size());
@@ -103,7 +98,6 @@ void boxBlurSmall(std::vector<uint8_t>& img, int w, int h, int radius) {
     }
 }
 
-
 struct BilinearAxis {
     std::vector<int> i0, i1, frac;
     void build(int fullLen, int smallLen) {
@@ -111,7 +105,7 @@ struct BilinearAxis {
         i1.resize(fullLen);
         frac.resize(fullLen);
         for (int x = 0; x < fullLen; x++) {
-            
+
             int f = (x << 5) - 112;
             if (f < 0) f = 0;
             int idx = f >> 8;
@@ -132,7 +126,7 @@ int processBitmap(uint32_t* pixels, int w, int h, int strideBytes, int filter, i
     buildLut(lut, filter == FILTER_ENHANCE, density);
 
     if (densityOnly) {
-        
+
         for (int y = 0; y < h; y++) {
             uint32_t* row = pixels + y * stridePx;
             for (int x = 0; x < w; x++) {
@@ -148,7 +142,6 @@ int processBitmap(uint32_t* pixels, int w, int h, int strideBytes, int filter, i
         return 0;
     }
 
-    
     std::vector<uint8_t> gray(static_cast<size_t>(w) * h);
     for (int y = 0; y < h; y++) {
         const uint32_t* row = pixels + y * stridePx;
@@ -164,7 +157,6 @@ int processBitmap(uint32_t* pixels, int w, int h, int strideBytes, int filter, i
         }
     }
 
-    
     const int sw = std::max(1, (w + BG_SCALE - 1) / BG_SCALE);
     const int sh = std::max(1, (h + BG_SCALE - 1) / BG_SCALE);
     std::vector<uint8_t> bg(static_cast<size_t>(sw) * sh);
@@ -191,7 +183,6 @@ int processBitmap(uint32_t* pixels, int w, int h, int strideBytes, int filter, i
     boxBlurSmall(bg, sw, sh, BLUR_RADIUS);
     for (auto& v : bg) v = std::max<uint8_t>(v, BG_FLOOR);
 
-    
     BilinearAxis ax, ay;
     ax.build(w, sw);
     ay.build(h, sh);
@@ -225,10 +216,10 @@ int processBitmap(uint32_t* pixels, int w, int h, int strideBytes, int filter, i
     return 0;
 }
 
-}  
+}
 
 extern "C" JNIEXPORT jint JNICALL
-Java_me_laumss_notipal_ImageFilter_nativeProcess(
+Java_me_laumss_notipal_common_Bitmaps_nativeProcess(
         JNIEnv* env, jclass , jobject jbitmap, jint filter, jint density) {
     if (jbitmap == nullptr) return -1;
 

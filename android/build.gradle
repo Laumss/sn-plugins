@@ -15,14 +15,17 @@ buildscript {
         classpath("com.android.tools.build:gradle")
         classpath("com.facebook.react:react-native-gradle-plugin")
         classpath("org.jetbrains.kotlin:kotlin-gradle-plugin")
-        classpath("org.jetbrains.kotlin:compose-compiler-gradle-plugin:${kotlinVersion}")
     }
 }
 
 def isWindows = System.getProperty('os.name').toLowerCase().contains('windows')
 def localProps = file("${rootDir}/local.properties")
 def lines = []
-if (isWindows) {
+def ciSdk = System.getenv('CI') ? (System.getenv('ANDROID_HOME') ?: System.getenv('ANDROID_SDK_ROOT')) : null
+if (ciSdk) {
+    // CI：SDK、NDK、CMake 都从 runner 的 Android SDK 取
+    lines << "sdk.dir=${ciSdk}"
+} else if (isWindows) {
     lines << 'sdk.dir=C:/Users/Yalums/AppData/Local/Android/Sdk'
 } else {
     lines << 'sdk.dir=/mnt/c/Users/Yalums/AppData/Local/Android/Sdk'
