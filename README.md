@@ -6,18 +6,19 @@ Notipal is a floating toolbox plugin for Supernote. It grew up alongside Mosaic,
 
 Highlights
 
-➤ Eight shared clipboards that remove the wall between Notes, Documents, Mosaic, and Sketch. Save handwriting, stickers, text boxes, links, and images, then paste them wherever you need them.
-➤ LocalSend built in for quick Wi-Fi transfers with your phone, tablet, or computer. Move screenshots, recognized handwriting, web text, images, and documents back and forth, or sync all eight clipboard slots across two Supernotes.
-➤ Smart Lasso that adapts to what you select. Lassoed handwriting goes out as recognized text, text boxes and document selections travel as clean text, and a link to another file sends the linked document itself. With nothing selected, draw around any part of the screen to crop it.
-➤ Pen Slots, a slim vertical bar for switching pens, erasers, and the lasso in one tap, including thicker nibs and wider erasers than Supernote's stock menu.
-➤ AI Relay, built around E Ink's pace. Ask about a handwritten paragraph, a cropped figure, or an equation, and watch the reply stream onto the page from RikkaHub on your phone or a local browser tab opened by scanning a QR code.
+- Eight shared clipboards that remove the wall between Notes, Documents, Mosaic, and Sketch. Save handwriting, stickers, text boxes, links, and images, then paste them wherever you need them.
+- LocalSend built in for quick Wi-Fi transfers with your phone, tablet, or computer. Move screenshots, recognized handwriting, web text, images, and documents back and forth, or sync all eight clipboard slots across two Supernotes.
+- Smart Lasso that adapts to what you select. Lassoed handwriting goes out as recognized text, text boxes and document selections travel as clean text, and a link to another file sends the linked document itself. With nothing selected, draw around any part of the screen to crop it.
+- Pen Slots, a slim vertical bar for switching pens, erasers, and the lasso in one tap, including thicker nibs and wider erasers than Supernote's stock menu.
+- AI Relay, built around E Ink's pace. Ask about a handwritten paragraph, a cropped figure, or an equation, and watch the reply stream onto the page from RikkaHub on your phone or a local browser tab opened by scanning a QR code.
 
 If you install Mosaic alongside Notipal, you also get:
 
-➤ Quick Switch inside Notes and Documents. Swipe up from the bottom edge of any page to jump straight to recent notes, PDFs, or boards without opening Mosaic first.
-➤ Sketch, a small scratch pad tucked inside Quick Switch that acts like a sticky note. Jot down a phone number or passing thought, or park a whiteboard card here to keep an outline or formula in view.
-➤ Document screenshots and stitching. Crop passages from a PDF, stitch consecutive pages into a vertical strip or grid, and queue them for a note or send them straight to Mosaic.
-➤ Read and write on top (Nomad and Manta). Float a translucent Mosaic board over a document, take notes inside a vertically scrolling Note Card, and turn the pages underneath with the side slider.
+- Quick Switch inside Notes and Documents. Swipe up from the bottom edge of any page to jump straight to recent notes, PDFs, or boards without opening Mosaic first.
+- Sketch, a small scratch pad tucked inside Quick Switch that acts like a sticky note. Jot down a phone number or passing thought, or park a whiteboard card here to keep an outline or formula in view.
+- Document screenshots and stitching. Crop passages from a PDF, stitch consecutive pages into a vertical strip or grid, and queue them for a note or send them straight to Mosaic.
+- Read and write on top (Nomad and Manta). Float a translucent Mosaic board over a document, take notes inside a vertically scrolling Note Card, and turn the pages underneath with the side slider.
+- Two-way flow between notes, documents, and the whiteboard. Import note or PDF pages straight onto a board as cards, and insert any area of a board back into a note as a live-updating image that jumps right back to that spot when tapped.
 
 ---
 
@@ -25,11 +26,11 @@ Quick Start
 Search for Notipal and Mosaic in InkHub on your Supernote to install them directly.
 
 What you need depends on what you plan to use:
-➤ Toolbar, clipboards, pen slots, and screenshots only need a Supernote with plugin support.
-➤ Sending and receiving files or text needs Wi-Fi and the free, open-source LocalSend app from F-droid, Google Play. Microsoft Store, App Store on your other device.
-➤ AI Relay needs any browser or an Android phone running RikkaHub with a model provider API key on the same Wi-Fi.
-➤ The whiteboard, Quick Switch, and Sketch come from the Mosaic plugin in InkHub.
-➤ Exporting a PDF with your handwritten annotations baked in uses the DocuCraft plugin, also in InkHub.
+- Toolbar, clipboards, pen slots, and screenshots only need a Supernote with plugin support.
+- Sending and receiving files or text needs Wi-Fi and the free, open-source LocalSend app from F-Droid, Google Play, Microsoft Store, or App Store on your other device.
+- AI Relay needs any browser or an Android phone running RikkaHub with a model provider API key on the same Wi-Fi.
+- The whiteboard, Quick Switch, and Sketch come from the Mosaic plugin in InkHub.
+- Exporting a PDF with your handwritten annotations baked in uses the DocuCraft plugin, also in InkHub.
 
 You can open Notipal from the Note or Document's plugin tool menu, or tap Clipboard in any lasso menu to save a selection right away. On first launch, choose Always allow for file and network permissions so background tools keep working reliably.
 
@@ -88,8 +89,8 @@ Running a full AI client directly on E Ink rarely feels good, so AI Relay lets a
 AI Relay starts off by default. Turn it on under Optional Tools in Settings, or flip the permanent off switch on the same page if you want your tablet to stay strictly offline and AI-free.
 
 There are two ways to connect:
-➤ Pair with RikkaHub on Android (recommended). Once paired on the same Wi-Fi, questions pick up right inside the conversation open on your phone, voice prompts use your phone's mic, and Lexi and DocuCraft share the same connection.
-➤ Host a local web page from the Supernote. Scan the QR code on a phone or open the address in a computer browser, then enter your API key (OpenAI, Anthropic, Google Gemini, DeepSeek, OpenRouter, or any OpenAI-compatible endpoint). Your provider settings stay saved on the Supernote.
+- Pair with RikkaHub on Android (recommended). Once paired on the same Wi-Fi, questions pick up right inside the conversation open on your phone, voice prompts use your phone's mic, and Lexi and DocuCraft share the same connection.
+- Host a local web page from the Supernote. Scan the QR code on a phone or open the address in a computer browser, then enter your API key (OpenAI, Anthropic, Google Gemini, DeepSeek, OpenRouter, or any OpenAI-compatible endpoint). Your provider settings stay saved on the Supernote.
 
 You can type a question directly, pull recognized handwriting or document text from a selection, switch to Formula mode to attach handwritten math as a crisp image, crop any area on screen, or record voice via RikkaHub. Replies arrive with Markdown and LaTeX properly typeset. Expand the window, select the lines worth keeping, and tap Insert: prose lands as text boxes or cards, while equations are drawn directly onto the page as pen strokes. Keep the window floating, full screen, or tucked into a round bubble, with a searchable Inbox for past chats and favorites.
 
@@ -111,12 +112,14 @@ Open Settings from Notipal's entry in the Supernote plugin manager to reorder to
 
 When a fixed-width notebook page runs out of room right as an idea starts branching out, Mosaic gives you an open handwriting whiteboard. Write anywhere, group strokes into cards, connect thoughts with bridges, and keep as many separate boards as your projects need.
 
+Mosaic is built to feel right at home alongside Supernote's native Notes and Documents apps. It closely matches the brush feel of native notes and documents, and carries over familiar side-slider gestures, screen gestures, and stylus side-button behavior so you do not have to relearn muscle memory when switching to the whiteboard.
+
 Quick Switch and Sketch
 With Mosaic installed, swipe up from the bottom edge of any note, document, or board to open a drawer with two tabs: Recent and Sketch.
 
 Recent lists your boards alongside recent notes and PDFs (showing covers and reading progress), so you can jump straight back to any page or start a new board without going through the file manager.
 
-Sketch is a small handwriting pad inside the same drawer that works like a sticky note on the corner of your desk. It has its own mini-toolbar (three pens, eraser, and lasso), saves automatically, and ties into Notipal's shared clipboard at native note scale. Through the Card Box, you can copy any whiteboard card into Sketch to keep a formula sheet or outline one swipe away, or promote your Sketch notes onto a board as a text card.
+Sketch is a small handwriting pad inside the same drawer that works like a sticky note on the corner of your desk. It has its own mini-toolbar (three pens, eraser, and lasso), saves automatically, and ties into Notipal's shared clipboard at native note scale. Sketch supports two-finger tap to undo and three-finger tap to redo, along with the side slider and two-finger screen gestures (aside from side-slider undo and redo). Through the Card Box, you can copy any whiteboard card into Sketch to keep a formula sheet or outline one swipe away, or promote your Sketch notes onto a board as a text card.
 
 Notipal on the Whiteboard
 Start Notipal while Mosaic is open and the toolbar adapts automatically, working both on the open canvas and inside Note Cards. Your eight clipboards move freely between notes, documents, Sketch, and boards. Screenshots, Insert Image, Text Receive, and AI Relay land directly as image or text cards. Pen Slots and Ink Palette drive whiteboard ink.
@@ -131,9 +134,9 @@ Turn on Board translucency in the side menu and dial the opacity between 10% and
 A setup worth trying: open a PDF, launch Mosaic with translucency and slider page turn enabled, create a Note Card, and open it. You get an endlessly scrolling vertical sheet for notes while flicking the side slider to turn book pages underneath, much like a reMarkable.
 
 Whiteboard
-A compact, draggable capsule (horizontal or vertical) holds four pen slots, an eraser, and a lasso, while the side menu handles zoom, undo and redo, boards, Card Box, backup, templates, translucency, and page turn mode. Each pen slot can hold a calligraphy pen, fineliner, marker, or a pencil with paper grain and tilt response.
+A compact, draggable capsule (horizontal or vertical) holds four pen slots, an eraser, and a lasso, while the side menu handles zoom, undo and redo, boards, Card Box, backup, templates, translucency, and page turn mode. Each pen slot can hold a calligraphy pen, fineliner, marker, or a pencil with paper grain and tilt response, tuned to stay close to Supernote's native pen feel.
 
-The canvas, every card, and every bridge act as independent writing surfaces with palm rejection and automatic white ink over dark backgrounds. There is no separate shape tool: pause your pen for half a second at the end of a stroke to snap clean lines, triangles, ellipses, or polygons, with optional geometry snapping (square, golden ratio, A-paper, equilateral, right-angled, and more).
+The canvas, every card, and every bridge act as independent writing surfaces with palm rejection and automatic white ink over dark backgrounds. You can use the side slider for undo and redo, pinch to zoom, drag with two fingers to pan, and use your stylus button just as you would in Notes and Documents. There is no separate shape tool: pause your pen for half a second at the end of a stroke to snap clean lines, triangles, ellipses, or polygons, with optional geometry snapping (square, golden ratio, A-paper, equilateral, right-angled, and more).
 
 Working with cards stays gesture-driven. Draw a rough rectangle around strokes and pause to wrap them into a card, pull a stroke out from inside a card to spawn a connected one, draw a bracket along an edge to stretch it, or lasso handwriting to convert it into a typed text card (where the marker works as a smart text highlighter). Slide same-color cards together to link them with flexible bridges, write on a bridge to lock a group, or draw a thin connecting thread between any two cards.
 
@@ -141,6 +144,8 @@ Note Cards open into tall vertical notebook pages, Document Cards hold imported 
 
 Boards, Card Box, and Backup
 Create as many boards as you need, either blank or generated straight from a note or PDF (non-PDF documents can convert through DocuCraft first). Each board remembers its own cards, template, translucency, and viewport. Use Card Box to carry cards between boards, including your Sketch pad. Boards save automatically, and you can export or import backups from `/sdcard/EXPORT/Notipal/mosaic/`.
+
+---
 
 In Development: Web Sync and Inkflow
 
